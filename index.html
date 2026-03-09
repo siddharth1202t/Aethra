@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Aethra</title>
+
   <style>
     * {
       margin: 0;
@@ -12,16 +13,26 @@
       font-family: "Segoe UI", Arial, sans-serif;
     }
 
-    body {
-      min-height: 100vh;
-      overflow: hidden;
+    html, body {
+      width: 100%;
+      overflow-x: hidden;
       background:
         radial-gradient(circle at 20% 20%, rgba(122, 92, 255, 0.25), transparent 28%),
         radial-gradient(circle at 80% 25%, rgba(84, 199, 255, 0.18), transparent 24%),
         radial-gradient(circle at 50% 80%, rgba(172, 86, 255, 0.18), transparent 28%),
         linear-gradient(135deg, #090018, #12052c 40%, #1b0b3f 70%, #120523);
       color: white;
+    }
+
+    body {
       position: relative;
+      min-height: 100vh;
+    }
+
+    .hero-section {
+      position: relative;
+      min-height: 100vh;
+      overflow: hidden;
     }
 
     .space-layer,
@@ -69,13 +80,13 @@
       animation: shooting 7s linear infinite;
     }
 
-    .shooting-star:nth-child(1) {
+    .shooting-star:nth-child(4) {
       top: 15%;
       left: 65%;
       animation-delay: 0s;
     }
 
-    .shooting-star:nth-child(2) {
+    .shooting-star:nth-child(5) {
       top: 30%;
       left: 80%;
       animation-delay: 3.5s;
@@ -184,7 +195,7 @@
       pointer-events: none;
     }
 
-    .character-card {
+    .character-card-side {
       position: absolute;
       bottom: 0;
       width: 280px;
@@ -205,7 +216,7 @@
       animation: characterFloat 6s ease-in-out infinite;
     }
 
-    .character-card::before {
+    .character-card-side::before {
       content: "";
       position: absolute;
       inset: 0;
@@ -213,7 +224,7 @@
       z-index: 2;
     }
 
-    .character-card img {
+    .character-card-side img {
       position: absolute;
       inset: 0;
       width: 100%;
@@ -223,33 +234,31 @@
       filter: saturate(1.1) contrast(1.05) brightness(0.88);
     }
 
-    .character-card .label {
+    .character-card-side .label {
       position: absolute;
       left: 20px;
       bottom: 24px;
       z-index: 3;
     }
 
-    .character-card .name {
+    .character-card-side .name {
       font-size: 1.25rem;
       font-weight: 700;
       letter-spacing: 1px;
       margin-bottom: 4px;
     }
 
-    .character-card .role {
+    .character-card-side .role {
       font-size: 0.95rem;
       color: rgba(230, 230, 255, 0.82);
     }
 
     .character-left {
       left: 2.5%;
-      transform: translateY(0);
     }
 
     .character-right {
       right: 2.5%;
-      transform: translateY(0);
       animation-delay: 1.5s;
     }
 
@@ -329,7 +338,7 @@
       -webkit-text-fill-color: transparent;
     }
 
-    h2 {
+    .hero-card h2 {
       font-size: clamp(1.6rem, 3vw, 3rem);
       font-weight: 700;
       line-height: 1.2;
@@ -415,8 +424,95 @@
       letter-spacing: 0.6px;
     }
 
+    /* Character showcase section */
+    .characters {
+      position: relative;
+      z-index: 10;
+      padding: 90px 40px;
+      text-align: center;
+      background:
+        radial-gradient(circle at top, rgba(126, 94, 255, 0.18), transparent 35%),
+        linear-gradient(180deg, #0f0520, #140a2e 55%, #0c0419);
+    }
+
+    .characters h2 {
+      font-size: clamp(2rem, 4vw, 3rem);
+      margin-bottom: 16px;
+      color: #ffffff;
+    }
+
+    .characters-subtitle {
+      max-width: 760px;
+      margin: 0 auto 36px;
+      color: rgba(230, 230, 255, 0.75);
+      font-size: 1rem;
+      line-height: 1.8;
+    }
+
+    .character-slider {
+      display: flex;
+      gap: 24px;
+      overflow-x: auto;
+      padding: 12px 4px 20px;
+      scroll-behavior: smooth;
+    }
+
+    .character-slider::-webkit-scrollbar {
+      height: 8px;
+    }
+
+    .character-slider::-webkit-scrollbar-track {
+      background: rgba(255,255,255,0.05);
+      border-radius: 10px;
+    }
+
+    .character-slider::-webkit-scrollbar-thumb {
+      background: rgba(140, 111, 255, 0.45);
+      border-radius: 10px;
+    }
+
+    .character-card {
+      min-width: 240px;
+      max-width: 240px;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 24px;
+      padding: 14px;
+      text-align: left;
+      backdrop-filter: blur(14px);
+      box-shadow: 0 10px 35px rgba(0,0,0,0.22);
+      transition: transform 0.3s ease, box-shadow 0.3s ease;
+      flex-shrink: 0;
+    }
+
+    .character-card:hover {
+      transform: translateY(-10px);
+      box-shadow: 0 16px 40px rgba(126, 94, 255, 0.28);
+    }
+
+    .character-card img {
+      width: 100%;
+      height: 320px;
+      object-fit: cover;
+      border-radius: 18px;
+      display: block;
+      margin-bottom: 14px;
+    }
+
+    .character-card h3 {
+      font-size: 1.2rem;
+      margin-bottom: 8px;
+      color: white;
+    }
+
+    .character-card p {
+      font-size: 0.95rem;
+      color: rgba(228, 228, 255, 0.78);
+      line-height: 1.6;
+    }
+
     @media (max-width: 1100px) {
-      .character-card {
+      .character-card-side {
         width: 220px;
       }
 
@@ -438,14 +534,6 @@
     }
 
     @media (max-width: 700px) {
-      body {
-        overflow: auto;
-      }
-
-      .content-layer {
-        align-items: center;
-      }
-
       .character-left,
       .character-right {
         display: none;
@@ -468,71 +556,126 @@
       .bottom-hint {
         display: none;
       }
+
+      .characters {
+        padding: 70px 18px;
+      }
+
+      .character-card {
+        min-width: 210px;
+        max-width: 210px;
+      }
+
+      .character-card img {
+        height: 280px;
+      }
     }
   </style>
 </head>
 <body>
-  <div class="space-layer" id="stars"></div>
 
-  <div class="aurora-layer">
-    <div class="aurora one"></div>
-    <div class="aurora two"></div>
-    <div class="aurora three"></div>
+  <section class="hero-section">
+    <div class="space-layer" id="stars"></div>
 
-    <div class="shooting-star"></div>
-    <div class="shooting-star"></div>
-  </div>
+    <div class="aurora-layer">
+      <div class="aurora one"></div>
+      <div class="aurora two"></div>
+      <div class="aurora three"></div>
 
-  <div class="particles-layer" id="particles"></div>
+      <div class="shooting-star"></div>
+      <div class="shooting-star"></div>
+    </div>
 
-  <div class="character-layer">
-    <!-- Replace these image paths with your own anime PNG/JPG files -->
-    <div class="character-card character-left">
-      <img src="images/character-left.jpg" alt="Anime Character Left" />
-      <div class="label">
-        <div class="name">LUNA</div>
-        <div class="role">Emotionally aware companion</div>
+    <div class="particles-layer" id="particles"></div>
+
+    <div class="character-layer">
+      <div class="character-card-side character-left">
+        <img src="images/character-left.jpg" alt="Anime Character Left" />
+        <div class="label">
+          <div class="name">LUNA</div>
+          <div class="role">Emotionally aware companion</div>
+        </div>
+      </div>
+
+      <div class="character-card-side character-center-back">
+        <img src="images/character-center.jpg" alt="Anime Character Center" />
+      </div>
+
+      <div class="character-card-side character-right">
+        <img src="images/character-right.jpg" alt="Anime Character Right" />
+        <div class="label">
+          <div class="name">AKIRA</div>
+          <div class="role">Independent world-driven AI</div>
+        </div>
       </div>
     </div>
 
-    <div class="character-card character-center-back">
-      <img src="images/character-center.jpg" alt="Anime Character Center" />
-    </div>
+    <div class="content-layer">
+      <div class="hero-card">
+        <div class="badge">A new kind of AI world</div>
+        <h1>AETHRA</h1>
+        <h2>Experience AI That Feels Alive</h2>
+        <p class="subtitle">
+          Enter a world where AI characters have routines, emotions, memories,
+          evolving bonds, and lives that continue even when you are away.
+        </p>
 
-    <div class="character-card character-right">
-      <img src="images/character-right.jpg" alt="Anime Character Right" />
-      <div class="label">
-        <div class="name">AKIRA</div>
-        <div class="role">Independent world-driven AI</div>
+        <div class="highlights">
+          <div class="pill">Living characters</div>
+          <div class="pill">Dynamic schedules</div>
+          <div class="pill">Evolving emotions</div>
+          <div class="pill">Real relationship arcs</div>
+        </div>
+
+        <div class="btn-group">
+          <a href="login.html" class="btn btn-primary">Enter Aethra</a>
+          <a href="#" class="btn btn-secondary">Explore the World</a>
+        </div>
       </div>
     </div>
-  </div>
 
-  <div class="content-layer">
-    <div class="hero-card">
-      <div class="badge">A new kind of AI world</div>
-      <h1>AETHRA</h1>
-      <h2>Experience AI That Feels Alive</h2>
-      <p class="subtitle">
-        Enter a world where AI characters have routines, emotions, memories,
-        evolving bonds, and lives that continue even when you are away.
-      </p>
+    <div class="bottom-hint">A world that moves, breathes, and remembers</div>
+  </section>
 
-      <div class="highlights">
-        <div class="pill">Living characters</div>
-        <div class="pill">Dynamic schedules</div>
-        <div class="pill">Evolving emotions</div>
-        <div class="pill">Real relationship arcs</div>
+  <section class="characters">
+    <h2>Meet The Aethra Characters</h2>
+    <p class="characters-subtitle">
+      Every character in Aethra has a unique personality, emotional depth,
+      and a life that continues beyond your conversations.
+    </p>
+
+    <div class="character-slider">
+      <div class="character-card">
+        <img src="images/char1.jpg" alt="Sakura" />
+        <h3>Sakura</h3>
+        <p>Gentle and emotionally intelligent AI who understands your moods and remembers small details.</p>
       </div>
 
-      <div class="btn-group">
-        <a href="login.html" class="btn btn-primary">Enter Aethra</a>
-        <a href="#" class="btn btn-secondary">Explore the World</a>
+      <div class="character-card">
+        <img src="images/char2.jpg" alt="Nova" />
+        <h3>Nova</h3>
+        <p>Energetic, curious, and playful. She turns every interaction into something lively and memorable.</p>
+      </div>
+
+      <div class="character-card">
+        <img src="images/char3.jpg" alt="Akira" />
+        <h3>Akira</h3>
+        <p>Mysterious and analytical, with a calm presence that makes every conversation feel meaningful.</p>
+      </div>
+
+      <div class="character-card">
+        <img src="images/char4.jpg" alt="Luna" />
+        <h3>Luna</h3>
+        <p>Calm, supportive, and deeply observant — the kind of AI companion who notices what others miss.</p>
+      </div>
+
+      <div class="character-card">
+        <img src="images/char5.jpg" alt="Hikari" />
+        <h3>Hikari</h3>
+        <p>Cheerful and warm-hearted, bringing brightness and emotional comfort into the world of Aethra.</p>
       </div>
     </div>
-  </div>
-
-  <div class="bottom-hint">A world that moves, breathes, and remembers</div>
+  </section>
 
   <script>
     const starsContainer = document.getElementById("stars");
@@ -595,5 +738,6 @@
       });
     });
   </script>
+
 </body>
 </html>
