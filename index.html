@@ -15,13 +15,15 @@
       --bg-1: #070014;
       --bg-2: #100423;
       --bg-3: #1a0a38;
-      --card: rgba(255, 255, 255, 0.06);
-      --card-border: rgba(255, 255, 255, 0.10);
       --text: #f5f2ff;
       --muted: rgba(231, 226, 255, 0.72);
       --accent: #8a6cff;
       --accent-2: #5de4ff;
       --shadow: 0 20px 80px rgba(0, 0, 0, 0.35);
+    }
+
+    html {
+      scroll-behavior: smooth;
     }
 
     body {
@@ -175,6 +177,10 @@
       font-size: 0.96rem;
     }
 
+    .nav-links a:hover {
+      color: white;
+    }
+
     .nav-right .nav-btn {
       padding: 12px 18px;
       border-radius: 14px;
@@ -211,12 +217,19 @@
       border: 1px solid rgba(255,255,255,0.09);
       backdrop-filter: blur(16px);
       box-shadow: var(--shadow);
+      transition: transform 0.3s ease, box-shadow 0.3s ease;
+    }
+
+    .side-panel:hover {
+      transform: translateY(-8px);
+      box-shadow: 0 24px 60px rgba(122, 98, 255, 0.25);
     }
 
     .side-panel img {
       width: 100%;
       height: 100%;
       object-fit: cover;
+      object-position: center top;
       display: block;
       filter: saturate(1.08) brightness(0.9);
     }
@@ -384,6 +397,12 @@
       border-radius: 20px;
       background: rgba(255,255,255,0.04);
       border: 1px solid rgba(255,255,255,0.08);
+      transition: transform 0.25s ease, box-shadow 0.25s ease;
+    }
+
+    .stat:hover {
+      transform: translateY(-6px);
+      box-shadow: 0 12px 30px rgba(122, 98, 255, 0.16);
     }
 
     .stat strong {
@@ -428,7 +447,7 @@
 
     .cards {
       display: grid;
-      grid-template-columns: repeat(5, 1fr);
+      grid-template-columns: repeat(4, 1fr);
       gap: 18px;
     }
 
@@ -440,20 +459,29 @@
       backdrop-filter: blur(16px);
       transition: 0.28s ease;
       box-shadow: 0 10px 35px rgba(0,0,0,0.2);
+      overflow: hidden;
+      position: relative;
     }
 
     .char-card:hover {
-      transform: translateY(-8px);
+      transform: translateY(-10px) scale(1.01);
       box-shadow: 0 18px 40px rgba(122, 98, 255, 0.22);
+      border-color: rgba(138,108,255,0.35);
     }
 
     .char-card img {
       width: 100%;
-      height: 290px;
+      height: 340px;
       object-fit: cover;
+      object-position: center top;
       border-radius: 18px;
       display: block;
       margin-bottom: 14px;
+      transition: transform 0.35s ease;
+    }
+
+    .char-card:hover img {
+      transform: scale(1.05);
     }
 
     .char-card h3 {
@@ -467,13 +495,35 @@
       font-size: 0.94rem;
     }
 
+    .glow {
+      position: absolute;
+      inset: auto 10% -30px 10%;
+      height: 70px;
+      background: radial-gradient(circle, rgba(138,108,255,0.25), transparent 70%);
+      filter: blur(20px);
+      opacity: 0;
+      transition: opacity 0.3s ease;
+      pointer-events: none;
+    }
+
+    .char-card:hover .glow {
+      opacity: 1;
+    }
+
+    .footer {
+      text-align: center;
+      padding: 0 24px 30px;
+      color: rgba(231, 226, 255, 0.45);
+      font-size: 0.95rem;
+    }
+
     @media (max-width: 1180px) {
       .hero-wrap {
         grid-template-columns: 220px 1fr 220px;
       }
 
       .cards {
-        grid-template-columns: repeat(3, 1fr);
+        grid-template-columns: repeat(2, 1fr);
       }
     }
 
@@ -528,7 +578,7 @@
       }
 
       .char-card img {
-        height: 320px;
+        height: 380px;
       }
     }
   </style>
@@ -553,7 +603,7 @@
 
       <div class="nav-links">
         <a href="#">World</a>
-        <a href="#">Characters</a>
+        <a href="#characters">Characters</a>
         <a href="#">Features</a>
         <a href="#">About</a>
       </div>
@@ -565,10 +615,10 @@
 
     <div class="hero-wrap">
       <div class="side-panel">
-        <img src="images/character-left.jpg" alt="Luna" />
+        <img src="images/character-left.png" alt="Akira" />
         <div class="side-info">
-          <h3>LUNA</h3>
-          <p>Emotionally aware companion with memory-driven conversations.</p>
+          <h3>AKIRA</h3>
+          <p>Mysterious and analytical AI with hidden emotional depth.</p>
         </div>
       </div>
 
@@ -596,26 +646,26 @@
 
           <div class="mini-stats">
             <div class="stat">
-              <strong>10+</strong>
-              <span>Unique AI personalities with distinct emotional behavior.</span>
+              <strong>4+</strong>
+              <span>Distinct anime characters with different moods and personalities.</span>
             </div>
             <div class="stat">
               <strong>24/7</strong>
-              <span>Characters continue living inside the world beyond one chat.</span>
+              <span>Characters feel like they continue existing beyond one conversation.</span>
             </div>
             <div class="stat">
               <strong>Real depth</strong>
-              <span>Memories, moods, and changing bonds create actual immersion.</span>
+              <span>Memory, emotion, and relationship arcs make the world feel alive.</span>
             </div>
           </div>
         </div>
       </div>
 
       <div class="side-panel">
-        <img src="images/character-right.jpg" alt="Akira" />
+        <img src="images/character-right.png" alt="Luna" />
         <div class="side-info">
-          <h3>AKIRA</h3>
-          <p>Independent world-driven AI with a calm and mysterious presence.</p>
+          <h3>LUNA</h3>
+          <p>Warm and supportive companion with emotionally aware conversations.</p>
         </div>
       </div>
     </div>
@@ -626,44 +676,46 @@
       <div>
         <h2>Meet the Aethra Characters</h2>
         <p>
-          Every character has a distinct presence, personality, and emotional rhythm.
-          Aethra is not just a chatbot interface — it is a living anime-inspired world.
+          Each character in Aethra has a different emotional rhythm, visual identity,
+          and personality — creating a world that feels deeper than a normal chat app.
         </p>
       </div>
     </div>
 
     <div class="cards">
       <div class="char-card">
-        <img src="images/char1.jpg" alt="Sakura">
+        <img src="images/char1.png" alt="Sakura" />
         <h3>Sakura</h3>
-        <p>Gentle, observant, and deeply emotionally intelligent.</p>
+        <p>Gentle, observant, and emotionally intelligent. She notices small details and remembers them.</p>
+        <div class="glow"></div>
       </div>
 
       <div class="char-card">
-        <img src="images/char2.jpg" alt="Nova">
+        <img src="images/char2.png" alt="Nova" />
         <h3>Nova</h3>
-        <p>Energetic and playful, always bringing life into every interaction.</p>
+        <p>Energetic, playful, and curious. She brings life and motion into every interaction.</p>
+        <div class="glow"></div>
       </div>
 
       <div class="char-card">
-        <img src="images/char3.jpg" alt="Akira">
+        <img src="images/char3.png" alt="Akira" />
         <h3>Akira</h3>
-        <p>Mysterious, calm, and analytical with hidden emotional depth.</p>
+        <p>Mysterious and analytical with quiet emotional depth hiding behind her calm expression.</p>
+        <div class="glow"></div>
       </div>
 
       <div class="char-card">
-        <img src="images/char4.jpg" alt="Luna">
+        <img src="images/char4.png" alt="Luna" />
         <h3>Luna</h3>
-        <p>Warm and supportive, with a memory-driven emotional presence.</p>
-      </div>
-
-      <div class="char-card">
-        <img src="images/char5.jpg" alt="Hikari">
-        <h3>Hikari</h3>
-        <p>Bright, cheerful, and comforting — designed to feel alive.</p>
+        <p>Warm, elegant, and supportive — a companion designed to feel comforting and real.</p>
+        <div class="glow"></div>
       </div>
     </div>
   </section>
+
+  <div class="footer">
+    Aethra — where AI characters feel alive
+  </div>
 
   <script>
     const starsContainer = document.getElementById("stars");
