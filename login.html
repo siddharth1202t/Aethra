@@ -1,1 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Aethra Login</title>
 
+<style>
+body{
+margin:0;
+font-family:Arial, Helvetica, sans-serif;
+background:linear-gradient(160deg,#060015,#13002d,#09001f);
+height:100vh;
+display:flex;
+align-items:center;
+justify-content:center;
+color:white;
+}
+
+.login-box{
+width:360px;
+padding:40px;
+border-radius:20px;
+background:rgba(255,255,255,0.05);
+backdrop-filter:blur(20px);
+box-shadow:0 0 40px rgba(120,70,255,0.3);
+text-align:center;
+}
+
+.login-box h1{
+margin-bottom:20px;
+font-size:28px;
+letter-spacing:2px;
+}
+
+input{
+width:100%;
+padding:12px;
+margin:10px 0;
+border:none;
+border-radius:10px;
+background:rgba(255,255,255,0.1);
+color:white;
+}
+
+button{
+width:100%;
+padding:12px;
+margin-top:15px;
+border:none;
+border-radius:10px;
+background:#7c5cff;
+color:white;
+font-weight:bold;
+cursor:pointer;
+transition:0.3s;
+}
+
+button:hover{
+background:#9a7cff;
+}
+
+.link{
+margin-top:15px;
+font-size:14px;
+}
+
+.link a{
+color:#9a7cff;
+text-decoration:none;
+}
+</style>
+
+</head>
+
+<body>
+
+<div class="login-box">
+
+<h1>Login to Aethra</h1>
+
+<input id="username" placeholder="Username">
+
+<input id="password" type="password" placeholder="Password">
+
+<button onclick="login()">Login</button>
+
+<div class="link">
+Don't have an account?
+<a href="signup.html">Create one</a>
+</div>
+
+</div>
+
+<script>
+
+function login(){
+
+let username=document.getElementById("username").value
+let password=document.getElementById("password").value
+
+let savedUser=localStorage.getItem("user")
+let savedPass=localStorage.getItem("pass")
+
+if(username===savedUser && password===savedPass){
+
+localStorage.setItem("logged","true")
+
+window.location.href="home.html"
+
+}else{
+
+alert("Invalid login")
+
+}
+
+}
+
+</script>
+
+</body>
+</html>
