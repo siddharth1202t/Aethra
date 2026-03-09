@@ -806,7 +806,7 @@
     </nav>
 
     <div class="hero-wrap">
-      <div class="side-panel">
+      <div class="side-panel" id="leftPanel">
         <img src="images/character-left.png" alt="Akira" />
         <div class="side-info">
           <h3>AKIRA</h3>
@@ -815,7 +815,7 @@
       </div>
 
       <div class="center">
-        <div class="hero-card">
+        <div class="hero-card" id="heroCard">
           <div class="badge">A new generation of AI characters</div>
           <h1>AETHRA</h1>
           <h2>Experience AI That Feels Alive</h2>
@@ -853,7 +853,7 @@
         </div>
       </div>
 
-      <div class="side-panel">
+      <div class="side-panel" id="rightPanel">
         <img src="images/character-right.png" alt="Luna" />
         <div class="side-info">
           <h3>LUNA</h3>
@@ -1034,6 +1034,50 @@
         document.body.style.overflow = "auto";
       }
     });
+    document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    modal.classList.remove("active");
+    document.body.style.overflow = "auto";
+  }
+});
+
+/* PASTE THE NEW CODE HERE */
+
+const leftPanel = document.getElementById("leftPanel");
+const rightPanel = document.getElementById("rightPanel");
+const heroCard = document.getElementById("heroCard");
+
+let mouseX = 0;
+let mouseY = 0;
+let currentX = 0;
+let currentY = 0;
+
+document.addEventListener("mousemove", (e) => {
+  mouseX = (window.innerWidth / 2 - e.clientX) / 35;
+  mouseY = (window.innerHeight / 2 - e.clientY) / 35;
+});
+
+function animateParallax() {
+  currentX += (mouseX - currentX) * 0.08;
+  currentY += (mouseY - currentY) * 0.08;
+
+  if (leftPanel) {
+    leftPanel.style.transform = `translate(${currentX * 0.8}px, ${currentY * 0.8}px)`;
+  }
+
+  if (rightPanel) {
+    rightPanel.style.transform = `translate(${-currentX * 0.8}px, ${-currentY * 0.8}px)`;
+  }
+
+  if (heroCard) {
+    heroCard.style.transform = `translate(${currentX * 0.25}px, ${currentY * 0.25}px)`;
+  }
+
+  requestAnimationFrame(animateParallax);
+}
+
+animateParallax();
+
   </script>
 </body>
 </html>
