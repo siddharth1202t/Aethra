@@ -7,7 +7,7 @@ import {
 } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
 
 const firebaseConfig = {
-  apiKey: "AIzaSyCbFE0yTwrY7qN0IuU8AF3bkpq0",
+  apiKey: "AIzaSyCbfEQyTwry7qNOluYqlHUZuU8AF3bkpgQ",
   authDomain: "aethra-web.firebaseapp.com",
   projectId: "aethra-web",
   storageBucket: "aethra-web.firebasestorage.app",
@@ -19,11 +19,12 @@ const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 
 const form = document.getElementById("loginForm");
+const googleBtn = document.getElementById("googleLoginBtn");
 
 form.addEventListener("submit", async (e) => {
   e.preventDefault();
 
-  const email = document.getElementById("email").value;
+  const email = document.getElementById("email").value.trim();
   const password = document.getElementById("password").value;
 
   try {
@@ -31,10 +32,9 @@ form.addEventListener("submit", async (e) => {
     window.location.href = "home.html";
   } catch (error) {
     alert(error.message);
+    console.error(error);
   }
 });
-
-const googleBtn = document.getElementById("googleLoginBtn");
 
 googleBtn.addEventListener("click", async () => {
   const provider = new GoogleAuthProvider();
@@ -44,5 +44,6 @@ googleBtn.addEventListener("click", async () => {
     window.location.href = "home.html";
   } catch (error) {
     alert(error.message);
+    console.error(error);
   }
 });
