@@ -235,6 +235,46 @@
       box-shadow: 0 16px 40px rgba(123, 97, 255, 0.55);
     }
 
+    .auth-divider {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 18px 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .auth-divider::before,
+    .auth-divider::after {
+      content: "";
+      flex: 1;
+      height: 1px;
+      background: rgba(255,255,255,0.15);
+      margin: 0 10px;
+    }
+
+    .google-btn {
+      width: 100%;
+      padding: 14px 16px;
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 14px;
+      background: #fff;
+      color: #111;
+      font-weight: 700;
+      font-size: 0.98rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      cursor: pointer;
+      transition: 0.25s ease;
+    }
+
+    .google-btn:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 10px 25px rgba(0,0,0,0.18);
+    }
+
     .bottom-text {
       margin-top: 18px;
       color: var(--muted);
@@ -298,22 +338,33 @@
           Create your profile and begin exploring a world of living AI characters.
         </p>
 
-        <div class="field">
-          <label for="username">Username</label>
-          <input id="username" type="text" placeholder="Choose a username">
+        <form id="signupForm">
+          <div class="field">
+            <label for="name">Username</label>
+            <input id="name" type="text" placeholder="Choose a username" required>
+          </div>
+
+          <div class="field">
+            <label for="email">Email</label>
+            <input id="email" type="email" placeholder="Enter your email" required>
+          </div>
+
+          <div class="field">
+            <label for="password">Password</label>
+            <input id="password" type="password" placeholder="Create a password" required>
+          </div>
+
+          <button class="signup-btn" type="submit">Create Account</button>
+        </form>
+
+        <div class="auth-divider">
+          <span>or</span>
         </div>
 
-        <div class="field">
-          <label for="email">Email</label>
-          <input id="email" type="email" placeholder="Enter your email">
-        </div>
-
-        <div class="field">
-          <label for="password">Password</label>
-          <input id="password" type="password" placeholder="Create a password">
-        </div>
-
-        <button class="signup-btn" onclick="signup()">Create Account</button>
+        <button type="button" id="googleSignInBtn" class="google-btn">
+          <img src="https://www.svgrepo.com/show/475656/google-color.svg" alt="Google" width="20" height="20">
+          Continue with Google
+        </button>
 
         <div class="bottom-text">
           Already have an account? <a href="login.html">Login</a>
@@ -336,6 +387,7 @@
     for (let i = 0; i < 90; i++) {
       const star = document.createElement("div");
       star.classList.add("star");
+
       const size = Math.random() * 2.2 + 1;
       star.style.width = size + "px";
       star.style.height = size + "px";
@@ -343,35 +395,11 @@
       star.style.top = Math.random() * 100 + "vh";
       star.style.animationDuration = (Math.random() * 4 + 2) + "s";
       star.style.animationDelay = Math.random() * 4 + "s";
+
       starsContainer.appendChild(star);
     }
-    <script>
-const starsContainer = document.getElementById("stars");
-
-for (let i = 0; i < 90; i++) {
-  const star = document.createElement("div");
-  star.classList.add("star");
-
-  const size = Math.random() * 2.2 + 1;
-
-  star.style.width = size + "px";
-  star.style.height = size + "px";
-
-  star.style.left = Math.random() * 100 + "vw";
-  star.style.top = Math.random() * 100 + "vh";
-
-  star.style.animationDuration = (Math.random() * 4 + 2) + "s";
-  star.style.animationDelay = Math.random() * 4 + "s";
-
-  starsContainer.appendChild(star);
-}
-</script>
-
-<script type="module" src="js/signup.js"></script>
-
-</body>
-</html>
-<script type="module" src="js/signup.js"></script>
   </script>
+
+  <script type="module" src="js/signup.js"></script>
 </body>
 </html>
