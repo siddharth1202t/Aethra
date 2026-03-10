@@ -345,24 +345,33 @@
       star.style.animationDelay = Math.random() * 4 + "s";
       starsContainer.appendChild(star);
     }
+    <script>
+const starsContainer = document.getElementById("stars");
 
-    function signup() {
-      let username = document.getElementById("username").value;
-      let email = document.getElementById("email").value;
-      let password = document.getElementById("password").value;
+for (let i = 0; i < 90; i++) {
+  const star = document.createElement("div");
+  star.classList.add("star");
 
-      if (username === "" || email === "" || password === "") {
-        alert("Please fill all fields");
-        return;
-      }
+  const size = Math.random() * 2.2 + 1;
 
-      localStorage.setItem("user", username);
-      localStorage.setItem("email", email);
-      localStorage.setItem("pass", password);
+  star.style.width = size + "px";
+  star.style.height = size + "px";
 
-      alert("Account created successfully!");
-      window.location.href = "login.html";
-    }
+  star.style.left = Math.random() * 100 + "vw";
+  star.style.top = Math.random() * 100 + "vh";
+
+  star.style.animationDuration = (Math.random() * 4 + 2) + "s";
+  star.style.animationDelay = Math.random() * 4 + "s";
+
+  starsContainer.appendChild(star);
+}
+</script>
+
+<script type="module" src="js/signup.js"></script>
+
+</body>
+</html>
+<script type="module" src="js/signup.js"></script>
   </script>
 </body>
 </html>
