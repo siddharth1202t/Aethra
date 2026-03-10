@@ -235,6 +235,46 @@
       box-shadow: 0 16px 40px rgba(123, 97, 255, 0.55);
     }
 
+    .auth-divider {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 18px 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .auth-divider::before,
+    .auth-divider::after {
+      content: "";
+      flex: 1;
+      height: 1px;
+      background: rgba(255,255,255,0.15);
+      margin: 0 10px;
+    }
+
+    .google-btn {
+      width: 100%;
+      padding: 14px 16px;
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 14px;
+      background: #fff;
+      color: #111;
+      font-weight: 700;
+      font-size: 0.98rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      cursor: pointer;
+      transition: 0.25s ease;
+    }
+
+    .google-btn:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 10px 25px rgba(0,0,0,0.18);
+    }
+
     .bottom-text {
       margin-top: 18px;
       color: var(--muted);
@@ -298,17 +338,28 @@
           Enter your account and continue your journey into a world of living AI characters.
         </p>
 
-        <div class="field">
-          <label for="username">Username</label>
-          <input id="username" type="text" placeholder="Enter your username">
+        <form id="loginForm">
+          <div class="field">
+            <label for="email">Email</label>
+            <input id="email" type="email" placeholder="Enter your email" required>
+          </div>
+
+          <div class="field">
+            <label for="password">Password</label>
+            <input id="password" type="password" placeholder="Enter your password" required>
+          </div>
+
+          <button class="login-btn" type="submit">Login</button>
+        </form>
+
+        <div class="auth-divider">
+          <span>or</span>
         </div>
 
-        <div class="field">
-          <label for="password">Password</label>
-          <input id="password" type="password" placeholder="Enter your password">
-        </div>
-
-        <button class="login-btn" onclick="login()">Login</button>
+        <button type="button" id="googleLoginBtn" class="google-btn">
+          <img src="https://www.svgrepo.com/show/475656/google-color.svg" alt="Google" width="20" height="20">
+          Continue with Google
+        </button>
 
         <div class="bottom-text">
           Don’t have an account? <a href="signup.html">Create one</a>
@@ -340,21 +391,8 @@
       star.style.animationDelay = Math.random() * 4 + "s";
       starsContainer.appendChild(star);
     }
-
-    function login() {
-      let username = document.getElementById("username").value;
-      let password = document.getElementById("password").value;
-
-      let savedUser = localStorage.getItem("user");
-      let savedPass = localStorage.getItem("pass");
-
-      if (username === savedUser && password === savedPass) {
-        localStorage.setItem("logged", "true");
-        window.location.href = "home.html";
-      } else {
-        alert("Invalid login");
-      }
-    }
   </script>
+
+  <script type="module" src="js/login.js"></script>
 </body>
-</html>
+</html> 
