@@ -1,1 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Aethra Home</title>
+<style>
+body{
+  font-family: Arial;
+  background:#0b0218;
+  color:white;
+  display:flex;
+  justify-content:center;
+  align-items:center;
+  height:100vh;
+}
+</style>
+</head>
 
+<body>
+
+<div>
+<h1>Welcome to Aethra 🚀</h1>
+<p>Your account is now logged in.</p>
+
+<button onclick="logout()">Logout</button>
+</div>
+
+<script type="module">
+
+import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+import { getAuth, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyCbfEQyTwry7qNOluU8AF3bkpgQ",
+  authDomain: "aethra-web.firebaseapp.com",
+  projectId: "aethra-web",
+  storageBucket: "aethra-web.firebasestorage.app",
+  messagingSenderId: "280560043528",
+  appId: "1:280560043528:web:a6c2e485c8da32c9dab3bd"
+};
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+
+window.logout = function(){
+  signOut(auth).then(()=>{
+    window.location.href="index.html";
+  });
+}
+
+</script>
+
+</body>
+</html>
