@@ -307,20 +307,20 @@
     .hero-card::after {
       content: "";
       position: absolute;
-      width: 260px;
-      height: 260px;
+      width: 280px;
+      height: 280px;
       left: var(--mx, 50%);
       top: var(--my, 50%);
       transform: translate(-50%, -50%);
-      background: radial-gradient(circle, rgba(138,108,255,0.22), transparent 65%);
+      background: radial-gradient(circle, rgba(93, 228, 255, 0.16), rgba(138,108,255,0.14), transparent 68%);
       pointer-events: none;
       opacity: 0;
       transition: opacity 0.25s ease;
     }
 
-.hero-card:hover::after {
-  opacity: 1;
-}
+    .hero-card:hover::after {
+      opacity: 1;
+    } 
 
     .hero-card::before {
       content: "";
@@ -407,10 +407,12 @@
     }
 
     .btn-primary {
-      background: linear-gradient(135deg, #7b61ff, #9a7cff, #5de4ff, #7b61ff);
+      position: relative;
+      overflow: hidden;
+      background: linear-gradient(135deg, #6c47ff, #8a6cff, #5de4ff, #6c47ff);
       background-size: 300% 300%;
       color: white;
-      box-shadow: 0 10px 35px rgba(123, 97, 255, 0.38);
+      box-shadow: 0 10px 35px rgba(123, 97, 255, 0.30);
       animation: gradientShift 6s ease infinite;
     }
     @keyframes gradientShift {
@@ -428,6 +430,25 @@
     .btn-primary:hover {
       transform: translateY(-3px) scale(1.02);
       box-shadow: 0 16px 40px rgba(123, 97, 255, 0.55);
+    }
+    .btn-primary::before {
+      content: "";
+      position: absolute;
+      top: 0;
+      left: -130%;
+      width: 80%;
+      height: 100%;
+      background: linear-gradient(
+        120deg,
+        transparent,
+        rgba(255,255,255,0.22),
+        transparent
+      );
+      transition: left 0.7s ease;
+    }
+
+    .btn-primary:hover::before {
+      left: 140%;
     }
 
     .btn-secondary {
