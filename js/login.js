@@ -21,13 +21,46 @@ const auth = getAuth(app);
 const form = document.getElementById("loginForm");
 const googleBtn = document.getElementById("googleLoginBtn");
 
+function getTurnstileToken() {
+  const tokenInput = document.querySelector('input[name="cf-turnstile-response"]');
+  return tokenInput ? tokenInput.value : "";
+}
+
+async function verifyTurnstileToken(token) {
+  const res = await fetch("/api/verify-turnstile", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ token })
+  });
+
+  if (!res.ok) {
+    throw new Error("Captcha verification request failed.");
+  }
+
+  const data = await res.json();
+
+  if (!data.success) {
+    throw new Error("Captcha verification failed. Please try again.");
+  }
+
+  return true;
+}
+
+function resetTurnstileWidget() {
+  if (window.turnstile) {
+    window.turnstile.reset();
+  }
+}
+
 if (form) {
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
 
-    const captchaResponse = grecaptcha.getResponse();
-    if (!captchaResponse) {
-      alert("Please verify that you are not a robot.");
+    const token = getTurnstileToken();
+    if (!token) {
+      alert("Please complete the captcha.");
       return;
     }
 
@@ -35,36 +68,35 @@ if (form) {
     const password = document.getElementById("password").value;
 
     try {
+      await verifyTurnstileToken(token);
       await signInWithEmailAndPassword(auth, email, password);
       window.location.href = "home.html";
     } catch (error) {
       alert(error.message);
       console.error(error);
-    } finally {
-      grecaptcha.reset();
+      resetTurnstileWidget();
     }
   });
 }
 
 if (googleBtn) {
   googleBtn.addEventListener("click", async () => {
-
-    const captchaResponse = grecaptcha.getResponse();
-    if (!captchaResponse) {
-      alert("Please verify that you are not a robot.");
+    const token = getTurnstileToken();
+    if (!token) {
+      alert("Please complete the captcha.");
       return;
     }
 
     const provider = new GoogleAuthProvider();
 
     try {
+      await verifyTurnstileToken(token);
       await signInWithPopup(auth, provider);
       window.location.href = "home.html";
     } catch (error) {
       alert(error.message);
       console.error(error);
-    } finally {
-      grecaptcha.reset();
+      resetTurnstileWidget();
     }
   });
 }
