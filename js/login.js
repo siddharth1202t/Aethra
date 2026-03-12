@@ -21,20 +21,21 @@ const auth = getAuth(app);
 const form = document.getElementById("loginForm");
 const googleBtn = document.getElementById("googleLoginBtn");
 
-let turnstileWidgetId = null;
-let turnstileToken = "";
+let widgetId = null;
+let currentAction = null;
 
-window.onload = () => {
-  if (window.turnstile) {
-    turnstileWidgetId = window.turnstile.render("#turnstile-container", {
-      sitekey: "0x4AAAAAACpvKyzO0FiDW0v2",
-      theme: "dark",
-      callback: function (token) {
-        turnstileToken = token;
+function waitForTurnstile() {
+  return new Promise((resolve) => {
+    const check = () => {
+      if (window.turnstile) {
+        resolve();
+      } else {
+        setTimeout(check, 100);
       }
-    });
-  }
-};
+    };
+    check();
+  });
+}
 
 async function verifyTurnstileToken(token) {
   const res = await fetch("/api/verify-turnstile", {
@@ -45,75 +46,97 @@ async function verifyTurnstileToken(token) {
     body: JSON.stringify({ token })
   });
 
-  if (!res.ok) {
-    throw new Error("Captcha verification request failed.");
-  }
-
   const data = await res.json();
 
-  if (!data.success) {
+  if (!res.ok || !data.success) {
     throw new Error("Captcha verification failed. Please try again.");
   }
 }
 
-function resetTurnstileWidget() {
-  turnstileToken = "";
-  if (window.turnstile && turnstileWidgetId !== null) {
-    window.turnstile.reset(turnstileWidgetId);
+async function handleEmailLogin() {
+  const email = document.getElementById("email").value.trim();
+  const password = document.getElementById("password").value;
+
+  if (!email) {
+    alert("Please enter your email.");
+    return;
   }
+
+  if (!password) {
+    alert("Please enter your password.");
+    return;
+  }
+
+  currentAction = "email";
+
+  if (widgetId !== null) {
+    window.turnstile.reset(widgetId);
+    window.turnstile.execute(widgetId);
+  }
+}
+
+async function handleGoogleLogin() {
+  currentAction = "google";
+
+  if (widgetId !== null) {
+    window.turnstile.reset(widgetId);
+    window.turnstile.execute(widgetId);
+  }
+}
+
+async function onTurnstileSuccess(token) {
+  try {
+    await verifyTurnstileToken(token);
+
+    if (currentAction === "email") {
+      const email = document.getElementById("email").value.trim();
+      const password = document.getElementById("password").value;
+      await signInWithEmailAndPassword(auth, email, password);
+    } else if (currentAction === "google") {
+      const provider = new GoogleAuthProvider();
+      await signInWithPopup(auth, provider);
+    } else {
+      return;
+    }
+
+    window.location.href = "home.html";
+  } catch (error) {
+    alert(error.message);
+    console.error(error);
+  } finally {
+    currentAction = null;
+    if (widgetId !== null && window.turnstile) {
+      window.turnstile.reset(widgetId);
+    }
+  }
+}
+
+async function initTurnstile() {
+  await waitForTurnstile();
+
+  widgetId = window.turnstile.render("#turnstile-container", {
+    sitekey: "0x4AAAAAACpvKyzO0FiDW0v2",
+    theme: "dark",
+    execution: "execute",
+    appearance: "interaction-only",
+    callback: onTurnstileSuccess,
+    "error-callback": function () {
+      alert("Captcha failed to load. Please refresh and try again.");
+    }
+  });
 }
 
 if (form) {
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
-
-    const email = document.getElementById("email").value.trim();
-    const password = document.getElementById("password").value;
-
-    if (!email) {
-      alert("Please enter your email.");
-      return;
-    }
-
-    if (!password) {
-      alert("Please enter your password.");
-      return;
-    }
-
-    if (!turnstileToken) {
-      alert("Please complete the captcha.");
-      return;
-    }
-
-    try {
-      await verifyTurnstileToken(turnstileToken);
-      await signInWithEmailAndPassword(auth, email, password);
-      window.location.href = "home.html";
-    } catch (error) {
-      alert(error.message);
-      console.error(error);
-      resetTurnstileWidget();
-    }
+    handleEmailLogin();
   });
 }
 
 if (googleBtn) {
   googleBtn.addEventListener("click", async () => {
-    if (!turnstileToken) {
-      alert("Please complete the captcha.");
-      return;
-    }
-
-    const provider = new GoogleAuthProvider();
-
-    try {
-      await verifyTurnstileToken(turnstileToken);
-      await signInWithPopup(auth, provider);
-      window.location.href = "home.html";
-    } catch (error) {
-      alert(error.message);
-      console.error(error);
-      resetTurnstileWidget();
-    }
+    handleGoogleLogin();
   });
 }
+
+initTurnstile();
