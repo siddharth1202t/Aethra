@@ -143,8 +143,6 @@ async function initTurnstile() {
   widgetId = window.turnstile.render("#turnstile-container", {
     sitekey: "0x4AAAAAACpvKyzO0FiDW0v2",
     theme: "dark",
-    execution: "execute",
-    appearance: "interaction-only",
     callback: onTurnstileSuccess,
     "error-callback": function (code) {
       console.error("Turnstile error code:", code);
