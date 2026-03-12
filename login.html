@@ -32,14 +32,13 @@
       overflow-x: hidden;
       overflow-y: auto;
       color: var(--text);
-    }
+      background:
         radial-gradient(circle at 15% 20%, rgba(127, 90, 255, 0.22), transparent 22%),
         radial-gradient(circle at 85% 25%, rgba(93, 228, 255, 0.14), transparent 20%),
         radial-gradient(circle at 50% 85%, rgba(167, 92, 255, 0.14), transparent 24%),
         linear-gradient(135deg, var(--bg-1), var(--bg-2) 45%, var(--bg-3) 75%, #0b0218);
       position: relative;
     }
-
     .stars {
       position: absolute;
       inset: 0;
@@ -377,7 +376,7 @@
           Enter your account and continue your journey into a world of living AI characters.
         </p>
 
-        <form id="signupForm" novalidate>
+       <form id="loginForm" novalidate>
           <div class="field">
             <label for="email">Email</label>
             <input id="email" type="email" placeholder="Enter your email" required>
