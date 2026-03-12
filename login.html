@@ -23,11 +23,16 @@
       --shadow: 0 20px 80px rgba(0, 0, 0, 0.35);
     }
 
+    html, body {
+      height: 100%;
+    }
+
     body {
       min-height: 100vh;
-      overflow: hidden;
+      overflow-x: hidden;
+      overflow-y: auto;
       color: var(--text);
-      background:
+    }
         radial-gradient(circle at 15% 20%, rgba(127, 90, 255, 0.22), transparent 22%),
         radial-gradient(circle at 85% 25%, rgba(93, 228, 255, 0.14), transparent 20%),
         radial-gradient(circle at 50% 85%, rgba(167, 92, 255, 0.14), transparent 24%),
