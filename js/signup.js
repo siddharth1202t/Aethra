@@ -23,10 +23,20 @@ const provider = new GoogleAuthProvider();
 const signupForm = document.getElementById("signupForm");
 const googleBtn = document.getElementById("googleSignInBtn");
 
-function getTurnstileToken() {
-  const tokenInput = document.querySelector('input[name="cf-turnstile-response"]');
-  return tokenInput ? tokenInput.value : "";
-}
+let turnstileWidgetId = null;
+let turnstileToken = "";
+
+window.onload = () => {
+  if (window.turnstile) {
+    turnstileWidgetId = window.turnstile.render("#turnstile-container", {
+      sitekey: "0x4AAAAAACpvKyzO0FiDW0v2",
+      theme: "dark",
+      callback: function (token) {
+        turnstileToken = token;
+      }
+    });
+  }
+};
 
 async function verifyTurnstileToken(token) {
   const res = await fetch("/api/verify-turnstile", {
@@ -46,13 +56,12 @@ async function verifyTurnstileToken(token) {
   if (!data.success) {
     throw new Error("Captcha verification failed. Please try again.");
   }
-
-  return true;
 }
 
 function resetTurnstileWidget() {
-  if (window.turnstile) {
-    window.turnstile.reset();
+  turnstileToken = "";
+  if (window.turnstile && turnstileWidgetId !== null) {
+    window.turnstile.reset(turnstileWidgetId);
   }
 }
 
@@ -64,66 +73,47 @@ if (signupForm) {
     const emailInput = document.getElementById("email");
     const passwordInput = document.getElementById("password");
 
-    if (!nameInput || !emailInput || !passwordInput) {
-      alert("One or more form fields are missing.");
-      return;
-    }
-
-    const token = getTurnstileToken();
-    if (!token) {
-      alert("Please complete the captcha.");
-      return;
-    }
-
     const name = nameInput.value.trim();
     const email = emailInput.value.trim();
     const password = passwordInput.value;
 
     if (!name) {
       alert("Please enter a username.");
-      nameInput.focus();
       return;
     }
 
     if (!email) {
       alert("Please enter your email.");
-      emailInput.focus();
       return;
     }
 
     if (!password) {
       alert("Please enter your password.");
-      passwordInput.focus();
       return;
     }
 
     if (password.length < 6) {
       alert("Password must be at least 6 characters.");
-      passwordInput.focus();
       return;
     }
 
-    const token = getTurnstileToken();
-    if (!token) {
+    if (!turnstileToken) {
       alert("Please complete the captcha.");
       return;
     }
 
     try {
-      await verifyTurnstileToken(token);
+      await verifyTurnstileToken(turnstileToken);
 
       const userCredential = await createUserWithEmailAndPassword(auth, email, password);
 
-      if (name) {
-        await updateProfile(userCredential.user, {
-          displayName: name
-        });
-      }
+      await updateProfile(userCredential.user, {
+        displayName: name
+      });
 
-      alert("Account created successfully!");
       window.location.href = "home.html";
     } catch (error) {
-      console.error("Signup error:", error);
+      console.error(error);
       alert(error.message);
       resetTurnstileWidget();
     }
@@ -132,19 +122,17 @@ if (signupForm) {
 
 if (googleBtn) {
   googleBtn.addEventListener("click", async () => {
-    const token = getTurnstileToken();
-    if (!token) {
+    if (!turnstileToken) {
       alert("Please complete the captcha.");
       return;
     }
 
     try {
-      await verifyTurnstileToken(token);
+      await verifyTurnstileToken(turnstileToken);
       await signInWithPopup(auth, provider);
-      alert("Google login successful!");
       window.location.href = "home.html";
     } catch (error) {
-      console.error("Google login error:", error);
+      console.error(error);
       alert(error.message);
       resetTurnstileWidget();
     }
