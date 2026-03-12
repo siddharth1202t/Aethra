@@ -395,7 +395,7 @@
           </div>
 
           <div class="captcha-wrap">
-            <div class="cf-turnstile" data-sitekey="0x4AAAAAACpvKyzO0FiDWOv2"></div>
+            <div id="turnstile-container"></div>
           </div>
 
           <button class="signup-btn" type="submit">Create Account</button>
@@ -444,7 +444,7 @@
     }
   </script>
 
-  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit" defer></script>
   <script type="module" src="js/signup.js"></script>
 </body>
 </html>
