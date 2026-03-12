@@ -67,6 +67,18 @@ if (form) {
     const email = document.getElementById("email").value.trim();
     const password = document.getElementById("password").value;
 
+    if (!email) {
+      alert("Please enter your email.");
+      document.getElementById("email").focus();
+      return;
+    }
+
+    if (!password) {
+      alert("Please enter your password.");
+      document.getElementById("password").focus();
+      return;
+    }
+
     try {
       await verifyTurnstileToken(token);
       await signInWithEmailAndPassword(auth, email, password);
