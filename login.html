@@ -154,6 +154,8 @@
       color: var(--muted);
       font-size: 0.95rem;
       text-decoration: none;
+      position: relative;
+      z-index: 1;
     }
 
     .back-link:hover {
@@ -169,11 +171,15 @@
       color: #ddd4ff;
       font-size: 0.88rem;
       margin-bottom: 18px;
+      position: relative;
+      z-index: 1;
     }
 
     h1 {
       font-size: 2.3rem;
       margin-bottom: 10px;
+      position: relative;
+      z-index: 1;
     }
 
     .subtext {
@@ -181,6 +187,13 @@
       font-size: 1rem;
       line-height: 1.7;
       margin-bottom: 24px;
+      position: relative;
+      z-index: 1;
+    }
+
+    #loginForm {
+      position: relative;
+      z-index: 1;
     }
 
     .field {
@@ -215,6 +228,12 @@
       box-shadow: 0 0 0 3px rgba(138,108,255,0.12);
     }
 
+    .captcha-wrap {
+      margin: 18px 0 12px;
+      display: flex;
+      justify-content: center;
+    }
+
     .login-btn {
       width: 100%;
       padding: 15px 18px;
@@ -242,6 +261,8 @@
       margin: 18px 0;
       color: var(--muted);
       font-size: 14px;
+      position: relative;
+      z-index: 1;
     }
 
     .auth-divider::before,
@@ -268,6 +289,8 @@
       gap: 10px;
       cursor: pointer;
       transition: 0.25s ease;
+      position: relative;
+      z-index: 1;
     }
 
     .google-btn:hover {
@@ -279,6 +302,8 @@
       margin-top: 18px;
       color: var(--muted);
       font-size: 0.95rem;
+      position: relative;
+      z-index: 1;
     }
 
     .bottom-text a {
@@ -302,6 +327,10 @@
     }
 
     @media (max-width: 520px) {
+      body {
+        overflow-y: auto;
+      }
+
       .page {
         padding: 16px;
       }
@@ -313,6 +342,11 @@
 
       h1 {
         font-size: 2rem;
+      }
+
+      .captcha-wrap {
+        transform: scale(0.92);
+        transform-origin: center;
       }
     }
   </style>
@@ -347,6 +381,10 @@
           <div class="field">
             <label for="password">Password</label>
             <input id="password" type="password" placeholder="Enter your password" required>
+          </div>
+
+          <div class="captcha-wrap">
+            <div class="g-recaptcha" data-sitekey="YOUR_SITE_KEY"></div>
           </div>
 
           <button class="login-btn" type="submit">Login</button>
@@ -393,6 +431,7 @@
     }
   </script>
 
+  <script src="https://www.google.com/recaptcha/api.js" async defer></script>
   <script type="module" src="js/login.js"></script>
 </body>
-</html> 
+</html>
