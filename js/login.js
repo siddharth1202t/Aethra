@@ -21,29 +21,50 @@ const auth = getAuth(app);
 const form = document.getElementById("loginForm");
 const googleBtn = document.getElementById("googleLoginBtn");
 
-form.addEventListener("submit", async (e) => {
-  e.preventDefault();
+if (form) {
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
 
-  const email = document.getElementById("email").value.trim();
-  const password = document.getElementById("password").value;
+    const captchaResponse = grecaptcha.getResponse();
+    if (!captchaResponse) {
+      alert("Please verify that you are not a robot.");
+      return;
+    }
 
-  try {
-    await signInWithEmailAndPassword(auth, email, password);
-    window.location.href = "home.html";
-  } catch (error) {
-    alert(error.message);
-    console.error(error);
-  }
-});
+    const email = document.getElementById("email").value.trim();
+    const password = document.getElementById("password").value;
 
-googleBtn.addEventListener("click", async () => {
-  const provider = new GoogleAuthProvider();
+    try {
+      await signInWithEmailAndPassword(auth, email, password);
+      window.location.href = "home.html";
+    } catch (error) {
+      alert(error.message);
+      console.error(error);
+    } finally {
+      grecaptcha.reset();
+    }
+  });
+}
 
-  try {
-    await signInWithPopup(auth, provider);
-    window.location.href = "home.html";
-  } catch (error) {
-    alert(error.message);
-    console.error(error);
-  }
-});
+if (googleBtn) {
+  googleBtn.addEventListener("click", async () => {
+
+    const captchaResponse = grecaptcha.getResponse();
+    if (!captchaResponse) {
+      alert("Please verify that you are not a robot.");
+      return;
+    }
+
+    const provider = new GoogleAuthProvider();
+
+    try {
+      await signInWithPopup(auth, provider);
+      window.location.href = "home.html";
+    } catch (error) {
+      alert(error.message);
+      console.error(error);
+    } finally {
+      grecaptcha.reset();
+    }
+  });
+}
