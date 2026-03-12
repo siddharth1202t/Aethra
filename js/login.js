@@ -21,10 +21,20 @@ const auth = getAuth(app);
 const form = document.getElementById("loginForm");
 const googleBtn = document.getElementById("googleLoginBtn");
 
-function getTurnstileToken() {
-  const tokenInput = document.querySelector('input[name="cf-turnstile-response"]');
-  return tokenInput ? tokenInput.value : "";
-}
+let turnstileWidgetId = null;
+let turnstileToken = "";
+
+window.onload = () => {
+  if (window.turnstile) {
+    turnstileWidgetId = window.turnstile.render("#turnstile-container", {
+      sitekey: "0x4AAAAAACpvKyzO0FiDW0v2",
+      theme: "dark",
+      callback: function (token) {
+        turnstileToken = token;
+      }
+    });
+  }
+};
 
 async function verifyTurnstileToken(token) {
   const res = await fetch("/api/verify-turnstile", {
@@ -44,13 +54,12 @@ async function verifyTurnstileToken(token) {
   if (!data.success) {
     throw new Error("Captcha verification failed. Please try again.");
   }
-
-  return true;
 }
 
 function resetTurnstileWidget() {
-  if (window.turnstile) {
-    window.turnstile.reset();
+  turnstileToken = "";
+  if (window.turnstile && turnstileWidgetId !== null) {
+    window.turnstile.reset(turnstileWidgetId);
   }
 }
 
@@ -58,29 +67,26 @@ if (form) {
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
 
-    const token = getTurnstileToken();
-    if (!token) {
-      alert("Please complete the captcha.");
-      return;
-    }
-
     const email = document.getElementById("email").value.trim();
     const password = document.getElementById("password").value;
 
     if (!email) {
       alert("Please enter your email.");
-      document.getElementById("email").focus();
       return;
     }
 
     if (!password) {
       alert("Please enter your password.");
-      document.getElementById("password").focus();
+      return;
+    }
+
+    if (!turnstileToken) {
+      alert("Please complete the captcha.");
       return;
     }
 
     try {
-      await verifyTurnstileToken(token);
+      await verifyTurnstileToken(turnstileToken);
       await signInWithEmailAndPassword(auth, email, password);
       window.location.href = "home.html";
     } catch (error) {
@@ -93,8 +99,7 @@ if (form) {
 
 if (googleBtn) {
   googleBtn.addEventListener("click", async () => {
-    const token = getTurnstileToken();
-    if (!token) {
+    if (!turnstileToken) {
       alert("Please complete the captcha.");
       return;
     }
@@ -102,7 +107,7 @@ if (googleBtn) {
     const provider = new GoogleAuthProvider();
 
     try {
-      await verifyTurnstileToken(token);
+      await verifyTurnstileToken(turnstileToken);
       await signInWithPopup(auth, provider);
       window.location.href = "home.html";
     } catch (error) {
