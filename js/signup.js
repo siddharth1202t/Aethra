@@ -23,20 +23,21 @@ const provider = new GoogleAuthProvider();
 const signupForm = document.getElementById("signupForm");
 const googleBtn = document.getElementById("googleSignInBtn");
 
-let turnstileWidgetId = null;
-let turnstileToken = "";
+let widgetId = null;
+let currentAction = null;
 
-window.onload = () => {
-  if (window.turnstile) {
-    turnstileWidgetId = window.turnstile.render("#turnstile-container", {
-      sitekey: "0x4AAAAAACpvKyzO0FiDW0v2",
-      theme: "dark",
-      callback: function (token) {
-        turnstileToken = token;
+function waitForTurnstile() {
+  return new Promise((resolve) => {
+    const check = () => {
+      if (window.turnstile) {
+        resolve();
+      } else {
+        setTimeout(check, 100);
       }
-    });
-  }
-};
+    };
+    check();
+  });
+}
 
 async function verifyTurnstileToken(token) {
   const res = await fetch("/api/verify-turnstile", {
@@ -47,94 +48,121 @@ async function verifyTurnstileToken(token) {
     body: JSON.stringify({ token })
   });
 
-  if (!res.ok) {
-    throw new Error("Captcha verification request failed.");
-  }
-
   const data = await res.json();
 
-  if (!data.success) {
+  if (!res.ok || !data.success) {
     throw new Error("Captcha verification failed. Please try again.");
   }
 }
 
-function resetTurnstileWidget() {
-  turnstileToken = "";
-  if (window.turnstile && turnstileWidgetId !== null) {
-    window.turnstile.reset(turnstileWidgetId);
+async function handleEmailSignup() {
+  const nameInput = document.getElementById("name");
+  const emailInput = document.getElementById("email");
+  const passwordInput = document.getElementById("password");
+
+  const name = nameInput.value.trim();
+  const email = emailInput.value.trim();
+  const password = passwordInput.value;
+
+  if (!name) {
+    alert("Please enter a username.");
+    nameInput.focus();
+    return;
+  }
+
+  if (!email) {
+    alert("Please enter your email.");
+    emailInput.focus();
+    return;
+  }
+
+  if (!password) {
+    alert("Please enter your password.");
+    passwordInput.focus();
+    return;
+  }
+
+  if (password.length < 6) {
+    alert("Password must be at least 6 characters.");
+    passwordInput.focus();
+    return;
+  }
+
+  currentAction = "email";
+
+  if (widgetId !== null) {
+    window.turnstile.reset(widgetId);
+    window.turnstile.execute(widgetId);
   }
 }
 
-if (signupForm) {
-  signupForm.addEventListener("submit", async (e) => {
-    e.preventDefault();
+async function handleGoogleSignup() {
+  currentAction = "google";
 
-    const nameInput = document.getElementById("name");
-    const emailInput = document.getElementById("email");
-    const passwordInput = document.getElementById("password");
+  if (widgetId !== null) {
+    window.turnstile.reset(widgetId);
+    window.turnstile.execute(widgetId);
+  }
+}
 
-    const name = nameInput.value.trim();
-    const email = emailInput.value.trim();
-    const password = passwordInput.value;
+async function onTurnstileSuccess(token) {
+  try {
+    await verifyTurnstileToken(token);
 
-    if (!name) {
-      alert("Please enter a username.");
-      return;
-    }
-
-    if (!email) {
-      alert("Please enter your email.");
-      return;
-    }
-
-    if (!password) {
-      alert("Please enter your password.");
-      return;
-    }
-
-    if (password.length < 6) {
-      alert("Password must be at least 6 characters.");
-      return;
-    }
-
-    if (!turnstileToken) {
-      alert("Please complete the captcha.");
-      return;
-    }
-
-    try {
-      await verifyTurnstileToken(turnstileToken);
+    if (currentAction === "email") {
+      const name = document.getElementById("name").value.trim();
+      const email = document.getElementById("email").value.trim();
+      const password = document.getElementById("password").value;
 
       const userCredential = await createUserWithEmailAndPassword(auth, email, password);
 
       await updateProfile(userCredential.user, {
         displayName: name
       });
-
-      window.location.href = "home.html";
-    } catch (error) {
-      console.error(error);
-      alert(error.message);
-      resetTurnstileWidget();
+    } else if (currentAction === "google") {
+      await signInWithPopup(auth, provider);
+    } else {
+      return;
     }
+
+    window.location.href = "home.html";
+  } catch (error) {
+    console.error(error);
+    alert(error.message);
+  } finally {
+    currentAction = null;
+    if (widgetId !== null && window.turnstile) {
+      window.turnstile.reset(widgetId);
+    }
+  }
+}
+
+async function initTurnstile() {
+  await waitForTurnstile();
+
+  widgetId = window.turnstile.render("#turnstile-container", {
+    sitekey: "0x4AAAAAACpvKyzO0FiDW0v2",
+    theme: "dark",
+    execution: "execute",
+    appearance: "interaction-only",
+    callback: onTurnstileSuccess,
+    "error-callback": function () {
+      alert("Captcha failed to load. Please refresh and try again.");
+    }
+  });
+}
+
+if (signupForm) {
+  signupForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    handleEmailSignup();
   });
 }
 
 if (googleBtn) {
   googleBtn.addEventListener("click", async () => {
-    if (!turnstileToken) {
-      alert("Please complete the captcha.");
-      return;
-    }
-
-    try {
-      await verifyTurnstileToken(turnstileToken);
-      await signInWithPopup(auth, provider);
-      window.location.href = "home.html";
-    } catch (error) {
-      console.error(error);
-      alert(error.message);
-      resetTurnstileWidget();
-    }
+    handleGoogleSignup();
   });
 }
+
+initTurnstile();
