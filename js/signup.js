@@ -79,6 +79,36 @@ if (signupForm) {
     const email = emailInput.value.trim();
     const password = passwordInput.value;
 
+    if (!name) {
+      alert("Please enter a username.");
+      nameInput.focus();
+      return;
+    }
+
+    if (!email) {
+      alert("Please enter your email.");
+      emailInput.focus();
+      return;
+    }
+
+    if (!password) {
+      alert("Please enter your password.");
+      passwordInput.focus();
+      return;
+    }
+
+    if (password.length < 6) {
+      alert("Password must be at least 6 characters.");
+      passwordInput.focus();
+      return;
+    }
+
+    const token = getTurnstileToken();
+    if (!token) {
+      alert("Please complete the captcha.");
+      return;
+    }
+
     try {
       await verifyTurnstileToken(token);
 
