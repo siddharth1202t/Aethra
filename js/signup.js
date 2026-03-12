@@ -23,13 +23,9 @@ const provider = new GoogleAuthProvider();
 const signupForm = document.getElementById("signupForm");
 const googleBtn = document.getElementById("googleSignInBtn");
 
-console.log("signupForm:", signupForm);
-console.log("googleBtn:", googleBtn);
-
 if (signupForm) {
   signupForm.addEventListener("submit", async (e) => {
     e.preventDefault();
-    console.log("Signup form submitted");
 
     const nameInput = document.getElementById("name");
     const emailInput = document.getElementById("email");
@@ -37,6 +33,12 @@ if (signupForm) {
 
     if (!nameInput || !emailInput || !passwordInput) {
       alert("One or more form fields are missing.");
+      return;
+    }
+
+    const captchaResponse = grecaptcha.getResponse();
+    if (!captchaResponse) {
+      alert("Please verify that you are not a robot.");
       return;
     }
 
@@ -58,13 +60,19 @@ if (signupForm) {
     } catch (error) {
       console.error("Signup error:", error);
       alert(error.message);
+    } finally {
+      grecaptcha.reset();
     }
   });
 }
 
 if (googleBtn) {
   googleBtn.addEventListener("click", async () => {
-    console.log("Google button clicked");
+    const captchaResponse = grecaptcha.getResponse();
+    if (!captchaResponse) {
+      alert("Please verify that you are not a robot.");
+      return;
+    }
 
     try {
       await signInWithPopup(auth, provider);
@@ -73,6 +81,8 @@ if (googleBtn) {
     } catch (error) {
       console.error("Google login error:", error);
       alert(error.message);
+    } finally {
+      grecaptcha.reset();
     }
   });
 }
