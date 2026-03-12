@@ -1132,15 +1132,24 @@ function animateParallax() {
     rightPanel.style.transform = `translate(${-currentX * 0.8}px, ${-currentY * 0.8}px)`;
   }
 
-  if (heroCard) {
-    heroCard.style.transform = `translate(${currentX * 0.25}px, ${currentY * 0.25}px)`;
-  }
-
   requestAnimationFrame(animateParallax);
 }
-
 animateParallax();
+if (heroCard) {
+  heroCard.addEventListener("mousemove", (e) => {
+    const rect = heroCard.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
 
+    heroCard.style.setProperty("--mx", `${x}px`);
+    heroCard.style.setProperty("--my", `${y}px`);
+  });
+
+  heroCard.addEventListener("mouseleave", () => {
+    heroCard.style.setProperty("--mx", "50%");
+    heroCard.style.setProperty("--my", "50%");
+  });
+}
   </script>
 </body>
 </html>
