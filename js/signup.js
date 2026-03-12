@@ -146,8 +146,9 @@ async function initTurnstile() {
     execution: "execute",
     appearance: "interaction-only",
     callback: onTurnstileSuccess,
-    "error-callback": function () {
-      alert("Captcha failed to load. Please refresh and try again.");
+    "error-callback": function (code) {
+      console.error("Turnstile error code:", code);
+      alert("Captcha failed to load. Error code: " + code);
     }
   });
 }
