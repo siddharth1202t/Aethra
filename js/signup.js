@@ -101,7 +101,6 @@ async function handleGoogleSignup() {
 
   if (widgetId !== null) {
     window.turnstile.reset(widgetId);
-    window.turnstile.execute(widgetId);
   }
 }
 
