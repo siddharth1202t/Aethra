@@ -383,9 +383,9 @@
             <input id="password" type="password" placeholder="Enter your password" required>
           </div>
 
-          <div class="captcha-wrap">
-            <div class="g-recaptcha" data-sitekey="YOUR_SITE_KEY"></div>
-          </div>
+            <div class="captcha-wrap">
+              <div class="cf-turnstile" data-sitekey="0x4AAAAAACpvKyzO0FiDWOv2"></div>
+            </div>
 
           <button class="login-btn" type="submit">Login</button>
         </form>
@@ -431,7 +431,7 @@
     }
   </script>
 
-  <script src="https://www.google.com/recaptcha/api.js" async defer></script>
+  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
   <script type="module" src="js/login.js"></script>
 </body>
 </html>
