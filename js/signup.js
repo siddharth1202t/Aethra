@@ -3,6 +3,7 @@ import {
   getAuth,
   createUserWithEmailAndPassword,
   signInWithPopup,
+  signInWithRedirect,
   GoogleAuthProvider,
   updateProfile
 } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
@@ -24,7 +25,6 @@ const signupForm = document.getElementById("signupForm");
 const googleBtn = document.getElementById("googleSignInBtn");
 
 let widgetId = null;
-let currentAction = null;
 
 function waitForTurnstile() {
   return new Promise((resolve) => {
@@ -55,6 +55,21 @@ async function verifyTurnstileToken(token) {
   }
 }
 
+function getTurnstileToken() {
+  if (widgetId === null || !window.turnstile) return "";
+  return window.turnstile.getResponse(widgetId);
+}
+
+function resetTurnstile() {
+  if (widgetId !== null && window.turnstile) {
+    window.turnstile.reset(widgetId);
+  }
+}
+
+function isMobileDevice() {
+  return /Android|iPhone|iPad|iPod|Opera Mini|IEMobile|WPDesktop/i.test(navigator.userAgent);
+}
+
 async function handleEmailSignup() {
   const nameInput = document.getElementById("name");
   const emailInput = document.getElementById("email");
@@ -63,6 +78,7 @@ async function handleEmailSignup() {
   const name = nameInput.value.trim();
   const email = emailInput.value.trim();
   const password = passwordInput.value;
+  const token = getTurnstileToken();
 
   if (!name) {
     alert("Please enter a username.");
@@ -88,51 +104,51 @@ async function handleEmailSignup() {
     return;
   }
 
-  currentAction = "email";
+  if (!token) {
+    alert("Please complete the captcha first.");
+    return;
+  }
 
-  if (widgetId !== null) {
-    window.turnstile.reset(widgetId);
-    window.turnstile.execute(widgetId);
+  try {
+    await verifyTurnstileToken(token);
+
+    const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+
+    await updateProfile(userCredential.user, {
+      displayName: name
+    });
+
+    window.location.href = "home.html";
+  } catch (error) {
+    console.error(error);
+    alert(error.message);
+    resetTurnstile();
   }
 }
 
 async function handleGoogleSignup() {
-  currentAction = "google";
+  const token = getTurnstileToken();
 
-  if (widgetId !== null) {
-    window.turnstile.reset(widgetId);
+  if (!token) {
+    alert("Please complete the captcha first.");
+    return;
   }
-}
 
-async function onTurnstileSuccess(token) {
   try {
     await verifyTurnstileToken(token);
 
-    if (currentAction === "email") {
-      const name = document.getElementById("name").value.trim();
-      const email = document.getElementById("email").value.trim();
-      const password = document.getElementById("password").value;
-
-      const userCredential = await createUserWithEmailAndPassword(auth, email, password);
-
-      await updateProfile(userCredential.user, {
-        displayName: name
-      });
-    } else if (currentAction === "google") {
-      await signInWithPopup(auth, provider);
-    } else {
+    if (isMobileDevice()) {
+      await signInWithRedirect(auth, provider);
       return;
+    } else {
+      await signInWithPopup(auth, provider);
     }
 
     window.location.href = "home.html";
   } catch (error) {
     console.error(error);
     alert(error.message);
-  } finally {
-    currentAction = null;
-    if (widgetId !== null && window.turnstile) {
-      window.turnstile.reset(widgetId);
-    }
+    resetTurnstile();
   }
 }
 
@@ -142,7 +158,9 @@ async function initTurnstile() {
   widgetId = window.turnstile.render("#turnstile-container", {
     sitekey: "0x4AAAAAACpvKyzO0FiDW0v2",
     theme: "dark",
-    callback: onTurnstileSuccess,
+    size: window.innerWidth <= 520 ? "flexible" : "normal",
+    retry: "auto",
+    "refresh-expired": "auto",
     "error-callback": function (code) {
       console.error("Turnstile error code:", code);
       alert("Captcha failed to load. Error code: " + code);
@@ -153,14 +171,16 @@ async function initTurnstile() {
 if (signupForm) {
   signupForm.addEventListener("submit", async (e) => {
     e.preventDefault();
-    handleEmailSignup();
+    await handleEmailSignup();
   });
 }
 
 if (googleBtn) {
   googleBtn.addEventListener("click", async () => {
-    handleGoogleSignup();
+    await handleGoogleSignup();
   });
 }
 
-initTurnstile();
+window.addEventListener("load", () => {
+  initTurnstile();
+});
