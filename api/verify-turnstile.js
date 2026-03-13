@@ -4,6 +4,17 @@ export default async function handler(req, res) {
   }
 
   try {
+    const allowedOrigins = [
+      "https://aethra-gules.vercel.app",
+      "https://aethra-hb2h.vercel.app"
+    ];
+
+    const origin = req.headers.origin || "";
+
+    if (!allowedOrigins.includes(origin)) {
+      return res.status(403).json({ success: false, message: "Forbidden origin" });
+    }
+
     const { token } = req.body;
     const secret = process.env.TURNSTILE_SECRET_KEY;
 
@@ -33,7 +44,7 @@ export default async function handler(req, res) {
 
     return res.status(200).json({ success: true });
   } catch (error) {
-    console.error(error);
+    console.error("Turnstile API error:", error);
     return res.status(500).json({ success: false });
   }
 }
