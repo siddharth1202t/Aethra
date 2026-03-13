@@ -558,6 +558,7 @@
     import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
     import { getAuth, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
     import { SECURITY_CONFIG } from "./js/security-config.js";
+    import { ensureUserProfile } from "./js/user-profile.js";
     const firebaseConfig = {
       apiKey: "AIzaSyCbfEQyTwry7qNOluYqlHUZuU8AF3bkpgQ",
       authDomain: "aethra-web.firebaseapp.com",
@@ -577,8 +578,10 @@
     
     const developerEmail = SECURITY_CONFIG.developerEmail;
 
-    onAuthStateChanged(auth, (user) => {
+    onAuthStateChanged(auth, async (user) => {
       if (user) {
+        await ensureUserProfile(user);
+
         const displayName = user.displayName || user.email || "User";
         usernameEl.textContent = displayName;
         heroUsernameEl.textContent = displayName;
