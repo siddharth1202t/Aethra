@@ -564,6 +564,11 @@
     import { getAuth, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
     import { SECURITY_CONFIG } from "./js/security-config.js";
     import { ensureUserProfile } from "./js/user-profile.js";
+    import { requireAuth } from "./js/auth-guard.js";
+
+    requireAuth((user) => {
+      console.log("User logged in:", user.email);
+    });
     const firebaseConfig = {
       apiKey: "AIzaSyCbfEQyTwry7qNOluYqlHUZuU8AF3bkpgQ",
       authDomain: "aethra-web.firebaseapp.com",
