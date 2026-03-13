@@ -19,6 +19,7 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
+const provider = new GoogleAuthProvider();
 
 const form = document.getElementById("loginForm");
 const googleBtn = document.getElementById("googleLoginBtn");
@@ -204,7 +205,7 @@ async function handleGoogleLogin() {
     setLoading(googleBtn, "Please wait...");
     await verifyTurnstileToken(token);
 
-    const provider = new GoogleAuthProvider();
+    
 
     if (isMobileDevice()) {
       await signInWithRedirect(auth, provider);
