@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Aethra Developer</title>
+  <title>Aethra Developer Panel</title>
   <style>
     * {
       margin: 0;
@@ -12,19 +12,30 @@
       font-family: "Segoe UI", Arial, sans-serif;
     }
 
+    :root {
+      --bg-1: #070014;
+      --bg-2: #100423;
+      --bg-3: #1a0a38;
+      --text: #f5f2ff;
+      --muted: rgba(231, 226, 255, 0.72);
+      --border: rgba(255,255,255,0.1);
+      --card: rgba(255,255,255,0.06);
+      --shadow: 0 20px 80px rgba(0,0,0,0.35);
+    }
+
     body {
       min-height: 100vh;
-      color: white;
+      color: var(--text);
       background:
         radial-gradient(circle at 15% 20%, rgba(127, 90, 255, 0.22), transparent 22%),
         radial-gradient(circle at 85% 25%, rgba(93, 228, 255, 0.14), transparent 20%),
         radial-gradient(circle at 50% 85%, rgba(167, 92, 255, 0.14), transparent 24%),
-        linear-gradient(135deg, #070014, #100423 45%, #1a0a38 75%, #0b0218);
+        linear-gradient(135deg, var(--bg-1), var(--bg-2) 45%, var(--bg-3) 75%, #0b0218);
       padding: 24px;
     }
 
     .wrap {
-      max-width: 1200px;
+      max-width: 1280px;
       margin: 0 auto;
     }
 
@@ -33,11 +44,12 @@
       justify-content: space-between;
       align-items: center;
       gap: 16px;
-      padding: 16px 20px;
-      border-radius: 20px;
-      background: rgba(255,255,255,0.05);
-      border: 1px solid rgba(255,255,255,0.1);
-      backdrop-filter: blur(14px);
+      padding: 18px 22px;
+      border-radius: 22px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid var(--border);
+      backdrop-filter: blur(16px);
+      box-shadow: var(--shadow);
       margin-bottom: 24px;
     }
 
@@ -47,10 +59,16 @@
     }
 
     .title p {
-      color: rgba(231, 226, 255, 0.72);
+      color: var(--muted);
     }
 
-    .logout-btn {
+    .actions {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .btn {
       border: none;
       border-radius: 14px;
       padding: 12px 18px;
@@ -58,6 +76,13 @@
       color: white;
       cursor: pointer;
       background: linear-gradient(135deg, #7b61ff, #9a7cff);
+      box-shadow: 0 10px 30px rgba(123, 97, 255, 0.35);
+    }
+
+    .btn.secondary {
+      background: rgba(255,255,255,0.08);
+      border: 1px solid rgba(255,255,255,0.12);
+      box-shadow: none;
     }
 
     .grid {
@@ -68,10 +93,11 @@
 
     .card {
       padding: 22px;
-      border-radius: 22px;
-      background: rgba(255,255,255,0.05);
-      border: 1px solid rgba(255,255,255,0.1);
-      backdrop-filter: blur(14px);
+      border-radius: 24px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      backdrop-filter: blur(16px);
+      box-shadow: var(--shadow);
     }
 
     .card h3 {
@@ -80,8 +106,8 @@
     }
 
     .card p {
-      line-height: 1.6;
-      color: rgba(231, 226, 255, 0.72);
+      color: var(--muted);
+      line-height: 1.65;
     }
 
     @media (max-width: 900px) {
@@ -94,7 +120,11 @@
         align-items: flex-start;
       }
 
-      .logout-btn {
+      .actions {
+        width: 100%;
+      }
+
+      .btn {
         width: 100%;
       }
     }
@@ -105,40 +135,44 @@
     <header class="topbar">
       <div class="title">
         <h1>Aethra Developer Panel</h1>
-        <p>Private tools, planning, testing, and future controls.</p>
+        <p>Private planning, testing, and internal controls.</p>
       </div>
-      <button class="logout-btn" id="logoutBtn">Logout</button>
+
+      <div class="actions">
+        <button class="btn secondary" id="backHomeBtn">Back to Home</button>
+        <button class="btn" id="logoutBtn">Logout</button>
+      </div>
     </header>
 
     <section class="grid">
       <div class="card">
-        <h3>Platform Roadmap</h3>
-        <p>Track upcoming systems like age verification, preference setup, profiles, and character chat flow.</p>
+        <h3>Roadmap</h3>
+        <p>Track upcoming systems like age verification, preferences, user profile flow, and character chats.</p>
       </div>
 
       <div class="card">
-        <h3>Character Management</h3>
-        <p>Private area for creating, editing, and testing Aethra characters before public release.</p>
+        <h3>Character Control</h3>
+        <p>Private place for adding, editing, and testing Aethra characters before public release.</p>
       </div>
 
       <div class="card">
         <h3>Developer Notes</h3>
-        <p>Keep internal ideas, experiments, and hidden planning content away from normal users.</p>
+        <p>Keep internal ideas, experiments, and hidden platform planning away from normal users.</p>
       </div>
 
       <div class="card">
-        <h3>Testing Tools</h3>
-        <p>Use this area later for feature toggles, hidden UI testing, and quality checks.</p>
+        <h3>Testing Zone</h3>
+        <p>Future area for hidden feature toggles, QA checks, and UI experiments.</p>
       </div>
 
       <div class="card">
-        <h3>Analytics Preview</h3>
-        <p>Future space for user stats, signups, character clicks, and engagement tracking.</p>
+        <h3>Content Management</h3>
+        <p>Later you can manage banners, featured characters, announcements, and special events here.</p>
       </div>
 
       <div class="card">
-        <h3>Admin Actions</h3>
-        <p>Later you can add hidden tools like reviewing content, updating banners, and managing releases.</p>
+        <h3>Analytics</h3>
+        <p>Future space for user growth, character clicks, signups, and engagement tracking.</p>
       </div>
     </section>
   </div>
@@ -160,7 +194,9 @@
     const auth = getAuth(app);
 
     const developerEmail = "siddharthkumar9127@gmail.com";
+
     const logoutBtn = document.getElementById("logoutBtn");
+    const backHomeBtn = document.getElementById("backHomeBtn");
 
     onAuthStateChanged(auth, (user) => {
       if (!user) {
@@ -171,6 +207,10 @@
       if (user.email !== developerEmail) {
         window.location.href = "home.html";
       }
+    });
+
+    backHomeBtn.addEventListener("click", () => {
+      window.location.href = "home.html";
     });
 
     logoutBtn.addEventListener("click", async () => {
