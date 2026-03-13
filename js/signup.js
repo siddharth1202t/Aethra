@@ -23,8 +23,13 @@ const provider = new GoogleAuthProvider();
 
 const signupForm = document.getElementById("signupForm");
 const googleBtn = document.getElementById("googleSignInBtn");
+const signupBtn = document.querySelector(".signup-btn");
+const nameInput = document.getElementById("name");
+const emailInput = document.getElementById("email");
+const passwordInput = document.getElementById("password");
 
 let widgetId = null;
+let isSubmitting = false;
 
 function waitForTurnstile(timeout = 10000) {
   return new Promise((resolve, reject) => {
@@ -75,63 +80,143 @@ function isMobileDevice() {
   return /Android|iPhone|iPad|iPod|Opera Mini|IEMobile|WPDesktop/i.test(navigator.userAgent);
 }
 
-async function handleEmailSignup() {
-  const nameInput = document.getElementById("name");
-  const emailInput = document.getElementById("email");
-  const passwordInput = document.getElementById("password");
+function normalizeEmail(email) {
+  return email.trim().toLowerCase();
+}
 
-  const name = nameInput.value
+function sanitizeUsername(value) {
+  return value
     .trim()
-    .replace(/[<>]/g, "")
-    .replace(/script/gi, "");
+    .replace(/[^a-zA-Z0-9._ ]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
-   nameInput.value = name;
+function setTemporaryCooldown(button, ms = 3000) {
+  if (!button) return;
+
+  const originalText = button.dataset.originalText || button.textContent;
+  button.dataset.originalText = originalText;
+  button.disabled = true;
+  button.textContent = "Please wait...";
+
+  setTimeout(() => {
+    button.disabled = false;
+    button.textContent = originalText;
+  }, ms);
+}
+
+function setLoading(button, loadingText = "Please wait...") {
+  if (!button) return;
+  if (!button.dataset.originalText) {
+    button.dataset.originalText = button.textContent;
+  }
+  button.disabled = true;
+  button.textContent = loadingText;
+}
+
+function clearLoading(button) {
+  if (!button) return;
+  button.disabled = false;
+  button.textContent = button.dataset.originalText || button.textContent;
+}
+
+function getFriendlyAuthMessage(error) {
+  const code = error?.code || "";
+
+  switch (code) {
+    case "auth/email-already-in-use":
+      return "This email is already in use.";
+    case "auth/invalid-email":
+      return "Please enter a valid email address.";
+    case "auth/weak-password":
+      return "Password is too weak.";
+    case "auth/network-request-failed":
+      return "Network error. Please check your internet connection.";
+    case "auth/too-many-requests":
+      return "Too many attempts. Please wait and try again later.";
+    case "auth/popup-closed-by-user":
+      return "Google sign-in was closed before completion.";
+    case "auth/popup-blocked":
+      return "Popup was blocked by the browser. Please allow popups or try again.";
+    default:
+      return "Signup failed. Please try again.";
+  }
+}
+
+function redirectToHome() {
+  window.location.href = "home.html";
+}
+
+async function handleEmailSignup() {
+  if (isSubmitting) return;
+  isSubmitting = true;
+
+  const name = sanitizeUsername(nameInput.value);
+  const email = normalizeEmail(emailInput.value);
+  const password = passwordInput.value;
+  const token = getTurnstileToken();
+
+  nameInput.value = name;
+  emailInput.value = email;
 
   if (!name) {
     alert("Please enter a username.");
     nameInput.focus();
+    isSubmitting = false;
+    setTemporaryCooldown(signupBtn, 1500);
     return;
   }
 
   if (name.length < 3) {
     alert("Username must be at least 3 characters.");
     nameInput.focus();
+    isSubmitting = false;
+    setTemporaryCooldown(signupBtn, 1500);
     return;
   }
-  const email = emailInput.value.trim();
-  const password = passwordInput.value;
-  const token = getTurnstileToken();
 
-  if (!name) {
-    alert("Please enter a username.");
+  if (name.length > 20) {
+    alert("Username must be 20 characters or less.");
     nameInput.focus();
+    isSubmitting = false;
+    setTemporaryCooldown(signupBtn, 1500);
     return;
   }
 
   if (!email) {
     alert("Please enter your email.");
     emailInput.focus();
+    isSubmitting = false;
+    setTemporaryCooldown(signupBtn, 1500);
     return;
   }
 
   if (!password) {
     alert("Please enter your password.");
     passwordInput.focus();
+    isSubmitting = false;
+    setTemporaryCooldown(signupBtn, 1500);
     return;
   }
 
   if (password.length < 8) {
     alert("Password must be at least 8 characters.");
     passwordInput.focus();
+    isSubmitting = false;
+    setTemporaryCooldown(signupBtn, 1500);
     return;
   }
 
   if (!token) {
     alert("Please complete the captcha first.");
+    isSubmitting = false;
+    setTemporaryCooldown(signupBtn, 1500);
     return;
   }
 
   try {
+    setLoading(signupBtn, "Creating account...");
     await verifyTurnstileToken(token);
 
     const userCredential = await createUserWithEmailAndPassword(auth, email, password);
@@ -140,23 +225,33 @@ async function handleEmailSignup() {
       displayName: name
     });
 
-    window.location.href = "home.html";
+    redirectToHome();
   } catch (error) {
     console.error(error);
-    alert(error.message);
+    alert(getFriendlyAuthMessage(error));
     resetTurnstile();
+    setTemporaryCooldown(signupBtn, 3000);
+  } finally {
+    clearLoading(signupBtn);
+    isSubmitting = false;
   }
 }
 
 async function handleGoogleSignup() {
+  if (isSubmitting) return;
+  isSubmitting = true;
+
   const token = getTurnstileToken();
 
   if (!token) {
     alert("Please complete the captcha first.");
+    isSubmitting = false;
+    setTemporaryCooldown(googleBtn, 1500);
     return;
   }
 
   try {
+    setLoading(googleBtn, "Please wait...");
     await verifyTurnstileToken(token);
 
     if (isMobileDevice()) {
@@ -164,13 +259,16 @@ async function handleGoogleSignup() {
       return;
     } else {
       await signInWithPopup(auth, provider);
+      redirectToHome();
     }
-
-    window.location.href = "home.html";
   } catch (error) {
     console.error(error);
-    alert(error.message);
+    alert(getFriendlyAuthMessage(error));
     resetTurnstile();
+    setTemporaryCooldown(googleBtn, 3000);
+  } finally {
+    clearLoading(googleBtn);
+    isSubmitting = false;
   }
 }
 
@@ -193,6 +291,9 @@ async function initTurnstile() {
     "error-callback": function (code) {
       console.error("Turnstile error code:", code);
       alert("Captcha failed to load. Error code: " + code);
+    },
+    "expired-callback": function () {
+      console.warn("Turnstile expired.");
     }
   });
 }
