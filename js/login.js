@@ -133,7 +133,7 @@ async function initTurnstile() {
   widgetId = window.turnstile.render("#turnstile-container", {
     sitekey: "0x4AAAAAACpvKyzO0FiDW0v2",
     theme: "dark",
-    size: window.innerWidth <= 520 ? "flexible" : "normal",
+    size: "flexible",
     retry: "auto",
     "refresh-expired": "auto",
     "error-callback": function (code) {
@@ -156,6 +156,10 @@ if (googleBtn) {
   });
 }
 
-window.addEventListener("load", () => {
-  initTurnstile();
+window.addEventListener("load", async () => {
+  try {
+    await initTurnstile();
+  } catch (error) {
+    console.error("Turnstile init failed:", error);
+  }
 });
