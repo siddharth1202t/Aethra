@@ -21,8 +21,12 @@ const auth = getAuth(app);
 
 const form = document.getElementById("loginForm");
 const googleBtn = document.getElementById("googleLoginBtn");
+const loginBtn = document.querySelector(".login-btn");
+const emailInput = document.getElementById("email");
+const passwordInput = document.getElementById("password");
 
 let widgetId = null;
+let isSubmitting = false;
 
 function waitForTurnstile(timeout = 10000) {
   return new Promise((resolve, reject) => {
@@ -73,46 +77,129 @@ function isMobileDevice() {
   return /Android|iPhone|iPad|iPod|Opera Mini|IEMobile|WPDesktop/i.test(navigator.userAgent);
 }
 
+function normalizeEmail(email) {
+  return email.trim().toLowerCase();
+}
+
+function setTemporaryCooldown(button, ms = 3000) {
+  if (!button) return;
+
+  const originalText = button.dataset.originalText || button.textContent;
+  button.dataset.originalText = originalText;
+  button.disabled = true;
+  button.textContent = "Please wait...";
+
+  setTimeout(() => {
+    button.disabled = false;
+    button.textContent = originalText;
+  }, ms);
+}
+
+function setLoading(button, loadingText = "Please wait...") {
+  if (!button) return;
+  if (!button.dataset.originalText) {
+    button.dataset.originalText = button.textContent;
+  }
+  button.disabled = true;
+  button.textContent = loadingText;
+}
+
+function clearLoading(button) {
+  if (!button) return;
+  button.disabled = false;
+  button.textContent = button.dataset.originalText || button.textContent;
+}
+
+function getFriendlyAuthMessage(error) {
+  const code = error?.code || "";
+
+  switch (code) {
+    case "auth/invalid-credential":
+    case "auth/wrong-password":
+    case "auth/user-not-found":
+    case "auth/invalid-email":
+      return "Invalid email or password.";
+    case "auth/too-many-requests":
+      return "Too many attempts. Please wait and try again later.";
+    case "auth/network-request-failed":
+      return "Network error. Please check your internet connection.";
+    case "auth/popup-closed-by-user":
+      return "Google sign-in was closed before completion.";
+    case "auth/popup-blocked":
+      return "Popup was blocked by the browser. Please allow popups or try again.";
+    default:
+      return "Login failed. Please try again.";
+  }
+}
+
+function redirectToHome() {
+  window.location.href = "home.html";
+}
+
 async function handleEmailLogin() {
-  const email = document.getElementById("email").value.trim();
-  const password = document.getElementById("password").value;
+  if (isSubmitting) return;
+  isSubmitting = true;
+
+  const email = normalizeEmail(emailInput.value);
+  const password = passwordInput.value;
   const token = getTurnstileToken();
+
+  emailInput.value = email;
 
   if (!email) {
     alert("Please enter your email.");
+    emailInput.focus();
+    isSubmitting = false;
+    setTemporaryCooldown(loginBtn, 1500);
     return;
   }
 
   if (!password) {
     alert("Please enter your password.");
+    passwordInput.focus();
+    isSubmitting = false;
+    setTemporaryCooldown(loginBtn, 1500);
     return;
   }
 
   if (!token) {
     alert("Please complete the captcha first.");
+    isSubmitting = false;
+    setTemporaryCooldown(loginBtn, 1500);
     return;
   }
 
   try {
+    setLoading(loginBtn, "Logging in...");
     await verifyTurnstileToken(token);
     await signInWithEmailAndPassword(auth, email, password);
-    window.location.href = "home.html";
+    redirectToHome();
   } catch (error) {
-    alert(error.message);
     console.error(error);
+    alert(getFriendlyAuthMessage(error));
     resetTurnstile();
+    setTemporaryCooldown(loginBtn, 3000);
+  } finally {
+    clearLoading(loginBtn);
+    isSubmitting = false;
   }
 }
 
 async function handleGoogleLogin() {
+  if (isSubmitting) return;
+  isSubmitting = true;
+
   const token = getTurnstileToken();
 
   if (!token) {
     alert("Please complete the captcha first.");
+    isSubmitting = false;
+    setTemporaryCooldown(googleBtn, 1500);
     return;
   }
 
   try {
+    setLoading(googleBtn, "Please wait...");
     await verifyTurnstileToken(token);
 
     const provider = new GoogleAuthProvider();
@@ -122,13 +209,16 @@ async function handleGoogleLogin() {
       return;
     } else {
       await signInWithPopup(auth, provider);
+      redirectToHome();
     }
-
-    window.location.href = "home.html";
   } catch (error) {
-    alert(error.message);
     console.error(error);
+    alert(getFriendlyAuthMessage(error));
     resetTurnstile();
+    setTemporaryCooldown(googleBtn, 3000);
+  } finally {
+    clearLoading(googleBtn);
+    isSubmitting = false;
   }
 }
 
@@ -151,6 +241,9 @@ async function initTurnstile() {
     "error-callback": function (code) {
       console.error("Turnstile error code:", code);
       alert("Captcha failed to load. Error code: " + code);
+    },
+    "expired-callback": function () {
+      console.warn("Turnstile expired.");
     }
   });
 }
