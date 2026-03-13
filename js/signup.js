@@ -80,7 +80,15 @@ async function handleEmailSignup() {
   const emailInput = document.getElementById("email");
   const passwordInput = document.getElementById("password");
 
-  const name = nameInput.value.trim();
+  const name = nameInput.value
+    .trim()
+    .replace(/[<>]/g, "")
+    .replace(/script/gi, "");
+  if (name.length < 3) {
+    alert("Username must be at least 3 characters.");
+    nameInput.focus();
+    return;
+  }
   const email = emailInput.value.trim();
   const password = passwordInput.value;
   const token = getTurnstileToken();
