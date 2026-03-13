@@ -103,7 +103,7 @@ async function handleEmailSignup() {
     return;
   }
 
-  if (password.length < 6) {
+  if (password.length < 8) {
     alert("Password must be at least 6 characters.");
     passwordInput.focus();
     return;
