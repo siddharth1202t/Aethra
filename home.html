@@ -336,87 +336,6 @@
       line-height: 1.6;
     }
 
-    .filter-pills {
-      display: flex;
-      gap: 10px;
-      flex-wrap: wrap;
-    }
-
-    .pill {
-      padding: 10px 14px;
-      border-radius: 999px;
-      background: rgba(255,255,255,0.05);
-      border: 1px solid rgba(255,255,255,0.09);
-      color: white;
-      font-size: 0.92rem;
-    }
-
-    .pill.active {
-      background: rgba(138,108,255,0.18);
-      color: #f0eaff;
-    }
-
-    .characters-grid {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 18px;
-    }
-
-    .character-card {
-      border-radius: 24px;
-      overflow: hidden;
-      display: flex;
-      flex-direction: column;
-    }
-
-    .character-image {
-      height: 290px;
-      position: relative;
-      overflow: hidden;
-    }
-
-    .character-image img {
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-      display: block;
-      filter: brightness(0.9) saturate(1.04);
-    }
-
-    .character-info {
-      padding: 18px;
-    }
-
-    .character-info h4 {
-      font-size: 1.25rem;
-      margin-bottom: 8px;
-    }
-
-    .character-role {
-      display: inline-block;
-      margin-bottom: 10px;
-      font-size: 0.85rem;
-      color: #d7caff;
-      background: rgba(138,108,255,0.12);
-      padding: 7px 12px;
-      border-radius: 999px;
-      border: 1px solid rgba(255,255,255,0.08);
-    }
-
-    .character-info p {
-      color: var(--muted);
-      line-height: 1.65;
-      font-size: 0.95rem;
-      margin-bottom: 16px;
-    }
-
-    .chat-btn {
-      width: 100%;
-      color: white;
-      background: linear-gradient(135deg, #7b61ff, #9a7cff);
-      box-shadow: 0 10px 28px rgba(123, 97, 255, 0.26);
-    }
-
     .quick-grid {
       display: grid;
       grid-template-columns: repeat(3, 1fr);
@@ -446,7 +365,6 @@
         grid-template-columns: 1fr;
       }
 
-      .characters-grid,
       .quick-grid {
         grid-template-columns: repeat(2, 1fr);
       }
@@ -484,13 +402,8 @@
         border-radius: 22px;
       }
 
-      .characters-grid,
       .quick-grid {
         grid-template-columns: 1fr;
-      }
-
-      .character-image {
-        height: 240px;
       }
 
       .top-actions {
@@ -548,17 +461,17 @@
       </div>
 
       <div class="top-actions">
-      <div class="user-pill">Logged in as <span id="username">User</span></div>
+        <div class="user-pill">Logged in as <span id="username">User</span></div>
 
-      <button
-        class="logout-btn"
-        id="devBtn"
-        style="display:none; background:linear-gradient(135deg,#ff7a18,#ff3d3d);">
-        Developer
-      </button>
+        <button
+          class="logout-btn"
+          id="devBtn"
+          style="display:none; background:linear-gradient(135deg,#ff7a18,#ff3d3d);">
+          Developer
+        </button>
 
-      <button class="logout-btn" id="logoutBtn">Logout</button>
-    </div>
+        <button class="logout-btn" id="logoutBtn">Logout</button>
+      </div>
     </header>
 
     <section class="hero">
@@ -592,26 +505,26 @@
       </div>
 
       <aside class="side-panel">
-      <div>
-        <h3 class="panel-title">Your Aethra World</h3>
-        <p class="panel-sub">Every conversation shapes a deeper bond. Pick a companion and continue your journey.</p>
-      </div>
+        <div>
+          <h3 class="panel-title">Your Aethra World</h3>
+          <p class="panel-sub">Every conversation shapes a deeper bond. Pick a companion and continue your journey.</p>
+        </div>
 
-      <div class="mini-card">
-        <h4>Recommended Start</h4>
-        <p>Begin with a warm and emotionally rich character to experience Aethra’s full atmosphere.</p>
-      </div>
+        <div class="mini-card">
+          <h4>Recommended Start</h4>
+          <p>Begin with a warm and emotionally rich character to experience Aethra’s full atmosphere.</p>
+        </div>
 
-      <div class="mini-card">
+        <div class="mini-card">
           <h4>Today's Mood</h4>
           <p>Soft, mysterious, and immersive. A perfect time to explore thoughtful and emotional conversations.</p>
-      </div>
+        </div>
 
-      <div class="mini-card">
-        <h4>Featured Experience</h4>
-        <p>Discover characters with distinct personalities, evolving chemistry, and memorable story energy.</p>
-      </div>
-    </aside>
+        <div class="mini-card">
+          <h4>Featured Experience</h4>
+          <p>Discover characters with distinct personalities, evolving chemistry, and memorable story energy.</p>
+        </div>
+      </aside>
     </section>
 
     <section class="section-card">
@@ -639,7 +552,7 @@
         </div>
       </div>
     </section>
-      </div>
+  </div>
 
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
@@ -660,15 +573,28 @@
     const usernameEl = document.getElementById("username");
     const heroUsernameEl = document.getElementById("heroUsername");
     const logoutBtn = document.getElementById("logoutBtn");
+    const devBtn = document.getElementById("devBtn");
+
+    const developerEmail = "siddharthkumar9127@gmail.com";
 
     onAuthStateChanged(auth, (user) => {
       if (user) {
         const displayName = user.displayName || user.email || "User";
         usernameEl.textContent = displayName;
         heroUsernameEl.textContent = displayName;
+
+        if (user.email === developerEmail) {
+          devBtn.style.display = "block";
+        } else {
+          devBtn.style.display = "none";
+        }
       } else {
         window.location.href = "login.html";
       }
+    });
+
+    devBtn.addEventListener("click", () => {
+      window.location.href = "developer.html";
     });
 
     logoutBtn.addEventListener("click", async () => {
