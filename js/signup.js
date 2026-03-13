@@ -84,6 +84,15 @@ async function handleEmailSignup() {
     .trim()
     .replace(/[<>]/g, "")
     .replace(/script/gi, "");
+
+   nameInput.value = name;
+
+  if (!name) {
+    alert("Please enter a username.");
+    nameInput.focus();
+    return;
+  }
+
   if (name.length < 3) {
     alert("Username must be at least 3 characters.");
     nameInput.focus();
@@ -112,7 +121,7 @@ async function handleEmailSignup() {
   }
 
   if (password.length < 8) {
-    alert("Password must be at least 6 characters.");
+    alert("Password must be at least 8 characters.");
     passwordInput.focus();
     return;
   }
