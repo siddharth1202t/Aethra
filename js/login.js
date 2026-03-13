@@ -3,7 +3,8 @@ import {
   getAuth,
   signInWithEmailAndPassword,
   GoogleAuthProvider,
-  signInWithPopup
+  signInWithPopup,
+  signInWithRedirect
 } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
 
 const firebaseConfig = {
@@ -22,7 +23,6 @@ const form = document.getElementById("loginForm");
 const googleBtn = document.getElementById("googleLoginBtn");
 
 let widgetId = null;
-let currentAction = null;
 
 function waitForTurnstile() {
   return new Promise((resolve) => {
@@ -53,9 +53,25 @@ async function verifyTurnstileToken(token) {
   }
 }
 
+function getTurnstileToken() {
+  if (widgetId === null || !window.turnstile) return "";
+  return window.turnstile.getResponse(widgetId);
+}
+
+function resetTurnstile() {
+  if (widgetId !== null && window.turnstile) {
+    window.turnstile.reset(widgetId);
+  }
+}
+
+function isMobileDevice() {
+  return /Android|iPhone|iPad|iPod|Opera Mini|IEMobile|WPDesktop/i.test(navigator.userAgent);
+}
+
 async function handleEmailLogin() {
   const email = document.getElementById("email").value.trim();
   const password = document.getElementById("password").value;
+  const token = getTurnstileToken();
 
   if (!email) {
     alert("Please enter your email.");
@@ -67,46 +83,47 @@ async function handleEmailLogin() {
     return;
   }
 
-  currentAction = "email";
+  if (!token) {
+    alert("Please complete the captcha first.");
+    return;
+  }
 
-  if (widgetId !== null) {
-    window.turnstile.reset(widgetId);
+  try {
+    await verifyTurnstileToken(token);
+    await signInWithEmailAndPassword(auth, email, password);
+    window.location.href = "home.html";
+  } catch (error) {
+    alert(error.message);
+    console.error(error);
+    resetTurnstile();
   }
 }
 
 async function handleGoogleLogin() {
-  currentAction = "google";
+  const token = getTurnstileToken();
 
-  if (widgetId !== null) {
-    window.turnstile.reset(widgetId);
-    window.turnstile.execute(widgetId);
+  if (!token) {
+    alert("Please complete the captcha first.");
+    return;
   }
-}
 
-async function onTurnstileSuccess(token) {
   try {
     await verifyTurnstileToken(token);
 
-    if (currentAction === "email") {
-      const email = document.getElementById("email").value.trim();
-      const password = document.getElementById("password").value;
-      await signInWithEmailAndPassword(auth, email, password);
-    } else if (currentAction === "google") {
-      const provider = new GoogleAuthProvider();
-      await signInWithPopup(auth, provider);
-    } else {
+    const provider = new GoogleAuthProvider();
+
+    if (isMobileDevice()) {
+      await signInWithRedirect(auth, provider);
       return;
+    } else {
+      await signInWithPopup(auth, provider);
     }
 
     window.location.href = "home.html";
   } catch (error) {
     alert(error.message);
     console.error(error);
-  } finally {
-    currentAction = null;
-    if (widgetId !== null && window.turnstile) {
-      window.turnstile.reset(widgetId);
-    }
+    resetTurnstile();
   }
 }
 
@@ -116,7 +133,9 @@ async function initTurnstile() {
   widgetId = window.turnstile.render("#turnstile-container", {
     sitekey: "0x4AAAAAACpvKyzO0FiDW0v2",
     theme: "dark",
-    callback: onTurnstileSuccess,
+    size: window.innerWidth <= 520 ? "flexible" : "normal",
+    retry: "auto",
+    "refresh-expired": "auto",
     "error-callback": function (code) {
       console.error("Turnstile error code:", code);
       alert("Captcha failed to load. Error code: " + code);
@@ -127,14 +146,16 @@ async function initTurnstile() {
 if (form) {
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
-    handleEmailLogin();
+    await handleEmailLogin();
   });
 }
 
 if (googleBtn) {
   googleBtn.addEventListener("click", async () => {
-    handleGoogleLogin();
+    await handleGoogleLogin();
   });
 }
 
-initTurnstile();
+window.addEventListener("load", () => {
+  initTurnstile();
+});
