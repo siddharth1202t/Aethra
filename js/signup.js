@@ -156,7 +156,7 @@ async function initTurnstile() {
   await waitForTurnstile();
 
   widgetId = window.turnstile.render("#turnstile-container", {
-    sitekey: "0x4AAAAAACpvKyzO0FiDW0v2",
+    sitekey: "0x4AAAAAACqA_Z98nhvcobbI ",
     theme: "dark",
     size: "flexible",
     retry: "auto",
