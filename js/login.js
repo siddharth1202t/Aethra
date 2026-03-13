@@ -6,6 +6,7 @@ import {
   signInWithPopup,
   signInWithRedirect
 } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+import { ensureUserProfile } from "./user-profile.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyCbfEQyTwry7qNOluYqlHUZuU8AF3bkpgQ",
@@ -172,7 +173,8 @@ async function handleEmailLogin() {
   try {
     setLoading(loginBtn, "Logging in...");
     await verifyTurnstileToken(token);
-    await signInWithEmailAndPassword(auth, email, password);
+    const userCredential = await signInWithEmailAndPassword(auth, email, password);
+    await ensureUserProfile(userCredential.user);
     redirectToHome();
   } catch (error) {
     console.error(error);
@@ -208,7 +210,8 @@ async function handleGoogleLogin() {
       await signInWithRedirect(auth, provider);
       return;
     } else {
-      await signInWithPopup(auth, provider);
+      const userCredential = await signInWithPopup(auth, provider);
+      await ensureUserProfile(userCredential.user);
       redirectToHome();
     }
   } catch (error) {
