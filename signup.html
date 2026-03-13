@@ -233,8 +233,19 @@
       box-shadow: 0 0 0 3px rgba(138, 108, 255, 0.12);
     }
 
-    .captcha-wrap {
+   .captcha-wrap {
       margin: 18px 0 12px;
+      width: 100%;
+      min-height: 70px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      overflow: hidden;
+      transform: none;
+    }
+
+    #turnstile-container {
+      width: 100%;
       display: flex;
       justify-content: center;
     }
@@ -330,8 +341,7 @@
         display: none;
       }
     }
-
-    @media (max-width: 520px) {
+     @media (max-width: 520px) {
       body {
         overflow-y: auto;
       }
@@ -348,12 +358,9 @@
       h1 {
         font-size: 2rem;
       }
-
-      .captcha-wrap {
-        transform: scale(0.92);
-        transform-origin: center;
-      }
     }
+    
+    
   </style>
 </head>
 <body>
