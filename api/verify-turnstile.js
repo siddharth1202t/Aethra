@@ -12,7 +12,10 @@ export default async function handler(req, res) {
     const origin = req.headers.origin || "";
 
     if (!allowedOrigins.includes(origin)) {
-      return res.status(403).json({ success: false, message: "Forbidden origin" });
+      return res.status(403).json({
+        success: false,
+        message: "Forbidden origin"
+      });
     }
 
     const { token } = req.body;
