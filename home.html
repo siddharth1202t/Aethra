@@ -461,7 +461,7 @@
       </div>
 
       <div class="top-actions">
-        <div class="user-pill">Logged in as <span id="username">User</span></div>
+        <div class="user-pill">Logged in as <span id="userRole">User</span></div>
 
         <button
           class="logout-btn"
@@ -555,20 +555,13 @@
   </div>
 
   <script type="module">
-  import { requireAuth } from "./js/auth-guard.js";
-
-  requireAuth((user) => {
-    console.log("User logged in:", user.email);
-  });
     import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
     import { getAuth, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+    import { doc, getDoc, getFirestore } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
     import { SECURITY_CONFIG } from "./js/security-config.js";
     import { ensureUserProfile } from "./js/user-profile.js";
     import { requireAuth } from "./js/auth-guard.js";
 
-    requireAuth((user) => {
-      console.log("User logged in:", user.email);
-    });
     const firebaseConfig = {
       apiKey: "AIzaSyCbfEQyTwry7qNOluYqlHUZuU8AF3bkpgQ",
       authDomain: "aethra-web.firebaseapp.com",
@@ -580,29 +573,60 @@
 
     const app = initializeApp(firebaseConfig);
     const auth = getAuth(app);
+    const db = getFirestore(app);
 
-    const usernameEl = document.getElementById("username");
+    const userRoleEl = document.getElementById("userRole");
     const heroUsernameEl = document.getElementById("heroUsername");
     const logoutBtn = document.getElementById("logoutBtn");
     const devBtn = document.getElementById("devBtn");
-    
-    const developerEmail = SECURITY_CONFIG.developerEmail;
+
+    requireAuth((user) => {
+      console.log("User logged in:", user.email);
+    });
 
     onAuthStateChanged(auth, async (user) => {
-      if (user) {
+      if (!user) {
+        window.location.href = "login.html";
+        return;
+      }
+
+      try {
         await ensureUserProfile(user);
 
-        const displayName = user.displayName || user.email || "User";
-        usernameEl.textContent = displayName;
+        const displayName =
+          user.displayName ||
+          (user.email ? user.email.split("@")[0] : "Explorer");
+
         heroUsernameEl.textContent = displayName;
 
-        if (user.email === developerEmail) {
+        const currentEmail = (user.email || "").trim().toLowerCase();
+        const developerEmail = (SECURITY_CONFIG.developerEmail || "").trim().toLowerCase();
+
+      let isDeveloper = false;
+
+        if (currentEmail === developerEmail) {
+          const userRef = doc(db, "users", user.uid);
+          const userSnap = await getDoc(userRef);
+
+          if (userSnap.exists()) {
+            const userData = userSnap.data();
+            if (userData.role === "developer") {
+              isDeveloper = true;
+            }
+          }
+        }
+
+        if (isDeveloper) {
+          userRoleEl.textContent = "Developer";
           devBtn.style.display = "block";
         } else {
+          userRoleEl.textContent = "User";
           devBtn.style.display = "none";
         }
-      } else {
-        window.location.href = "login.html";
+      } catch (error) {
+        console.error("Home auth setup failed:", error);
+        userRoleEl.textContent = "User";
+        devBtn.style.display = "none";
       }
     });
 
@@ -629,6 +653,6 @@
       star.style.animationDelay = Math.random() * 4 + "s";
       starsContainer.appendChild(star);
     }
-  </script>
+</script>
 </body>
 </html>
