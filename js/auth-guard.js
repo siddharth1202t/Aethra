@@ -1,5 +1,6 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
 import { getAuth, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+import { doc, getDoc, getFirestore } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 import { SECURITY_CONFIG } from "./security-config.js";
 
 const firebaseConfig = {
@@ -13,6 +14,7 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
+const db = getFirestore(app);
 
 export function requireAuth(callback) {
   onAuthStateChanged(auth, (user) => {
@@ -26,7 +28,7 @@ export function requireAuth(callback) {
 }
 
 export function requireDeveloper(callback) {
-  onAuthStateChanged(auth, (user) => {
+  onAuthStateChanged(auth, async (user) => {
     if (!user) {
       window.location.href = "login.html";
       return;
@@ -37,7 +39,27 @@ export function requireDeveloper(callback) {
       return;
     }
 
-    callback(user);
+    try {
+      const userRef = doc(db, "users", user.uid);
+      const userSnap = await getDoc(userRef);
+
+      if (!userSnap.exists()) {
+        window.location.href = "home.html";
+        return;
+      }
+
+      const userData = userSnap.data();
+
+      if (userData.role !== "developer") {
+        window.location.href = "home.html";
+        return;
+      }
+
+      if (callback) callback(user);
+    } catch (error) {
+      console.error("Developer guard failed:", error);
+      window.location.href = "home.html";
+    }
   });
 }
 
