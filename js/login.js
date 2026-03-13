@@ -24,15 +24,20 @@ const googleBtn = document.getElementById("googleLoginBtn");
 
 let widgetId = null;
 
-function waitForTurnstile() {
-  return new Promise((resolve) => {
+function waitForTurnstile(timeout = 10000) {
+  return new Promise((resolve, reject) => {
+    const start = Date.now();
+
     const check = () => {
       if (window.turnstile) {
         resolve();
+      } else if (Date.now() - start > timeout) {
+        reject(new Error("Turnstile script did not load."));
       } else {
         setTimeout(check, 100);
       }
     };
+
     check();
   });
 }
@@ -130,6 +135,13 @@ async function handleGoogleLogin() {
 async function initTurnstile() {
   await waitForTurnstile();
 
+  const container = document.getElementById("turnstile-container");
+  if (!container) {
+    throw new Error("Turnstile container not found.");
+  }
+
+  container.innerHTML = "";
+
   widgetId = window.turnstile.render("#turnstile-container", {
     sitekey: "0x4AAAAAACqA_Z98nhvcobbI",
     theme: "dark",
@@ -161,5 +173,6 @@ window.addEventListener("load", async () => {
     await initTurnstile();
   } catch (error) {
     console.error("Turnstile init failed:", error);
+    alert("Turnstile init failed: " + error.message);
   }
 });
