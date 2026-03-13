@@ -1,3 +1,42 @@
+const rateLimitStore = new Map();
+
+function getClientIp(req) {
+  const forwarded = req.headers["x-forwarded-for"];
+  if (typeof forwarded === "string" && forwarded.length > 0) {
+    return forwarded.split(",")[0].trim();
+  }
+  return "unknown";
+}
+
+function isRateLimited(ip, limit = 10, windowMs = 60 * 1000) {
+  const now = Date.now();
+  const record = rateLimitStore.get(ip);
+
+  if (!record) {
+    rateLimitStore.set(ip, {
+      count: 1,
+      windowStart: now
+    });
+    return false;
+  }
+
+  if (now - record.windowStart > windowMs) {
+    rateLimitStore.set(ip, {
+      count: 1,
+      windowStart: now
+    });
+    return false;
+  }
+
+  if (record.count >= limit) {
+    return true;
+  }
+
+  record.count += 1;
+  rateLimitStore.set(ip, record);
+  return false;
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ success: false });
@@ -10,11 +49,19 @@ export default async function handler(req, res) {
     ];
 
     const origin = req.headers.origin || "";
-
     if (!allowedOrigins.includes(origin)) {
       return res.status(403).json({
         success: false,
         message: "Forbidden origin"
+      });
+    }
+
+    const ip = getClientIp(req);
+
+    if (isRateLimited(ip, 10, 60 * 1000)) {
+      return res.status(429).json({
+        success: false,
+        message: "Too many requests. Please try again later."
       });
     }
 
