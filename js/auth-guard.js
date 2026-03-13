@@ -21,7 +21,7 @@ export function requireAuth(callback) {
       return;
     }
 
-    callback(user);
+    if (callback) callback(user);
   });
 }
 
