@@ -186,6 +186,11 @@
       import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
       import { getAuth, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
       import { SECURITY_CONFIG } from "./js/security-config.js";
+      import { requireDeveloper } from "./js/auth-guard.js";
+
+      requireDeveloper((user) => {
+        console.log("Developer access granted:", user.email);
+      });
 
       const firebaseConfig = {
         apiKey: "AIzaSyCbfEQyTwry7qNOluYqlHUZuU8AF3bkpgQ",
