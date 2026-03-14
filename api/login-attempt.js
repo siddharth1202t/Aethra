@@ -1,3 +1,5 @@
+import { writeSecurityLog } from "./_security-log.js";
+
 const loginAttemptStore = new Map();
 
 function normalizeEmail(email) {
@@ -55,7 +57,18 @@ export default async function handler(req, res) {
     ];
 
     const origin = req.headers.origin || "";
+    const ip = getClientIp(req);
+
     if (!allowedOrigins.includes(origin)) {
+      await writeSecurityLog({
+        type: "forbidden_origin",
+        level: "warning",
+        message: "Blocked request from forbidden origin on login-attempt API",
+        ip,
+        route: "/api/login-attempt",
+        metadata: { origin }
+      });
+
       return res.status(403).json({
         success: false,
         message: "Forbidden origin"
@@ -64,9 +77,17 @@ export default async function handler(req, res) {
 
     const { email, action } = req.body || {};
     const normalizedEmail = normalizeEmail(email);
-    const ip = getClientIp(req);
 
     if (!normalizedEmail) {
+      await writeSecurityLog({
+        type: "invalid_login_attempt_request",
+        level: "warning",
+        message: "Missing email in login-attempt API request",
+        ip,
+        route: "/api/login-attempt",
+        metadata: { action: action || "" }
+      });
+
       return res.status(400).json({
         success: false,
         message: "Email is required"
@@ -74,6 +95,16 @@ export default async function handler(req, res) {
     }
 
     if (!action || !["check", "fail", "reset"].includes(action)) {
+      await writeSecurityLog({
+        type: "invalid_login_attempt_action",
+        level: "warning",
+        message: "Invalid action sent to login-attempt API",
+        email: normalizedEmail,
+        ip,
+        route: "/api/login-attempt",
+        metadata: { action: action || "" }
+      });
+
       return res.status(400).json({
         success: false,
         message: "Invalid action"
@@ -101,6 +132,31 @@ export default async function handler(req, res) {
 
       if (record.count >= 5) {
         record.lockUntil = now + 15 * 60 * 1000;
+
+        await writeSecurityLog({
+          type: "login_lockout",
+          level: "critical",
+          message: "Too many failed login attempts triggered temporary lock",
+          email: normalizedEmail,
+          ip,
+          route: "/api/login-attempt",
+          metadata: {
+            attempts: record.count,
+            lockUntil: record.lockUntil
+          }
+        });
+      } else {
+        await writeSecurityLog({
+          type: "login_failed_attempt",
+          level: "warning",
+          message: "Failed login attempt recorded",
+          email: normalizedEmail,
+          ip,
+          route: "/api/login-attempt",
+          metadata: {
+            attempts: record.count
+          }
+        });
       }
 
       saveRecord(key, record);
@@ -119,6 +175,16 @@ export default async function handler(req, res) {
     if (action === "reset") {
       loginAttemptStore.delete(key);
 
+      await writeSecurityLog({
+        type: "login_attempt_reset",
+        level: "info",
+        message: "Login attempt counter reset after successful login",
+        email: normalizedEmail,
+        ip,
+        route: "/api/login-attempt",
+        metadata: {}
+      });
+
       return res.status(200).json({
         success: true,
         reset: true
@@ -131,6 +197,18 @@ export default async function handler(req, res) {
     });
   } catch (error) {
     console.error("Login attempt API error:", error);
+
+    await writeSecurityLog({
+      type: "login_attempt_api_error",
+      level: "error",
+      message: "Unhandled server error in login-attempt API",
+      ip: getClientIp(req),
+      route: "/api/login-attempt",
+      metadata: {
+        error: error?.message || "Unknown error"
+      }
+    });
+
     return res.status(500).json({
       success: false,
       message: "Server error"
