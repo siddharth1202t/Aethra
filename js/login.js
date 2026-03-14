@@ -4,7 +4,8 @@ import {
   signInWithEmailAndPassword,
   GoogleAuthProvider,
   signInWithPopup,
-  signInWithRedirect
+  signInWithRedirect,
+  getRedirectResult
 } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
 import { ensureUserProfile } from "./user-profile.js";
 
@@ -138,6 +139,24 @@ function redirectToHome() {
   window.location.href = "home.html";
 }
 
+async function handleRedirectResult() {
+  try {
+    const result = await getRedirectResult(auth);
+
+    if (result?.user) {
+      await ensureUserProfile(result.user);
+      redirectToHome();
+      return true;
+    }
+
+    return false;
+  } catch (error) {
+    console.error("Redirect sign-in failed:", error);
+    alert(getFriendlyAuthMessage(error));
+    return false;
+  }
+}
+
 async function handleEmailLogin() {
   if (isSubmitting) return;
   isSubmitting = true;
@@ -174,6 +193,7 @@ async function handleEmailLogin() {
   try {
     setLoading(loginBtn, "Logging in...");
     await verifyTurnstileToken(token);
+
     const userCredential = await signInWithEmailAndPassword(auth, email, password);
     await ensureUserProfile(userCredential.user);
     redirectToHome();
@@ -204,8 +224,6 @@ async function handleGoogleLogin() {
   try {
     setLoading(googleBtn, "Please wait...");
     await verifyTurnstileToken(token);
-
-    
 
     if (isMobileDevice()) {
       await signInWithRedirect(auth, provider);
@@ -267,9 +285,13 @@ if (googleBtn) {
 
 window.addEventListener("load", async () => {
   try {
-    await initTurnstile();
+    const redirected = await handleRedirectResult();
+
+    if (!redirected) {
+      await initTurnstile();
+    }
   } catch (error) {
-    console.error("Turnstile init failed:", error);
-    alert("Turnstile init failed: " + error.message);
+    console.error("Page init failed:", error);
+    alert("Page init failed: " + error.message);
   }
 });
