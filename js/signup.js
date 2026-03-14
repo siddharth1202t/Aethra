@@ -4,10 +4,12 @@ import {
   createUserWithEmailAndPassword,
   signInWithPopup,
   signInWithRedirect,
+  getRedirectResult,
   GoogleAuthProvider,
   updateProfile
 } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
 import { ensureUserProfile } from "./user-profile.js";
+
 const firebaseConfig = {
   apiKey: "AIzaSyCbfEQyTwry7qNOluYqlHUZuU8AF3bkpgQ",
   authDomain: "aethra-web.firebaseapp.com",
@@ -146,6 +148,24 @@ function getFriendlyAuthMessage(error) {
 
 function redirectToHome() {
   window.location.href = "home.html";
+}
+
+async function handleRedirectResult() {
+  try {
+    const result = await getRedirectResult(auth);
+
+    if (result?.user) {
+      await ensureUserProfile(result.user);
+      redirectToHome();
+      return true;
+    }
+
+    return false;
+  } catch (error) {
+    console.error("Redirect sign-in failed:", error);
+    alert(getFriendlyAuthMessage(error));
+    return false;
+  }
 }
 
 async function handleEmailSignup() {
@@ -316,9 +336,13 @@ if (googleBtn) {
 
 window.addEventListener("load", async () => {
   try {
-    await initTurnstile();
+    const redirected = await handleRedirectResult();
+
+    if (!redirected) {
+      await initTurnstile();
+    }
   } catch (error) {
-    console.error("Turnstile init failed:", error);
-    alert("Turnstile init failed: " + error.message);
+    console.error("Page init failed:", error);
+    alert("Page init failed: " + error.message);
   }
 });
