@@ -7,7 +7,7 @@ import {
   GoogleAuthProvider,
   updateProfile
 } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-
+import { ensureUserProfile } from "./user-profile.js";
 const firebaseConfig = {
   apiKey: "AIzaSyCbfEQyTwry7qNOluYqlHUZuU8AF3bkpgQ",
   authDomain: "aethra-web.firebaseapp.com",
@@ -225,6 +225,8 @@ async function handleEmailSignup() {
       displayName: name
     });
 
+    await ensureUserProfile(userCredential.user);
+
     redirectToHome();
   } catch (error) {
     console.error(error);
@@ -258,7 +260,8 @@ async function handleGoogleSignup() {
       await signInWithRedirect(auth, provider);
       return;
     } else {
-      await signInWithPopup(auth, provider);
+      const userCredential = await signInWithPopup(auth, provider);
+      await ensureUserProfile(userCredential.user);
       redirectToHome();
     }
   } catch (error) {
