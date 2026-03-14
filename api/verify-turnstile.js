@@ -39,7 +39,10 @@ function isRateLimited(ip, limit = 10, windowMs = 60 * 1000) {
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
-    return res.status(405).json({ success: false, message: "Method not allowed" });
+    return res.status(405).json({
+      success: false,
+      message: "Method not allowed"
+    });
   }
 
   try {
@@ -49,14 +52,14 @@ export default async function handler(req, res) {
     ];
 
     const origin = req.headers.origin || "";
-    const ip = getClientIp(req);
-
     if (!allowedOrigins.includes(origin)) {
       return res.status(403).json({
         success: false,
         message: "Forbidden origin"
       });
     }
+
+    const ip = getClientIp(req);
 
     if (isRateLimited(ip, 10, 60 * 1000)) {
       return res.status(429).json({
@@ -68,17 +71,10 @@ export default async function handler(req, res) {
     const { token } = req.body || {};
     const secret = process.env.TURNSTILE_SECRET_KEY;
 
-    if (!token) {
+    if (!token || !secret) {
       return res.status(400).json({
         success: false,
-        message: "Missing token"
-      });
-    }
-
-    if (!secret) {
-      return res.status(500).json({
-        success: false,
-        message: "TURNSTILE_SECRET_KEY is missing"
+        message: "Missing token or secret"
       });
     }
 
@@ -111,7 +107,7 @@ export default async function handler(req, res) {
     console.error("Turnstile API error:", error);
     return res.status(500).json({
       success: false,
-      message: error?.message || "Internal server error"
+      message: "Server error"
     });
   }
 }
