@@ -65,6 +65,24 @@ async function verifyTurnstileToken(token) {
   }
 }
 
+async function callLoginAttemptApi(email, action) {
+  const res = await fetch("/api/login-attempt", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ email, action })
+  });
+
+  const data = await res.json();
+
+  if (!res.ok || !data.success) {
+    throw new Error(data?.message || "Login security check failed.");
+  }
+
+  return data;
+}
+
 function getTurnstileToken() {
   if (widgetId === null || !window.turnstile) return "";
   return window.turnstile.getResponse(widgetId);
@@ -111,6 +129,11 @@ function clearLoading(button) {
   if (!button) return;
   button.disabled = false;
   button.textContent = button.dataset.originalText || button.textContent;
+}
+
+function formatRemainingMinutes(ms) {
+  const minutes = Math.ceil(ms / 60000);
+  return minutes <= 1 ? "1 minute" : `${minutes} minutes`;
 }
 
 function getFriendlyAuthMessage(error) {
@@ -192,14 +215,52 @@ async function handleEmailLogin() {
 
   try {
     setLoading(loginBtn, "Logging in...");
+
+    const lockStatus = await callLoginAttemptApi(email, "check");
+    if (lockStatus.isLocked) {
+      alert(
+        `This account is temporarily locked. Please try again in ${formatRemainingMinutes(lockStatus.remainingMs)}.`
+      );
+      resetTurnstile();
+      setTemporaryCooldown(loginBtn, 3000);
+      return;
+    }
+
     await verifyTurnstileToken(token);
 
     const userCredential = await signInWithEmailAndPassword(auth, email, password);
     await ensureUserProfile(userCredential.user);
+    await callLoginAttemptApi(email, "reset");
     redirectToHome();
   } catch (error) {
     console.error(error);
-    alert(getFriendlyAuthMessage(error));
+
+    const authCode = error?.code || "";
+    const isFailedLogin =
+      authCode === "auth/invalid-credential" ||
+      authCode === "auth/wrong-password" ||
+      authCode === "auth/user-not-found" ||
+      authCode === "auth/invalid-email";
+
+    if (isFailedLogin) {
+      try {
+        const failStatus = await callLoginAttemptApi(email, "fail");
+
+        if (failStatus.isLocked) {
+          alert(
+            `Too many failed attempts. This account is locked for ${formatRemainingMinutes(failStatus.remainingMs)}.`
+          );
+        } else {
+          alert(getFriendlyAuthMessage(error));
+        }
+      } catch (attemptError) {
+        console.error("Failed to record login attempt:", attemptError);
+        alert(getFriendlyAuthMessage(error));
+      }
+    } else {
+      alert(getFriendlyAuthMessage(error));
+    }
+
     resetTurnstile();
     setTemporaryCooldown(loginBtn, 3000);
   } finally {
