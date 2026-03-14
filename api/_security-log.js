@@ -1,7 +1,11 @@
 import { initializeApp, cert, getApps } from "firebase-admin/app";
-import { getFirestore } from "firebase-admin/firestore";
+import { getFirestore, FieldValue } from "firebase-admin/firestore";
+
+let adminDb = null;
 
 function getAdminDb() {
+  if (adminDb) return adminDb;
+
   if (!getApps().length) {
     initializeApp({
       credential: cert({
@@ -12,23 +16,33 @@ function getAdminDb() {
     });
   }
 
-  return getFirestore();
+  adminDb = getFirestore();
+  return adminDb;
 }
 
-export async function writeSecurityLog(data) {
+function safeString(value, maxLength = 300) {
+  if (!value) return "";
+  return String(value).slice(0, maxLength);
+}
+
+export async function writeSecurityLog(data = {}) {
   try {
     const db = getAdminDb();
 
-    await db.collection("securityLogs").add({
-      type: data.type || "unknown",
-      message: data.message || "",
-      email: data.email || "",
-      ip: data.ip || "",
-      route: data.route || "",
+    const log = {
+      type: safeString(data.type || "unknown", 50),
+      message: safeString(data.message || "", 500),
+      email: safeString(data.email || "", 200),
+      ip: safeString(data.ip || "", 100),
+      route: safeString(data.route || "", 100),
       metadata: data.metadata || {},
-      createdAt: new Date()
-    });
+      level: data.level || "warning",
+      createdAt: FieldValue.serverTimestamp()
+    };
+
+    await db.collection("securityLogs").add(log);
+
   } catch (error) {
-    console.error("Failed to write security log:", error);
+    console.error("Security log write failed:", error);
   }
 }
