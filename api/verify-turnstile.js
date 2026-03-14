@@ -1,3 +1,5 @@
+import { writeSecurityLog } from "./_security-log.js";
+
 const rateLimitStore = new Map();
 
 function getClientIp(req) {
@@ -49,26 +51,56 @@ export default async function handler(req, res) {
     ];
 
     const origin = req.headers.origin || "";
+    const ip = getClientIp(req);
+
     if (!allowedOrigins.includes(origin)) {
+      await writeSecurityLog({
+        type: "forbidden_origin",
+        level: "warning",
+        message: "Blocked request from forbidden origin on Turnstile verify API",
+        ip,
+        route: "/api/verify-turnstile",
+        metadata: { origin }
+      });
+
       return res.status(403).json({
         success: false,
         message: "Forbidden origin"
       });
     }
 
-    const ip = getClientIp(req);
-
     if (isRateLimited(ip, 10, 60 * 1000)) {
+      await writeSecurityLog({
+        type: "rate_limit_hit",
+        level: "warning",
+        message: "Turnstile verify endpoint rate limit exceeded",
+        ip,
+        route: "/api/verify-turnstile",
+        metadata: {}
+      });
+
       return res.status(429).json({
         success: false,
         message: "Too many requests. Please try again later."
       });
     }
 
-    const { token } = req.body;
+    const { token } = req.body || {};
     const secret = process.env.TURNSTILE_SECRET_KEY;
 
     if (!token || !secret) {
+      await writeSecurityLog({
+        type: "invalid_turnstile_request",
+        level: "warning",
+        message: "Missing Turnstile token or secret during verification",
+        ip,
+        route: "/api/verify-turnstile",
+        metadata: {
+          hasToken: Boolean(token),
+          hasSecret: Boolean(secret)
+        }
+      });
+
       return res.status(400).json({ success: false });
     }
 
@@ -89,12 +121,36 @@ export default async function handler(req, res) {
     const data = await response.json();
 
     if (!data.success) {
+      await writeSecurityLog({
+        type: "turnstile_failed",
+        level: "warning",
+        message: "Turnstile verification failed",
+        ip,
+        route: "/api/verify-turnstile",
+        metadata: {
+          hostname: data.hostname || "",
+          errorCodes: data["error-codes"] || []
+        }
+      });
+
       return res.status(400).json({ success: false });
     }
 
     return res.status(200).json({ success: true });
   } catch (error) {
     console.error("Turnstile API error:", error);
+
+    await writeSecurityLog({
+      type: "turnstile_api_error",
+      level: "error",
+      message: "Unhandled server error in Turnstile verify API",
+      ip: getClientIp(req),
+      route: "/api/verify-turnstile",
+      metadata: {
+        error: error?.message || "Unknown error"
+      }
+    });
+
     return res.status(500).json({ success: false });
   }
 }
