@@ -162,9 +162,10 @@ async function handleRedirectResult() {
 
     return false;
   } catch (error) {
-    console.error("Redirect sign-in failed:", error);
-    alert(getFriendlyAuthMessage(error));
-    return false;
+    console.error("Signup debug error:", error);
+    alert(error?.message || error?.code || getFriendlyAuthMessage(error));
+    resetTurnstile();
+    setTemporaryCooldown(signupBtn, 3000);
   }
 }
 
