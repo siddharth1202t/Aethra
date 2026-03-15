@@ -6,12 +6,13 @@ import {
   signInWithPopup,
   signInWithRedirect,
   getRedirectResult,
-  sendPasswordResetEmail
+  sendPasswordResetEmail,
+  sendEmailVerification
 } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
 import { ensureUserProfile } from "./user-profile.js";
 
 const firebaseConfig = {
-  apiKey: "AIzaSyCbfEQyTwry7qNOluYqlHUZuU8AF3bkpgQ",
+  apiKey: "AIzaSyCbfEQyTwry7qNOluU8AF3bkpgQ",
   authDomain: "aethra-web.firebaseapp.com",
   projectId: "aethra-web",
   storageBucket: "aethra-web.firebasestorage.app",
@@ -172,12 +173,27 @@ function showFormError(message) {
   if (!formError) return;
   formError.textContent = message;
   formError.classList.add("show");
+  formError.style.background = "rgba(255, 102, 102, 0.12)";
+  formError.style.borderColor = "rgba(255, 102, 102, 0.2)";
+  formError.style.color = "#ffd0d0";
+}
+
+function showFormSuccess(message) {
+  if (!formError) return;
+  formError.textContent = message;
+  formError.classList.add("show");
+  formError.style.background = "rgba(125, 255, 179, 0.12)";
+  formError.style.borderColor = "rgba(125, 255, 179, 0.2)";
+  formError.style.color = "#d4ffe6";
 }
 
 function clearFormError() {
   if (!formError) return;
   formError.textContent = "";
   formError.classList.remove("show");
+  formError.style.background = "";
+  formError.style.borderColor = "";
+  formError.style.color = "";
 }
 
 function showCaptchaError(message) {
@@ -256,6 +272,10 @@ function redirectToHome() {
   window.location.href = "home.html";
 }
 
+function redirectToVerifyEmail() {
+  window.location.href = "verify-email.html";
+}
+
 async function handleRedirectResult() {
   try {
     const result = await getRedirectResult(auth);
@@ -318,8 +338,16 @@ async function handleEmailLogin() {
     await verifyTurnstileToken(token);
 
     const userCredential = await signInWithEmailAndPassword(auth, email, password);
-    await ensureUserProfile(userCredential.user);
-    await callLoginAttemptApi(email, "reset");
+    const user = userCredential.user;
+
+    await ensureUserProfile(user);
+
+    if (!user.emailVerified) {
+      await sendEmailVerification(user);
+      redirectToVerifyEmail();
+      return;
+    }
+
     redirectToHome();
   } catch (error) {
     console.error(error);
@@ -423,18 +451,10 @@ async function handleForgotPassword() {
   try {
     setLoading(forgotPasswordBtn, "Sending...");
     await sendPasswordResetEmail(auth, email);
-    showFormError("Password reset email sent. Please check your inbox.");
-    formError?.classList.remove("show");
-    formError?.classList.add("show");
-    formError.style.background = "rgba(125, 255, 179, 0.12)";
-    formError.style.borderColor = "rgba(125, 255, 179, 0.2)";
-    formError.style.color = "#d4ffe6";
+    showFormSuccess("Password reset email sent. Please check your inbox.");
   } catch (error) {
     console.error("Password reset failed:", error);
     showFormError("Could not send reset email. Please check the email address and try again.");
-    formError.style.background = "rgba(255, 102, 102, 0.12)";
-    formError.style.borderColor = "rgba(255, 102, 102, 0.2)";
-    formError.style.color = "#ffd0d0";
   } finally {
     clearLoading(forgotPasswordBtn);
   }
