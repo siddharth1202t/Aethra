@@ -1,16 +1,3 @@
-const botDetectionState = {
-  pageLoadedAt: Date.now(),
-  firstInteractionAt: null,
-  mouseMoves: 0,
-  keyPresses: 0,
-  clicks: 0,
-  touches: 0,
-  scrolls: 0,
-  visibilityChanges: 0,
-  lastVisibilityState: document.visibilityState || "visible",
-  sessionId: getOrCreateSessionId()
-};
-
 function getOrCreateSessionId() {
   const key = "aethra_session_id";
 
@@ -26,10 +13,33 @@ function getOrCreateSessionId() {
       sessionStorage.setItem(key, value);
     }
 
-    return value;
+    return String(value).slice(0, 120);
   } catch {
-    return `sess_fallback_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    return `sess_fallback_${Date.now()}_${Math.random().toString(16).slice(2)}`.slice(0, 120);
   }
+}
+
+const MAX_COUNTER = 5000;
+
+const botDetectionState = {
+  pageLoadedAt: Date.now(),
+  firstInteractionAt: null,
+  mouseMoves: 0,
+  keyPresses: 0,
+  clicks: 0,
+  touches: 0,
+  scrolls: 0,
+  visibilityChanges: 0,
+  lastVisibilityState: document.visibilityState || "visible",
+  sessionId: getOrCreateSessionId()
+};
+
+function incrementCounter(key) {
+  if (typeof botDetectionState[key] !== "number") {
+    botDetectionState[key] = 0;
+  }
+
+  botDetectionState[key] = Math.min(MAX_COUNTER, botDetectionState[key] + 1);
 }
 
 function markFirstInteraction() {
@@ -38,11 +48,19 @@ function markFirstInteraction() {
   }
 }
 
+let lastMouseMoveAt = 0;
+let lastScrollAt = 0;
+
 document.addEventListener(
   "mousemove",
   () => {
-    botDetectionState.mouseMoves += 1;
-    markFirstInteraction();
+    const now = Date.now();
+
+    if (now - lastMouseMoveAt > 50) {
+      incrementCounter("mouseMoves");
+      markFirstInteraction();
+      lastMouseMoveAt = now;
+    }
   },
   { passive: true }
 );
@@ -50,7 +68,7 @@ document.addEventListener(
 document.addEventListener(
   "keydown",
   () => {
-    botDetectionState.keyPresses += 1;
+    incrementCounter("keyPresses");
     markFirstInteraction();
   },
   { passive: true }
@@ -59,7 +77,7 @@ document.addEventListener(
 document.addEventListener(
   "click",
   () => {
-    botDetectionState.clicks += 1;
+    incrementCounter("clicks");
     markFirstInteraction();
   },
   { passive: true }
@@ -68,7 +86,7 @@ document.addEventListener(
 document.addEventListener(
   "touchstart",
   () => {
-    botDetectionState.touches += 1;
+    incrementCounter("touches");
     markFirstInteraction();
   },
   { passive: true }
@@ -77,25 +95,46 @@ document.addEventListener(
 document.addEventListener(
   "scroll",
   () => {
-    botDetectionState.scrolls += 1;
-    markFirstInteraction();
+    const now = Date.now();
+
+    if (now - lastScrollAt > 100) {
+      incrementCounter("scrolls");
+      markFirstInteraction();
+      lastScrollAt = now;
+    }
   },
   { passive: true }
 );
 
 document.addEventListener("visibilitychange", () => {
-  botDetectionState.visibilityChanges += 1;
+  incrementCounter("visibilityChanges");
   botDetectionState.lastVisibilityState = document.visibilityState || "unknown";
 });
 
-function safeNavigatorValue(value) {
-  return String(value || "").slice(0, 300);
+function safeNavigatorValue(value, maxLength = 300) {
+  return String(value || "").slice(0, maxLength);
+}
+
+function safeNumber(value, fallback = 0) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : fallback;
+}
+
+function safeTimezone() {
+  try {
+    return safeNavigatorValue(
+      Intl.DateTimeFormat().resolvedOptions().timeZone || "",
+      100
+    );
+  } catch {
+    return "";
+  }
 }
 
 export function detectBotBehavior() {
   const submitAt = Date.now();
-  const pageLoadedAt = botDetectionState.pageLoadedAt;
-  const firstInteractionAt = botDetectionState.firstInteractionAt;
+  const pageLoadedAt = safeNumber(botDetectionState.pageLoadedAt, submitAt);
+  const firstInteractionAt = safeNumber(botDetectionState.firstInteractionAt, 0) || null;
 
   const timeOnPageMs = Math.max(0, submitAt - pageLoadedAt);
   const timeToFirstInteractionMs =
@@ -103,12 +142,14 @@ export function detectBotBehavior() {
       ? firstInteractionAt - pageLoadedAt
       : null;
 
+  const mouseMoves = safeNumber(botDetectionState.mouseMoves);
+  const keyPresses = safeNumber(botDetectionState.keyPresses);
+  const clicks = safeNumber(botDetectionState.clicks);
+  const touches = safeNumber(botDetectionState.touches);
+  const scrolls = safeNumber(botDetectionState.scrolls);
+
   const totalInteractions =
-    botDetectionState.mouseMoves +
-    botDetectionState.keyPresses +
-    botDetectionState.clicks +
-    botDetectionState.touches +
-    botDetectionState.scrolls;
+    mouseMoves + keyPresses + clicks + touches + scrolls;
 
   return {
     pageLoadedAt,
@@ -117,21 +158,19 @@ export function detectBotBehavior() {
     timeOnPageMs,
     timeToFirstInteractionMs,
     totalInteractions,
-    mouseMoves: botDetectionState.mouseMoves,
-    keyPresses: botDetectionState.keyPresses,
-    clicks: botDetectionState.clicks,
-    touches: botDetectionState.touches,
-    scrolls: botDetectionState.scrolls,
-    visibilityChanges: botDetectionState.visibilityChanges,
-    visibilityState: botDetectionState.lastVisibilityState,
-    sessionId: botDetectionState.sessionId,
-    timezone: safeNavigatorValue(
-      Intl.DateTimeFormat().resolvedOptions().timeZone || ""
-    ),
-    language: safeNavigatorValue(navigator.language || ""),
-    platform: safeNavigatorValue(navigator.platform || ""),
-    userAgent: safeNavigatorValue(navigator.userAgent || ""),
-    screenWidth: window.screen?.width || 0,
-    screenHeight: window.screen?.height || 0
+    mouseMoves,
+    keyPresses,
+    clicks,
+    touches,
+    scrolls,
+    visibilityChanges: safeNumber(botDetectionState.visibilityChanges),
+    visibilityState: safeNavigatorValue(botDetectionState.lastVisibilityState, 40),
+    sessionId: safeNavigatorValue(botDetectionState.sessionId, 120),
+    timezone: safeTimezone(),
+    language: safeNavigatorValue(navigator.language || "", 50),
+    platform: safeNavigatorValue(navigator.platform || "", 100),
+    userAgent: safeNavigatorValue(navigator.userAgent || "", 300),
+    screenWidth: safeNumber(window.screen?.width),
+    screenHeight: safeNumber(window.screen?.height)
   };
 }
