@@ -43,6 +43,10 @@ const formError = document.getElementById("formError");
 let widgetId = null;
 let isSubmitting = false;
 
+function goTo(page) {
+  window.location.replace(page);
+}
+
 function waitForTurnstile(timeout = 10000) {
   return new Promise((resolve, reject) => {
     const start = Date.now();
@@ -134,11 +138,11 @@ function clearLoading(button) {
 }
 
 function redirectToVerifyEmail() {
-  window.location.href = "verify-email.html";
+  goTo("verify-email.html");
 }
 
 function redirectToHome() {
-  window.location.href = "home.html";
+  goTo("home.html");
 }
 
 function clearFieldState(input, errorEl) {
