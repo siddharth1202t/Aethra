@@ -140,6 +140,8 @@
       appId: "1:280560043528:web:a6c2e485c8da32c9dab3bd"
     };
 
+    const RESEND_COOLDOWN_SECONDS = 60;
+
     const app = initializeApp(firebaseConfig);
     const auth = getAuth(app);
 
@@ -148,9 +150,17 @@
     const logoutBtn = document.getElementById("logoutBtn");
     const messageBox = document.getElementById("messageBox");
 
+    let resendCountdown = null;
+    let resendRemaining = 0;
+
     function showMessage(text, type = "error") {
       messageBox.textContent = text;
       messageBox.className = `msg show ${type}`;
+    }
+
+    function clearMessage() {
+      messageBox.textContent = "";
+      messageBox.className = "msg";
     }
 
     function setLoading(button, text) {
@@ -164,49 +174,87 @@
       button.textContent = button.dataset.originalText || button.textContent;
     }
 
-    onAuthStateChanged(auth, (user) => {
+    function setResendCooldown(seconds = RESEND_COOLDOWN_SECONDS) {
+      resendRemaining = seconds;
+      resendBtn.disabled = true;
+
+      if (resendCountdown) {
+        clearInterval(resendCountdown);
+      }
+
+      resendBtn.textContent = `Resend available in ${resendRemaining}s`;
+
+      resendCountdown = setInterval(() => {
+        resendRemaining -= 1;
+
+        if (resendRemaining <= 0) {
+          clearInterval(resendCountdown);
+          resendCountdown = null;
+          resendBtn.disabled = false;
+          resendBtn.textContent = "Resend Verification Email";
+          return;
+        }
+
+        resendBtn.textContent = `Resend available in ${resendRemaining}s`;
+      }, 1000);
+    }
+
+    onAuthStateChanged(auth, async (user) => {
       if (!user) {
-        window.location.href = "login.html";
+        window.location.replace("login.html");
         return;
       }
 
-      if (user.emailVerified) {
-        window.location.href = "home.html";
+      try {
+        await reload(user);
+
+        if (auth.currentUser?.emailVerified) {
+          window.location.replace("home.html");
+        }
+      } catch (error) {
+        console.error("Verification page auth refresh failed:", error);
       }
     });
 
     resendBtn.addEventListener("click", async () => {
       const user = auth.currentUser;
       if (!user) {
-        window.location.href = "login.html";
+        window.location.replace("login.html");
+        return;
+      }
+
+      if (resendRemaining > 0) {
         return;
       }
 
       try {
+        clearMessage();
         setLoading(resendBtn, "Sending...");
         await sendEmailVerification(user);
         showMessage("Verification email sent again. Please check your inbox.", "success");
+        clearLoading(resendBtn);
+        setResendCooldown();
       } catch (error) {
         console.error(error);
-        showMessage("Could not resend verification email right now. Please try again.");
-      } finally {
         clearLoading(resendBtn);
+        showMessage("Could not resend verification email right now. Please try again.");
       }
     });
 
     refreshBtn.addEventListener("click", async () => {
       const user = auth.currentUser;
       if (!user) {
-        window.location.href = "login.html";
+        window.location.replace("login.html");
         return;
       }
 
       try {
+        clearMessage();
         setLoading(refreshBtn, "Checking...");
         await reload(user);
 
         if (auth.currentUser?.emailVerified) {
-          window.location.href = "home.html";
+          window.location.replace("home.html");
           return;
         }
 
@@ -221,7 +269,7 @@
 
     logoutBtn.addEventListener("click", async () => {
       await signOut(auth);
-      window.location.href = "login.html";
+      window.location.replace("login.html");
     });
   </script>
 </body>
