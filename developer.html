@@ -178,57 +178,41 @@
   </div>
 
   <script type="module">
-  import { requireAuth } from "./js/auth-guard.js";
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+    import { getAuth, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+    import { requireDeveloper } from "./js/auth-guard.js";
 
-  requireAuth((user) => {
-    console.log("User logged in:", user.email);
-  });
-      import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-      import { getAuth, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-      import { SECURITY_CONFIG } from "./js/security-config.js";
-      import { requireDeveloper } from "./js/auth-guard.js";
+    const firebaseConfig = {
+      apiKey: "AIzaSyCbfEQyTwry7qNOluYqlHUZuU8AF3bkpgQ",
+      authDomain: "aethra-web.firebaseapp.com",
+      projectId: "aethra-web",
+      storageBucket: "aethra-web.firebasestorage.app",
+      messagingSenderId: "280560043528",
+      appId: "1:280560043528:web:a6c2e485c8da32c9dab3bd"
+    };
 
-      requireDeveloper((user) => {
-        console.log("Developer access granted:", user.email);
-      });
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
 
-      const firebaseConfig = {
-        apiKey: "AIzaSyCbfEQyTwry7qNOluYqlHUZuU8AF3bkpgQ",
-        authDomain: "aethra-web.firebaseapp.com",
-        projectId: "aethra-web",
-        storageBucket: "aethra-web.firebasestorage.app",
-        messagingSenderId: "280560043528",
-        appId: "1:280560043528:web:a6c2e485c8da32c9dab3bd"
-      };
+    const logoutBtn = document.getElementById("logoutBtn");
+    const backHomeBtn = document.getElementById("backHomeBtn");
 
-      const app = initializeApp(firebaseConfig);
-      const auth = getAuth(app);
+    function goTo(page) {
+      window.location.replace(page);
+    }
 
-      const developerEmail = SECURITY_CONFIG.developerEmail;
+    requireDeveloper((user) => {
+      console.log("Developer access granted:", user.email);
+    });
 
-      const logoutBtn = document.getElementById("logoutBtn");
-      const backHomeBtn = document.getElementById("backHomeBtn");
+    backHomeBtn.addEventListener("click", () => {
+      goTo("home.html");
+    });
 
-      onAuthStateChanged(auth, (user) => {
-        if (!user) {
-          window.location.href = "login.html";
-          return;
-        }
-
-        if (user.email !== developerEmail) {
-          window.location.href = "home.html";
-          return;
-        }
-      });
-
-      backHomeBtn.addEventListener("click", () => {
-       window.location.href = "home.html";
-      });
-
-      logoutBtn.addEventListener("click", async () => {
-        await signOut(auth);
-        window.location.href = "login.html";
-      });
-</script>
+    logoutBtn.addEventListener("click", async () => {
+      await signOut(auth);
+      goTo("login.html");
+    });
+  </script>
 </body>
 </html>
