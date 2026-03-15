@@ -12,7 +12,7 @@ import {
 import { ensureUserProfile } from "./user-profile.js";
 
 const firebaseConfig = {
-  apiKey: "AIzaSyCbfEQyTwry7qNOluU8AF3bkpgQ",
+  apiKey: "AIzaSyCbfEQyTwry7qNOluYqlHUZuU8AF3bkpgQ",
   authDomain: "aethra-web.firebaseapp.com",
   projectId: "aethra-web",
   storageBucket: "aethra-web.firebasestorage.app",
