@@ -11,6 +11,7 @@ import {
 import { app } from "./firestore-config.js";
 import { ensureUserProfile } from "./user-profile.js";
 import { writeSecurityLog } from "./security-logger.js";
+import { detectBotBehavior } from "./bot-detection.js";
 
 const auth = getAuth(app);
 const provider = new GoogleAuthProvider();
