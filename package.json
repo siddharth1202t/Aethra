@@ -19,6 +19,7 @@
   },
   "homepage": "https://github.com/siddharth1202t/Aethra#readme",
   "dependencies": {
+    "@upstash/redis": "^1.37.0",
     "firebase-admin": "^10.3.0"
   }
 }
