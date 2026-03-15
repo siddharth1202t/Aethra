@@ -1,3 +1,5 @@
+import { writeSecurityLog } from "./_security-log.js";
+
 const rateLimitStore = new Map();
 
 function getClientIp(req) {
@@ -6,6 +8,14 @@ function getClientIp(req) {
     return forwarded.split(",")[0].trim();
   }
   return "unknown";
+}
+
+function isAllowedOrigin(origin) {
+  const allowedOrigins = [
+    "https://aethra-gules.vercel.app",
+    "https://aethra-hb2h.vercel.app"
+  ];
+  return allowedOrigins.includes(origin);
 }
 
 function isRateLimited(ip, limit = 10, windowMs = 60 * 1000) {
@@ -46,22 +56,35 @@ export default async function handler(req, res) {
   }
 
   try {
-    const allowedOrigins = [
-      "https://aethra-gules.vercel.app",
-      "https://aethra-hb2h.vercel.app"
-    ];
-
     const origin = req.headers.origin || "";
-    if (!allowedOrigins.includes(origin)) {
+    const ip = getClientIp(req);
+
+    if (!isAllowedOrigin(origin)) {
+      await writeSecurityLog({
+        type: "forbidden_turnstile_origin",
+        level: "warning",
+        message: "Blocked request from forbidden origin on verify-turnstile API",
+        ip,
+        route: "/api/verify-turnstile",
+        metadata: { origin }
+      });
+
       return res.status(403).json({
         success: false,
         message: "Forbidden origin"
       });
     }
 
-    const ip = getClientIp(req);
-
     if (isRateLimited(ip, 10, 60 * 1000)) {
+      await writeSecurityLog({
+        type: "turnstile_rate_limited",
+        level: "warning",
+        message: "Rate limit exceeded on verify-turnstile API",
+        ip,
+        route: "/api/verify-turnstile",
+        metadata: {}
+      });
+
       return res.status(429).json({
         success: false,
         message: "Too many requests. Please try again later."
@@ -72,6 +95,18 @@ export default async function handler(req, res) {
     const secret = process.env.TURNSTILE_SECRET_KEY;
 
     if (!token || !secret) {
+      await writeSecurityLog({
+        type: "turnstile_missing_token_or_secret",
+        level: "error",
+        message: "Missing token or server secret in verify-turnstile API",
+        ip,
+        route: "/api/verify-turnstile",
+        metadata: {
+          hasToken: Boolean(token),
+          hasSecret: Boolean(secret)
+        }
+      });
+
       return res.status(400).json({
         success: false,
         message: "Missing token or secret"
@@ -87,7 +122,8 @@ export default async function handler(req, res) {
         },
         body: new URLSearchParams({
           secret,
-          response: token
+          response: token,
+          remoteip: ip
         })
       }
     );
@@ -95,16 +131,38 @@ export default async function handler(req, res) {
     const data = await response.json();
 
     if (!data.success) {
+      await writeSecurityLog({
+        type: "turnstile_verification_failed",
+        level: "warning",
+        message: "Turnstile verification failed",
+        ip,
+        route: "/api/verify-turnstile",
+        metadata: {
+          errorCodes: Array.isArray(data["error-codes"]) ? data["error-codes"].join(",") : ""
+        }
+      });
+
       return res.status(400).json({
         success: false,
-        message: "Turnstile verification failed",
-        errorCodes: data["error-codes"] || []
+        message: "Captcha verification failed"
       });
     }
 
     return res.status(200).json({ success: true });
   } catch (error) {
     console.error("Turnstile API error:", error);
+
+    await writeSecurityLog({
+      type: "turnstile_api_error",
+      level: "error",
+      message: "Unhandled server error in verify-turnstile API",
+      ip: getClientIp(req),
+      route: "/api/verify-turnstile",
+      metadata: {
+        error: error?.message || "Unknown error"
+      }
+    });
+
     return res.status(500).json({
       success: false,
       message: "Server error"
