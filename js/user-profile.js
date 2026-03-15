@@ -1,4 +1,10 @@
-import { doc, getDoc, serverTimestamp, setDoc, updateDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+import {
+  doc,
+  getDoc,
+  serverTimestamp,
+  setDoc,
+  updateDoc
+} from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 import { db } from "./firestore-config.js";
 
 function sanitizeDisplayName(value) {
@@ -7,7 +13,7 @@ function sanitizeDisplayName(value) {
     .replace(/[^a-zA-Z0-9._ ]/g, "")
     .replace(/\s+/g, " ")
     .trim()
-    .slice(0, 20);
+    .slice(0, 30);
 }
 
 function normalizeEmail(value) {
@@ -19,7 +25,9 @@ function sanitizePhotoURL(value) {
 }
 
 export async function ensureUserProfile(user) {
-  if (!user?.uid) return;
+  if (!user?.uid) {
+    return;
+  }
 
   const userRef = doc(db, "users", user.uid);
   const userSnap = await getDoc(userRef);
@@ -27,7 +35,6 @@ export async function ensureUserProfile(user) {
   const safeDisplayName = sanitizeDisplayName(user.displayName) || "Explorer";
   const safeEmail = normalizeEmail(user.email);
   const safePhotoURL = sanitizePhotoURL(user.photoURL);
-  const emailVerified = Boolean(user.emailVerified);
 
   if (!userSnap.exists()) {
     await setDoc(userRef, {
@@ -37,26 +44,22 @@ export async function ensureUserProfile(user) {
       photoURL: safePhotoURL,
       role: "user",
       isProfileComplete: false,
-      emailVerified,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp()
     });
+
     return;
   }
 
   const existingData = userSnap.data() || {};
   const updates = {};
 
-  if (existingData.displayName !== safeDisplayName) {
+  if ((existingData.displayName || "") !== safeDisplayName) {
     updates.displayName = safeDisplayName;
   }
 
   if ((existingData.photoURL || "") !== safePhotoURL) {
     updates.photoURL = safePhotoURL;
-  }
-
-  if (existingData.emailVerified !== emailVerified) {
-    updates.emailVerified = emailVerified;
   }
 
   if (Object.keys(updates).length > 0) {
