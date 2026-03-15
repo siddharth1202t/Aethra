@@ -54,6 +54,14 @@ function waitForTurnstile(timeout = 10000) {
   });
 }
 
+async function safeSecurityLog(payload) {
+  try {
+    await writeSecurityLog(payload);
+  } catch (error) {
+    console.warn("Security log failed:", error);
+  }
+}
+
 async function verifyTurnstileToken(token) {
   const res = await fetch("/api/verify-turnstile", {
     method: "POST",
@@ -63,23 +71,27 @@ async function verifyTurnstileToken(token) {
     body: JSON.stringify({ token })
   });
 
-  const data = await res.json();
+  const data = await res.json().catch(() => ({}));
 
   if (!res.ok || !data.success) {
-    throw new Error("Captcha verification failed. Please try again.");
+    throw new Error(data?.message || "Captcha verification failed. Please try again.");
   }
 }
 
-async function callLoginAttemptApi(email, action) {
+async function callLoginAttemptApi(email, action, extra = {}) {
   const res = await fetch("/api/login-attempt", {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
     },
-    body: JSON.stringify({ email, action })
+    body: JSON.stringify({
+      email,
+      action,
+      ...extra
+    })
   });
 
-  const data = await res.json();
+  const data = await res.json().catch(() => ({}));
 
   if (!res.ok || !data.success) {
     throw new Error(data?.message || "Login security check failed.");
@@ -90,7 +102,7 @@ async function callLoginAttemptApi(email, action) {
 
 function getTurnstileToken() {
   if (widgetId === null || !window.turnstile) return "";
-  return window.turnstile.getResponse(widgetId);
+  return window.turnstile.getResponse(widgetId) || "";
 }
 
 function resetTurnstile() {
@@ -104,7 +116,7 @@ function isMobileDevice() {
 }
 
 function normalizeEmail(email) {
-  return email.trim().toLowerCase();
+  return String(email || "").trim().toLowerCase();
 }
 
 function isValidEmail(email) {
@@ -127,21 +139,24 @@ function setTemporaryCooldown(button, ms = 3000) {
 
 function setLoading(button, loadingText = "Please wait...") {
   if (!button) return;
+
   if (!button.dataset.originalText) {
     button.dataset.originalText = button.textContent;
   }
+
   button.disabled = true;
   button.textContent = loadingText;
 }
 
 function clearLoading(button) {
   if (!button) return;
+
   button.disabled = false;
   button.textContent = button.dataset.originalText || button.textContent;
 }
 
 function formatRemainingMinutes(ms) {
-  const minutes = Math.ceil(ms / 60000);
+  const minutes = Math.ceil(Number(ms || 0) / 60000);
   return minutes <= 1 ? "1 minute" : `${minutes} minutes`;
 }
 
@@ -212,8 +227,8 @@ function clearAllErrors() {
 }
 
 function validateEmail(showUI = true) {
-  const email = normalizeEmail(emailInput.value);
-  emailInput.value = email;
+  const email = normalizeEmail(emailInput?.value || "");
+  if (emailInput) emailInput.value = email;
 
   if (!email) {
     if (showUI) setFieldError(emailInput, emailError, "Please enter your email.");
@@ -230,7 +245,7 @@ function validateEmail(showUI = true) {
 }
 
 function validatePassword(showUI = true) {
-  const password = passwordInput.value;
+  const password = passwordInput?.value || "";
 
   if (!password) {
     if (showUI) setFieldError(passwordInput, passwordError, "Please enter your password.");
@@ -243,6 +258,11 @@ function validatePassword(showUI = true) {
 
 function getFriendlyAuthMessage(error) {
   const code = error?.code || "";
+  const message = String(error?.message || "");
+
+  if (message.toLowerCase().includes("captcha")) {
+    return "Captcha verification failed. Please complete it again.";
+  }
 
   switch (code) {
     case "auth/invalid-credential":
@@ -259,6 +279,8 @@ function getFriendlyAuthMessage(error) {
       return "Google sign-in was closed before completion.";
     case "auth/popup-blocked":
       return "Popup was blocked by the browser. Please allow popups or try again.";
+    case "auth/cancelled-popup-request":
+      return "Another sign-in request is already in progress.";
     default:
       return "Login failed. Please try again.";
   }
@@ -272,19 +294,94 @@ function redirectToVerifyEmail() {
   goTo("verify-email.html");
 }
 
+function getClientSecurityContext() {
+  let behavior = {};
+
+  try {
+    behavior = typeof detectBotBehavior === "function" ? detectBotBehavior() : {};
+  } catch (error) {
+    console.warn("Bot behavior detection failed:", error);
+    behavior = {};
+  }
+
+  return {
+    behavior,
+    userAgent: navigator.userAgent || "",
+    language: navigator.language || "",
+    platform: navigator.platform || "",
+    screen: {
+      width: window.screen?.width || 0,
+      height: window.screen?.height || 0
+    }
+  };
+}
+
+async function precheckSensitiveAction(email, token, actionLabel = "login_check") {
+  if (!token) {
+    await safeSecurityLog({
+      type: "captcha_missing",
+      message: `User attempted ${actionLabel} without captcha`,
+      email
+    });
+
+    showCaptchaError("Please complete the captcha first.");
+    throw new Error("Captcha missing");
+  }
+
+  const securityContext = getClientSecurityContext();
+
+  const checkResult = await callLoginAttemptApi(email, "check", {
+    actionLabel,
+    ...securityContext
+  });
+
+  if (checkResult?.isLocked) {
+    throw new Error(
+      `This account is temporarily locked. Please try again in ${formatRemainingMinutes(checkResult.remainingMs)}.`
+    );
+  }
+
+  await verifyTurnstileToken(token);
+
+  return securityContext;
+}
+
 async function handleRedirectResult() {
   try {
     const result = await getRedirectResult(auth);
 
-    if (result?.user) {
-      await ensureUserProfile(result.user);
-      redirectToHome();
+    if (!result?.user) {
+      return false;
+    }
+
+    const user = result.user;
+
+    await ensureUserProfile(user);
+    await reload(user);
+
+    await safeSecurityLog({
+      type: "google_login_success",
+      message: "User logged in with Google via redirect",
+      email: user.email || "",
+      userId: user.uid
+    });
+
+    if (user.emailVerified === false) {
+      redirectToVerifyEmail();
       return true;
     }
 
-    return false;
+    redirectToHome();
+    return true;
   } catch (error) {
     console.error("Redirect sign-in failed:", error);
+
+    await safeSecurityLog({
+      type: "google_login_failed",
+      message: error?.message || "Google redirect login failed",
+      email: ""
+    });
+
     showFormError(getFriendlyAuthMessage(error));
     return false;
   }
@@ -298,7 +395,6 @@ async function handleEmailLogin() {
 
   const isEmailValid = validateEmail(true);
   const isPasswordValid = validatePassword(true);
-  const token = getTurnstileToken();
 
   if (!isEmailValid || !isPasswordValid) {
     isSubmitting = false;
@@ -306,39 +402,18 @@ async function handleEmailLogin() {
     return;
   }
 
-  if (!token) {
-
-    await writeSecurityLog({
-      type: "captcha_missing",
-      message: "User attempted email login without captcha",
-      email: emailInput.value
-    });
-
-    showCaptchaError("Please complete the captcha first.");
-    isSubmitting = false;
-    setTemporaryCooldown(loginBtn, 1500);
-    return;
-  }
-
   const email = normalizeEmail(emailInput.value);
   const password = passwordInput.value;
+  const token = getTurnstileToken();
   emailInput.value = email;
+
+  let securityContext = {};
 
   try {
     setLoading(loginBtn, "Logging in...");
     clearCaptchaError();
 
-    const lockStatus = await callLoginAttemptApi(email, "check");
-    if (lockStatus.isLocked) {
-      showFormError(
-        `This account is temporarily locked. Please try again in ${formatRemainingMinutes(lockStatus.remainingMs)}.`
-      );
-      resetTurnstile();
-      setTemporaryCooldown(loginBtn, 3000);
-      return;
-    }
-
-    await verifyTurnstileToken(token);
+    securityContext = await precheckSensitiveAction(email, token, "email_login");
 
     const userCredential = await signInWithEmailAndPassword(auth, email, password);
     const user = userCredential.user;
@@ -346,26 +421,32 @@ async function handleEmailLogin() {
     await ensureUserProfile(user);
     await reload(user);
 
+    await safeSecurityLog({
+      type: "login_success",
+      message: "User logged in successfully",
+      email,
+      userId: user.uid,
+      metadata: {
+        behavior: securityContext.behavior || {}
+      }
+    });
+
     if (!auth.currentUser?.emailVerified) {
       redirectToVerifyEmail();
       return;
     }
 
-    await writeSecurityLog({
-      type: "login_success",
-      message: "User logged in successfully",
-      email: email,
-      userId: user.uid
-    });
-    
     redirectToHome();
   } catch (error) {
-    console.error(error);
+    console.error("Email login failed:", error);
 
-    await writeSecurityLog({
+    await safeSecurityLog({
       type: "login_failed",
       message: error?.message || "Unknown login error",
-      email: email
+      email,
+      metadata: {
+        behavior: securityContext.behavior || {}
+      }
     });
 
     const authCode = error?.code || "";
@@ -379,11 +460,16 @@ async function handleEmailLogin() {
       setFieldError(emailInput, emailError, "Please enter a valid email address.");
     }
 
-    if (isFailedLogin) {
+    if (String(error?.message || "").includes("temporarily locked")) {
+      showFormError(error.message);
+    } else if (isFailedLogin) {
       try {
-        const failStatus = await callLoginAttemptApi(email, "fail");
+        const failStatus = await callLoginAttemptApi(email, "fail", {
+          actionLabel: "email_login_fail",
+          ...securityContext
+        });
 
-        if (failStatus.isLocked) {
+        if (failStatus?.isLocked) {
           showFormError(
             `Too many failed attempts. This account is locked for ${formatRemainingMinutes(failStatus.remainingMs)}.`
           );
@@ -412,53 +498,62 @@ async function handleGoogleLogin() {
 
   clearAllErrors();
 
+  const email = normalizeEmail(emailInput?.value || "google-login");
   const token = getTurnstileToken();
-
- if (!token) {
-
-    await writeSecurityLog({
-      type: "captcha_missing",
-      message: "User tried login without captcha",
-      email: emailInput.value
-    });
-
-    showCaptchaError("Please complete the captcha first.");
-    isSubmitting = false;
-    setTemporaryCooldown(googleBtn, 1500);
-    return;
-  }
+  let securityContext = {};
 
   try {
     setLoading(googleBtn, "Please wait...");
     clearCaptchaError();
 
-    await verifyTurnstileToken(token);
+    securityContext = await precheckSensitiveAction(email, token, "google_login");
 
     if (isMobileDevice()) {
-      await signInWithRedirect(auth, provider);
-      return;
-    } else {
-      const userCredential = await signInWithPopup(auth, provider);
-      const user = userCredential.user;
-
-      await ensureUserProfile(user);
-
-      await writeSecurityLog({
-        type: "google_login_success",
-        message: "User logged in with Google",
-        email: user.email,
-        userId: user.uid
+      await safeSecurityLog({
+        type: "google_login_redirect_started",
+        message: "Google redirect sign-in started",
+        email,
+        metadata: {
+          behavior: securityContext.behavior || {}
+        }
       });
 
-      redirectToHome();
+      await signInWithRedirect(auth, provider);
+      return;
     }
-  } catch (error) {
-    console.error(error);
 
-    await writeSecurityLog({
+    const userCredential = await signInWithPopup(auth, provider);
+    const user = userCredential.user;
+
+    await ensureUserProfile(user);
+    await reload(user);
+
+    await safeSecurityLog({
+      type: "google_login_success",
+      message: "User logged in with Google",
+      email: user.email || "",
+      userId: user.uid,
+      metadata: {
+        behavior: securityContext.behavior || {}
+      }
+    });
+
+    if (user.emailVerified === false) {
+      redirectToVerifyEmail();
+      return;
+    }
+
+    redirectToHome();
+  } catch (error) {
+    console.error("Google login failed:", error);
+
+    await safeSecurityLog({
       type: "google_login_failed",
       message: error?.message || "Google login failed",
-      email: emailInput.value
+      email,
+      metadata: {
+        behavior: securityContext.behavior || {}
+      }
     });
 
     showFormError(getFriendlyAuthMessage(error));
@@ -471,32 +566,70 @@ async function handleGoogleLogin() {
 }
 
 async function handleForgotPassword() {
+  if (isSubmitting) return;
+  isSubmitting = true;
+
   clearAllErrors();
 
-  const email = normalizeEmail(emailInput.value);
-  emailInput.value = email;
+  const email = normalizeEmail(emailInput?.value || "");
+  if (emailInput) emailInput.value = email;
 
   if (!email) {
     setFieldError(emailInput, emailError, "Enter your email first to reset your password.");
-    emailInput.focus();
+    emailInput?.focus();
+    isSubmitting = false;
     return;
   }
 
   if (!isValidEmail(email)) {
     setFieldError(emailInput, emailError, "Please enter a valid email address.");
-    emailInput.focus();
+    emailInput?.focus();
+    isSubmitting = false;
     return;
   }
 
+  const token = getTurnstileToken();
+  let securityContext = {};
+
   try {
     setLoading(forgotPasswordBtn, "Sending...");
+    clearCaptchaError();
+
+    securityContext = await precheckSensitiveAction(email, token, "password_reset");
+
     await sendPasswordResetEmail(auth, email);
-    showFormSuccess("Password reset email sent. Please check your inbox.");
+
+    await safeSecurityLog({
+      type: "password_reset_requested",
+      message: "Password reset requested",
+      email,
+      metadata: {
+        behavior: securityContext.behavior || {}
+      }
+    });
+
+    showFormSuccess("If this email is registered, a password reset link has been sent.");
   } catch (error) {
     console.error("Password reset failed:", error);
-    showFormError("Could not send reset email. Please check the email address and try again.");
+
+    await safeSecurityLog({
+      type: "password_reset_failed",
+      message: error?.message || "Password reset failed",
+      email,
+      metadata: {
+        behavior: securityContext.behavior || {}
+      }
+    });
+
+    if (String(error?.message || "").includes("temporarily locked")) {
+      showFormError(error.message);
+    } else {
+      showFormError("Could not process the password reset request. Please try again.");
+    }
   } finally {
+    resetTurnstile();
     clearLoading(forgotPasswordBtn);
+    isSubmitting = false;
   }
 }
 
@@ -516,6 +649,9 @@ async function initTurnstile() {
     size: "flexible",
     retry: "auto",
     "refresh-expired": "auto",
+    "callback": function () {
+      clearCaptchaError();
+    },
     "error-callback": function () {
       showCaptchaError("Captcha failed to load. Please refresh and try again.");
     },
@@ -528,14 +664,22 @@ async function initTurnstile() {
 emailInput?.addEventListener("input", () => {
   clearFormError();
   clearCaptchaError();
-  if (emailInput.value.trim()) validateEmail(true);
-  else clearFieldState(emailInput, emailError);
+
+  if (emailInput.value.trim()) {
+    validateEmail(true);
+  } else {
+    clearFieldState(emailInput, emailError);
+  }
 });
 
 passwordInput?.addEventListener("input", () => {
   clearFormError();
-  if (passwordInput.value.trim()) validatePassword(true);
-  else clearFieldState(passwordInput, passwordError);
+
+  if (passwordInput.value.trim()) {
+    validatePassword(true);
+  } else {
+    clearFieldState(passwordInput, passwordError);
+  }
 });
 
 if (form) {
