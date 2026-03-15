@@ -93,6 +93,11 @@
       margin-top: 10px;
       background: linear-gradient(135deg, #7b61ff, #9a7cff);
       box-shadow: 0 10px 35px rgba(123, 97, 255, 0.35);
+      transition: 0.2s ease;
+    }
+
+    .btn:hover:not(:disabled) {
+      transform: translateY(-2px);
     }
 
     .secondary {
@@ -104,6 +109,7 @@
     .btn:disabled {
       opacity: 0.7;
       cursor: not-allowed;
+      transform: none;
     }
   </style>
 </head>
@@ -114,15 +120,16 @@
       We sent a verification email to your inbox. Please verify your email address before entering Aethra.
     </p>
 
-    <div id="messageBox" class="msg"></div>
+    <div id="messageBox" class="msg" aria-live="polite"></div>
 
     <button id="resendBtn" class="btn">Resend Verification Email</button>
     <button id="refreshBtn" class="btn secondary">I Have Verified My Email</button>
     <button id="logoutBtn" class="btn secondary">Logout</button>
   </div>
 
+  <script type="module" src="js/app-check.js"></script>
+
   <script type="module">
-    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
     import {
       getAuth,
       onAuthStateChanged,
@@ -130,19 +137,10 @@
       sendEmailVerification,
       signOut
     } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-
-    const firebaseConfig = {
-      apiKey: "AIzaSyCbfEQyTwry7qNOluYqlHUZuU8AF3bkpgQ",
-      authDomain: "aethra-web.firebaseapp.com",
-      projectId: "aethra-web",
-      storageBucket: "aethra-web.firebasestorage.app",
-      messagingSenderId: "280560043528",
-      appId: "1:280560043528:web:a6c2e485c8da32c9dab3bd"
-    };
+    import { app } from "./js/firestore-config.js";
 
     const RESEND_COOLDOWN_SECONDS = 60;
 
-    const app = initializeApp(firebaseConfig);
     const auth = getAuth(app);
 
     const resendBtn = document.getElementById("resendBtn");
@@ -152,6 +150,10 @@
 
     let resendCountdown = null;
     let resendRemaining = 0;
+
+    function goTo(page) {
+      window.location.replace(page);
+    }
 
     function showMessage(text, type = "error") {
       messageBox.textContent = text;
@@ -164,32 +166,37 @@
     }
 
     function setLoading(button, text) {
+      if (!button) return;
       button.dataset.originalText = button.dataset.originalText || button.textContent;
       button.disabled = true;
       button.textContent = text;
     }
 
     function clearLoading(button) {
+      if (!button) return;
       button.disabled = false;
       button.textContent = button.dataset.originalText || button.textContent;
+    }
+
+    function clearResendCountdown() {
+      if (resendCountdown) {
+        clearInterval(resendCountdown);
+        resendCountdown = null;
+      }
     }
 
     function setResendCooldown(seconds = RESEND_COOLDOWN_SECONDS) {
       resendRemaining = seconds;
       resendBtn.disabled = true;
-
-      if (resendCountdown) {
-        clearInterval(resendCountdown);
-      }
-
       resendBtn.textContent = `Resend available in ${resendRemaining}s`;
+
+      clearResendCountdown();
 
       resendCountdown = setInterval(() => {
         resendRemaining -= 1;
 
         if (resendRemaining <= 0) {
-          clearInterval(resendCountdown);
-          resendCountdown = null;
+          clearResendCountdown();
           resendBtn.disabled = false;
           resendBtn.textContent = "Resend Verification Email";
           return;
@@ -201,7 +208,7 @@
 
     onAuthStateChanged(auth, async (user) => {
       if (!user) {
-        window.location.replace("login.html");
+        goTo("login.html");
         return;
       }
 
@@ -209,7 +216,7 @@
         await reload(user);
 
         if (auth.currentUser?.emailVerified) {
-          window.location.replace("home.html");
+          goTo("home.html");
         }
       } catch (error) {
         console.error("Verification page auth refresh failed:", error);
@@ -218,8 +225,9 @@
 
     resendBtn.addEventListener("click", async () => {
       const user = auth.currentUser;
+
       if (!user) {
-        window.location.replace("login.html");
+        goTo("login.html");
         return;
       }
 
@@ -235,7 +243,7 @@
         clearLoading(resendBtn);
         setResendCooldown();
       } catch (error) {
-        console.error(error);
+        console.error("Resend verification failed:", error);
         clearLoading(resendBtn);
         showMessage("Could not resend verification email right now. Please try again.");
       }
@@ -243,8 +251,9 @@
 
     refreshBtn.addEventListener("click", async () => {
       const user = auth.currentUser;
+
       if (!user) {
-        window.location.replace("login.html");
+        goTo("login.html");
         return;
       }
 
@@ -254,13 +263,13 @@
         await reload(user);
 
         if (auth.currentUser?.emailVerified) {
-          window.location.replace("home.html");
+          goTo("home.html");
           return;
         }
 
         showMessage("Your email is still not verified yet. Please verify it first, then try again.");
       } catch (error) {
-        console.error(error);
+        console.error("Verification refresh failed:", error);
         showMessage("Could not refresh your verification status. Please try again.");
       } finally {
         clearLoading(refreshBtn);
@@ -268,8 +277,17 @@
     });
 
     logoutBtn.addEventListener("click", async () => {
-      await signOut(auth);
-      window.location.replace("login.html");
+      try {
+        await signOut(auth);
+      } catch (error) {
+        console.error("Logout failed:", error);
+      } finally {
+        goTo("login.html");
+      }
+    });
+
+    window.addEventListener("beforeunload", () => {
+      clearResendCountdown();
     });
   </script>
 </body>
