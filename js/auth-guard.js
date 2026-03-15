@@ -11,25 +11,51 @@ import { app, db } from "./firestore-config.js";
 
 const auth = getAuth(app);
 
-function goTo(page) {
-  const currentPath = window.location.pathname || "";
-  if (!currentPath.endsWith(`/${page}`) && !currentPath.endsWith(page)) {
-    window.location.replace(page);
-  }
-}
-
 function getCurrentPath() {
   return window.location.pathname || "";
 }
 
-function isVerifyEmailPage() {
+function isPage(page) {
   const path = getCurrentPath();
-  return path.endsWith("/verify-email.html") || path.endsWith("verify-email.html");
+  return path.endsWith(`/${page}`) || path.endsWith(page);
 }
 
-function isLoginPage() {
-  const path = getCurrentPath();
-  return path.endsWith("/login.html") || path.endsWith("login.html");
+function goTo(page) {
+  if (!isPage(page)) {
+    window.location.replace(page);
+  }
+}
+
+async function resolveVerifiedUser(user) {
+  if (!user) {
+    return { ok: false, reason: "not-authenticated" };
+  }
+
+  await reload(user);
+
+  const currentUser = auth.currentUser;
+
+  if (!currentUser) {
+    return { ok: false, reason: "missing-current-user" };
+  }
+
+  if (!currentUser.emailVerified) {
+    return { ok: false, reason: "email-not-verified", user: currentUser };
+  }
+
+  return { ok: true, user: currentUser };
+}
+
+function handleUnauthedState() {
+  if (!isPage("login.html")) {
+    goTo("login.html");
+  }
+}
+
+function handleUnverifiedState() {
+  if (!isPage("verify-email.html")) {
+    goTo("verify-email.html");
+  }
 }
 
 export function requireAuth(callback) {
@@ -40,40 +66,34 @@ export function requireAuth(callback) {
 
     if (!user) {
       handled = true;
-      if (!isLoginPage()) {
-        goTo("login.html");
-      }
+      handleUnauthedState();
       return;
     }
 
     try {
-      await reload(user);
+      const result = await resolveVerifiedUser(user);
 
-      const currentUser = auth.currentUser;
-
-      if (!currentUser) {
+      if (!result.ok) {
         handled = true;
-        goTo("login.html");
-        return;
-      }
 
-      if (!currentUser.emailVerified) {
-        handled = true;
-        if (!isVerifyEmailPage()) {
-          goTo("verify-email.html");
+        if (result.reason === "email-not-verified") {
+          handleUnverifiedState();
+        } else {
+          handleUnauthedState();
         }
+
         return;
       }
 
       handled = true;
 
       if (typeof callback === "function") {
-        callback(currentUser);
+        await callback(result.user);
       }
     } catch (error) {
       console.error("Auth guard failed:", error);
       handled = true;
-      goTo("login.html");
+      handleUnauthedState();
     }
   });
 }
@@ -86,31 +106,26 @@ export function requireDeveloper(callback) {
 
     if (!user) {
       handled = true;
-      if (!isLoginPage()) {
-        goTo("login.html");
-      }
+      handleUnauthedState();
       return;
     }
 
     try {
-      await reload(user);
+      const result = await resolveVerifiedUser(user);
 
-      const currentUser = auth.currentUser;
-
-      if (!currentUser) {
+      if (!result.ok) {
         handled = true;
-        goTo("login.html");
-        return;
-      }
 
-      if (!currentUser.emailVerified) {
-        handled = true;
-        if (!isVerifyEmailPage()) {
-          goTo("verify-email.html");
+        if (result.reason === "email-not-verified") {
+          handleUnverifiedState();
+        } else {
+          handleUnauthedState();
         }
+
         return;
       }
 
+      const currentUser = result.user;
       const userRef = doc(db, "users", currentUser.uid);
       const userSnap = await getDoc(userRef);
 
@@ -132,7 +147,7 @@ export function requireDeveloper(callback) {
       handled = true;
 
       if (typeof callback === "function") {
-        callback(currentUser);
+        await callback(currentUser);
       }
     } catch (error) {
       console.error("Developer guard failed:", error);
