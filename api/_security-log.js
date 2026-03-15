@@ -1,6 +1,15 @@
-import { writeSecurityLog } from "./_security-log.js";
-import { checkApiRateLimit } from "./_rate-limit.js";
-import { trackApiAbuse } from "./_api-abuse-protection.js";
+import { writeSecurityLog } from "./_security-log-writer.js";
+import {
+  safeString,
+  safeNumber,
+  safeBoolean,
+  isPlainObject,
+  sanitizeBody,
+  sanitizeMetadata,
+  buildBlockedResponse,
+  buildMethodNotAllowedResponse,
+  runRouteSecurity
+} from "./_api-security.js";
 
 const ROUTE = "/api/security-log";
 
@@ -25,45 +34,6 @@ const ALLOWED_LEVELS = new Set([
 const MAX_BODY_KEYS = 12;
 const MAX_EVENT_AGE_MS = 2 * 60 * 1000;
 
-function safeString(value, maxLength = 300) {
-  return String(value || "").slice(0, maxLength);
-}
-
-function safeNumber(value, fallback = 0) {
-  const num = Number(value);
-  return Number.isFinite(num) ? num : fallback;
-}
-
-function safeBoolean(value) {
-  return Boolean(value);
-}
-
-function getClientIp(req) {
-  const forwarded = req.headers["x-forwarded-for"];
-
-  if (typeof forwarded === "string" && forwarded.length > 0) {
-    const ip = forwarded.split(",")[0]?.trim();
-    if (ip && ip.length < 100) {
-      return ip;
-    }
-  }
-
-  const realIp = req.headers["x-real-ip"];
-  if (typeof realIp === "string" && realIp.length > 0 && realIp.length < 100) {
-    return realIp.trim();
-  }
-
-  return safeString(req.socket?.remoteAddress || "unknown", 100);
-}
-
-function isAllowedOrigin(origin) {
-  return ALLOWED_ORIGINS.has(origin);
-}
-
-function isPlainObject(value) {
-  return Object.prototype.toString.call(value) === "[object Object]";
-}
-
 function safeClientType(type) {
   const normalized = safeString(type || "client_security_event", 50).toLowerCase();
   return ALLOWED_CLIENT_TYPES.has(normalized)
@@ -76,45 +46,6 @@ function safeLevel(level) {
   return ALLOWED_LEVELS.has(normalized) ? normalized : "warning";
 }
 
-function sanitizeMetadata(value, depth = 0) {
-  if (depth > 4) {
-    return "[max-depth]";
-  }
-
-  if (value === null || value === undefined) {
-    return null;
-  }
-
-  if (typeof value === "string") {
-    return safeString(value, 1000);
-  }
-
-  if (typeof value === "number") {
-    return Number.isFinite(value) ? value : null;
-  }
-
-  if (typeof value === "boolean") {
-    return value;
-  }
-
-  if (Array.isArray(value)) {
-    return value.slice(0, 20).map((item) => sanitizeMetadata(item, depth + 1));
-  }
-
-  if (isPlainObject(value)) {
-    const output = {};
-    const entries = Object.entries(value).slice(0, 20);
-
-    for (const [key, val] of entries) {
-      output[safeString(key, 100)] = sanitizeMetadata(val, depth + 1);
-    }
-
-    return output;
-  }
-
-  return safeString(value, 500);
-}
-
 function sanitizeClient(client = {}) {
   return {
     userAgent: safeString(client.userAgent || "", 300),
@@ -125,21 +56,6 @@ function sanitizeClient(client = {}) {
     url: safeString(client.url || "", 500),
     referrer: safeString(client.referrer || "", 500)
   };
-}
-
-function sanitizeBody(body) {
-  if (!body || typeof body !== "object" || Array.isArray(body)) {
-    return {};
-  }
-
-  const entries = Object.entries(body).slice(0, MAX_BODY_KEYS);
-  const output = {};
-
-  for (const [key, value] of entries) {
-    output[safeString(key, 50)] = value;
-  }
-
-  return output;
 }
 
 function getEventFreshness(eventAt) {
@@ -180,21 +96,39 @@ function getEventFreshness(eventAt) {
 }
 
 export default async function handler(req, res) {
-  const ip = getClientIp(req);
-
   if (req.method !== "POST") {
-    return res.status(405).json({
-      success: false,
-      message: "Method not allowed."
-    });
+    return res.status(405).json(buildMethodNotAllowedResponse());
   }
 
-  try {
-    const origin = safeString(req.headers.origin || "", 200);
-    const requestUserAgent = safeString(req.headers["user-agent"] || "", 500);
-    const body = sanitizeBody(req.body);
+  let ip = "unknown";
 
-    if (!isAllowedOrigin(origin)) {
+  try {
+    const body = sanitizeBody(req.body, MAX_BODY_KEYS);
+    const behavior =
+      body.behavior && isPlainObject(body.behavior)
+        ? body.behavior
+        : {};
+    const sessionId = safeString(body.sessionId || "", 120);
+
+    const security = runRouteSecurity({
+      req,
+      route: ROUTE,
+      allowedOrigins: ALLOWED_ORIGINS,
+      rateLimit: {
+        key: `security-log:${safeString(req?.headers?.["x-forwarded-for"] || req?.headers?.["x-real-ip"] || req?.socket?.remoteAddress || "unknown", 100)}`,
+        limit: 20,
+        windowMs: 5 * 60 * 1000
+      },
+      body,
+      behavior,
+      sessionId,
+      abuseSuccess: true
+    });
+
+    ip = security.ip;
+    const origin = security.origin;
+
+    if (!security.originAllowed) {
       await writeSecurityLog({
         type: "client_security_event",
         level: "warning",
@@ -205,24 +139,16 @@ export default async function handler(req, res) {
           source: "server_enforced",
           blockedReason: "forbidden_origin",
           requestOrigin: origin,
-          requestUserAgent
+          requestUserAgent: security.requestUserAgent
         }
       });
 
-      return res.status(403).json({
-        success: false,
-        message: "Forbidden origin."
-      });
+      return res.status(403).json(
+        buildBlockedResponse("Forbidden origin.", { action: "block" })
+      );
     }
 
-    const rateLimitResult = checkApiRateLimit({
-      key: `security-log:${ip}`,
-      limit: 20,
-      windowMs: 5 * 60 * 1000,
-      route: ROUTE
-    });
-
-    if (!rateLimitResult.allowed) {
+    if (security.rateLimitResult && !security.rateLimitResult.allowed) {
       await writeSecurityLog({
         type: "client_security_event",
         level: "warning",
@@ -231,30 +157,23 @@ export default async function handler(req, res) {
         route: ROUTE,
         metadata: {
           source: "server_enforced",
-          action: rateLimitResult.recommendedAction,
-          remainingMs: rateLimitResult.remainingMs || 0,
-          violations: rateLimitResult.violations || 0
+          action: security.rateLimitResult.recommendedAction,
+          remainingMs: security.rateLimitResult.remainingMs || 0,
+          violations: security.rateLimitResult.violations || 0
         }
       });
 
       return res.status(429).json({
         success: false,
         message: "Too many requests.",
-        action: rateLimitResult.recommendedAction,
-        remainingMs: rateLimitResult.remainingMs || 0
+        action: security.rateLimitResult.recommendedAction,
+        remainingMs: security.rateLimitResult.remainingMs || 0
       });
     }
 
-    const abuseResult = trackApiAbuse({
-      ip,
-      sessionId: safeString(body.sessionId || "", 120),
-      route: ROUTE,
-      success: true
-    });
-
     if (
-      abuseResult.recommendedAction === "block" ||
-      abuseResult.recommendedAction === "challenge"
+      security.finalAction === "block" ||
+      security.finalAction === "challenge"
     ) {
       await writeSecurityLog({
         type: "client_security_event",
@@ -262,18 +181,20 @@ export default async function handler(req, res) {
         message: "Blocked suspicious client telemetry request",
         ip,
         route: ROUTE,
-        metadata: {
+        metadata: sanitizeMetadata({
           source: "server_enforced",
-          abuseScore: abuseResult.abuseScore,
-          abuseLevel: abuseResult.level,
-          reasons: abuseResult.reasons
-        }
+          abuseAnalysis: security.abuseAnalysis,
+          botAnalysis: security.botAnalysis,
+          combinedRisk: security.combinedRisk,
+          finalAction: security.finalAction
+        })
       });
 
-      return res.status(403).json({
-        success: false,
-        message: "Suspicious request blocked."
-      });
+      return res.status(403).json(
+        buildBlockedResponse("Suspicious request blocked.", {
+          action: security.finalAction
+        })
+      );
     }
 
     const type = safeClientType(body.type);
@@ -296,7 +217,7 @@ export default async function handler(req, res) {
           source: "server_enforced",
           freshnessReason: eventFreshness.reason,
           ageMs: eventFreshness.ageMs,
-          requestUserAgent
+          requestUserAgent: security.requestUserAgent
         }
       });
 
@@ -320,7 +241,7 @@ export default async function handler(req, res) {
         receivedAt: Date.now(),
         ageMs: eventFreshness.ageMs,
         requestOrigin: origin,
-        requestUserAgent,
+        requestUserAgent: security.requestUserAgent,
         sessionIdPresent: safeBoolean(body.sessionId),
         metadata,
         client
