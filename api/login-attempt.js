@@ -1,6 +1,9 @@
 import { writeSecurityLog } from "./_security-log.js";
 
 const loginAttemptStore = new Map();
+const MAX_ATTEMPTS = 5;
+const LOCK_WINDOW_MS = 15 * 60 * 1000;
+const STALE_RECORD_TTL_MS = 24 * 60 * 60 * 1000;
 
 function normalizeEmail(email) {
   return String(email || "").trim().toLowerCase();
@@ -15,11 +18,28 @@ function getClientIp(req) {
   if (typeof forwarded === "string" && forwarded.length > 0) {
     return forwarded.split(",")[0].trim();
   }
+
+  const realIp = req.headers["x-real-ip"];
+  if (typeof realIp === "string" && realIp.length > 0) {
+    return realIp.trim();
+  }
+
   return "unknown";
 }
 
 function getKey(email, ip) {
   return `${email}::${ip}`;
+}
+
+function cleanupStaleRecords() {
+  const now = Date.now();
+
+  for (const [key, record] of loginAttemptStore.entries()) {
+    if (!record?.lastAttempt) continue;
+    if (now - record.lastAttempt > STALE_RECORD_TTL_MS) {
+      loginAttemptStore.delete(key);
+    }
+  }
 }
 
 function getRecord(key) {
@@ -63,6 +83,8 @@ export default async function handler(req, res) {
   }
 
   try {
+    cleanupStaleRecords();
+
     const origin = req.headers.origin || "";
     const ip = getClientIp(req);
 
@@ -154,8 +176,8 @@ export default async function handler(req, res) {
       record.count += 1;
       record.lastAttempt = now;
 
-      if (record.count >= 5) {
-        record.lockUntil = now + 15 * 60 * 1000;
+      if (record.count >= MAX_ATTEMPTS) {
+        record.lockUntil = now + LOCK_WINDOW_MS;
 
         await writeSecurityLog({
           type: "login_lockout",
