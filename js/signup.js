@@ -6,12 +6,13 @@ import {
   signInWithRedirect,
   getRedirectResult,
   GoogleAuthProvider,
-  updateProfile
+  updateProfile,
+  sendEmailVerification
 } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
 import { ensureUserProfile } from "./user-profile.js";
 
 const firebaseConfig = {
-  apiKey: "AIzaSyCbfEQyTwry7qNOluYqlHUZuU8AF3bkpgQ",
+  apiKey: "AIzaSyCbfEQyTwry7qNOluU8AF3bkpgQ",
   authDomain: "aethra-web.firebaseapp.com",
   projectId: "aethra-web",
   storageBucket: "aethra-web.firebasestorage.app",
@@ -130,6 +131,10 @@ function clearLoading(button) {
   if (!button) return;
   button.disabled = false;
   button.textContent = button.dataset.originalText || button.textContent;
+}
+
+function redirectToVerifyEmail() {
+  window.location.href = "verify-email.html";
 }
 
 function redirectToHome() {
@@ -395,8 +400,9 @@ async function handleEmailSignup() {
     });
 
     await ensureUserProfile(userCredential.user);
+    await sendEmailVerification(userCredential.user);
 
-    redirectToHome();
+    redirectToVerifyEmail();
   } catch (error) {
     console.error("Signup error:", error);
     mapSignupErrorToField(error);
