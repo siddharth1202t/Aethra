@@ -456,13 +456,26 @@
 
           <div class="field">
             <label for="email">Email</label>
-            <input id="email" type="email" placeholder="Enter your email" required>
+            <input
+            id="email"
+            type="email"
+            placeholder="Enter your email"
+            required
+            autocomplete="email"
+            inputmode="email"
+            spellcheck="false">
             <small id="emailError" class="error-text"></small>
           </div>
 
           <div class="field">
             <label for="password">Password</label>
-            <input id="password" type="password" placeholder="Enter your password" required>
+            <input
+            id="password"
+            type="password"
+            placeholder="Enter your password"
+            required
+            autocomplete="current-password"
+            spellcheck="false">
             <small id="passwordError" class="error-text"></small>
           </div>
 
@@ -516,6 +529,24 @@
       star.style.animationDuration = (Math.random() * 4 + 2) + "s";
       star.style.animationDelay = Math.random() * 4 + "s";
       starsContainer.appendChild(star);
+    }
+  </script>
+
+  <script>
+    // Disable right click on login form (basic bot defense)
+    document.addEventListener("contextmenu", (e) => {
+      if (e.target.closest("#loginForm")) {
+        e.preventDefault();
+      }
+    });
+
+    // Prevent form double submission
+    const loginForm = document.getElementById("loginForm");
+    if (loginForm) {
+      loginForm.addEventListener("submit", () => {
+        const btn = loginForm.querySelector(".login-btn");
+        if (btn) btn.disabled = true;
+      });
     }
   </script>
 
