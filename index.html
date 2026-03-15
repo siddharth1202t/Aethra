@@ -913,7 +913,10 @@
            data-role="Gentle observer"
            data-image="images/char1.png"
            data-desc="Sakura is calm, thoughtful, and emotionally intelligent. She notices subtle changes in your mood and responds with quiet warmth."
-           data-traits="Gentle,Observant,Emotionally intelligent,Calm listener">
+           data-traits="Gentle,Observant,Emotionally intelligent,Calm listener"
+           tabindex="0"
+           role="button"
+           aria-label="Open Sakura profile">
         <img src="images/char1.png" alt="Sakura" />
         <h3>Sakura</h3>
         <p>Gentle, observant, and emotionally intelligent. She notices small details and remembers them.</p>
@@ -925,7 +928,10 @@
            data-role="Energetic spark"
            data-image="images/char2.png"
            data-desc="Nova is playful, curious, and full of movement. She brings energy into every conversation and makes the world feel lighter."
-           data-traits="Playful,Energetic,Curious,Lively">
+           data-traits="Playful,Energetic,Curious,Lively"
+           tabindex="0"
+           role="button"
+           aria-label="Open Nova profile">
         <img src="images/char2.png" alt="Nova" />
         <h3>Nova</h3>
         <p>Energetic, playful, and curious. She brings life and motion into every interaction.</p>
@@ -937,7 +943,10 @@
            data-role="Quiet strategist"
            data-image="images/char3.png"
            data-desc="Akira has a mysterious presence and a sharp mind. Behind her calm expression is hidden emotional depth and thoughtful insight."
-           data-traits="Analytical,Mysterious,Quiet,Deep thinker">
+           data-traits="Analytical,Mysterious,Quiet,Deep thinker"
+           tabindex="0"
+           role="button"
+           aria-label="Open Akira profile">
         <img src="images/char3.png" alt="Akira" />
         <h3>Akira</h3>
         <p>Mysterious and analytical with quiet emotional depth hiding behind her calm expression.</p>
@@ -949,7 +958,10 @@
            data-role="Warm companion"
            data-image="images/char4.png"
            data-desc="Luna feels elegant, warm, and emotionally aware. She is designed to feel supportive, comforting, and deeply present."
-           data-traits="Warm,Supportive,Elegant,Comforting">
+           data-traits="Warm,Supportive,Elegant,Comforting"
+           tabindex="0"
+           role="button"
+           aria-label="Open Luna profile">
         <img src="images/char4.png" alt="Luna" />
         <h3>Luna</h3>
         <p>Warm, elegant, and supportive — a companion designed to feel comforting and real.</p>
@@ -968,7 +980,7 @@
         <img id="modalImage" src="" alt="Character" />
       </div>
       <div class="modal-content">
-        <button class="close-btn" id="closeModal" aria-label="Close modal">&times;</button>
+        <button class="close-btn" id="closeModal" type="button" aria-label="Close modal">&times;</button>
         <div class="modal-badge" id="modalRole"></div>
         <h3 id="modalName"></h3>
         <div class="modal-sub">Aethra character profile</div>
@@ -979,171 +991,6 @@
   </div>
 
   <script type="module" src="js/app-check.js"></script>
-
-  <script>
-    const starsContainer = document.getElementById("stars");
-    const particlesContainer = document.getElementById("particles");
-    const petalsContainer = document.getElementById("petals");
-    const modal = document.getElementById("characterModal");
-    const modalImage = document.getElementById("modalImage");
-    const modalName = document.getElementById("modalName");
-    const modalRole = document.getElementById("modalRole");
-    const modalDesc = document.getElementById("modalDesc");
-    const modalTraits = document.getElementById("modalTraits");
-    const closeModal = document.getElementById("closeModal");
-    const leftPanel = document.getElementById("leftPanel");
-    const rightPanel = document.getElementById("rightPanel");
-    const heroCard = document.getElementById("heroCard");
-
-    let mouseX = 0;
-    let mouseY = 0;
-    let currentX = 0;
-    let currentY = 0;
-
-    function createStars() {
-      for (let i = 0; i < 110; i++) {
-        const star = document.createElement("div");
-        star.classList.add("star");
-
-        const size = Math.random() * 2.2 + 1;
-        star.style.width = size + "px";
-        star.style.height = size + "px";
-        star.style.left = Math.random() * 100 + "vw";
-        star.style.top = Math.random() * 100 + "vh";
-        star.style.animationDuration = (Math.random() * 4 + 2) + "s";
-        star.style.animationDelay = Math.random() * 4 + "s";
-
-        starsContainer.appendChild(star);
-      }
-    }
-
-    function createParticles() {
-      for (let i = 0; i < 24; i++) {
-        const particle = document.createElement("div");
-        particle.classList.add("particle");
-
-        const size = Math.random() * 5 + 3;
-        particle.style.width = size + "px";
-        particle.style.height = size + "px";
-        particle.style.left = Math.random() * 100 + "vw";
-        particle.style.bottom = (-Math.random() * 100) + "px";
-        particle.style.animationDuration = (Math.random() * 10 + 8) + "s";
-        particle.style.animationDelay = Math.random() * 8 + "s";
-
-        particlesContainer.appendChild(particle);
-      }
-    }
-
-    function createPetals() {
-      for (let i = 0; i < 22; i++) {
-        const petal = document.createElement("div");
-        petal.classList.add("petal");
-
-        petal.style.left = Math.random() * 100 + "vw";
-        petal.style.top = -Math.random() * 100 + "px";
-        petal.style.animationDuration = (Math.random() * 8 + 9) + "s";
-        petal.style.animationDelay = Math.random() * 10 + "s";
-        petal.style.transform = `rotate(${Math.random() * 360}deg)`;
-
-        petalsContainer.appendChild(petal);
-      }
-    }
-
-    function openModal(card) {
-      modalImage.src = card.dataset.image;
-      modalImage.alt = card.dataset.name;
-      modalName.textContent = card.dataset.name;
-      modalRole.textContent = card.dataset.role;
-      modalDesc.textContent = card.dataset.desc;
-      modalTraits.textContent = "";
-
-      const traits = (card.dataset.traits || "").split(",");
-      traits.forEach((trait) => {
-        const span = document.createElement("span");
-        span.className = "trait";
-        span.textContent = trait.trim();
-        modalTraits.appendChild(span);
-      });
-
-      modal.classList.add("active");
-      modal.setAttribute("aria-hidden", "false");
-      document.body.style.overflow = "hidden";
-    }
-
-    function closeCharacterModal() {
-      modal.classList.remove("active");
-      modal.setAttribute("aria-hidden", "true");
-      document.body.style.overflow = "auto";
-    }
-
-    function bindCharacterCards() {
-      document.querySelectorAll(".char-card").forEach((card) => {
-        card.addEventListener("click", () => openModal(card));
-      });
-    }
-
-    function bindModalEvents() {
-      closeModal.addEventListener("click", closeCharacterModal);
-
-      modal.addEventListener("click", (e) => {
-        if (e.target === modal) {
-          closeCharacterModal();
-        }
-      });
-
-      document.addEventListener("keydown", (e) => {
-        if (e.key === "Escape" && modal.classList.contains("active")) {
-          closeCharacterModal();
-        }
-      });
-    }
-
-    function bindParallax() {
-      document.addEventListener("mousemove", (e) => {
-        mouseX = (window.innerWidth / 2 - e.clientX) / 35;
-        mouseY = (window.innerHeight / 2 - e.clientY) / 35;
-      });
-
-      function animateParallax() {
-        currentX += (mouseX - currentX) * 0.08;
-        currentY += (mouseY - currentY) * 0.08;
-
-        if (leftPanel) {
-          leftPanel.style.transform = `translate(${currentX * 0.8}px, ${currentY * 0.8}px)`;
-        }
-
-        if (rightPanel) {
-          rightPanel.style.transform = `translate(${-currentX * 0.8}px, ${-currentY * 0.8}px)`;
-        }
-
-        requestAnimationFrame(animateParallax);
-      }
-
-      animateParallax();
-
-      if (heroCard) {
-        heroCard.addEventListener("mousemove", (e) => {
-          const rect = heroCard.getBoundingClientRect();
-          const x = e.clientX - rect.left;
-          const y = e.clientY - rect.top;
-
-          heroCard.style.setProperty("--mx", `${x}px`);
-          heroCard.style.setProperty("--my", `${y}px`);
-        });
-
-        heroCard.addEventListener("mouseleave", () => {
-          heroCard.style.setProperty("--mx", "50%");
-          heroCard.style.setProperty("--my", "50%");
-        });
-      }
-    }
-
-    createStars();
-    createParticles();
-    createPetals();
-    bindCharacterCards();
-    bindModalEvents();
-    bindParallax();
-  </script>
+  <script type="module" src="js/index.js"></script>
 </body>
 </html>
