@@ -4,11 +4,7 @@ import {
   reload,
   getIdTokenResult
 } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-import {
-  doc,
-  getDoc
-} from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-import { app, db } from "./firestore-config.js";
+import { app } from "./firestore-config.js";
 
 const auth = getAuth(app);
 
@@ -65,65 +61,41 @@ async function resolveVerifiedUser(user) {
   return { ok: true, user: currentUser };
 }
 
-async function getUserRoleData(uid) {
-  try {
-    const userRef = doc(db, "users", uid);
-    const userSnap = await getDoc(userRef);
-
-    if (!userSnap.exists()) {
-      return {
-        exists: false,
-        firestoreRole: ""
-      };
-    }
-
-    const userData = userSnap.data() || {};
-    return {
-      exists: true,
-      firestoreRole: String(userData.role || "").toLowerCase()
-    };
-  } catch (error) {
-    console.error("Failed to read user role data:", error);
-    return {
-      exists: false,
-      firestoreRole: ""
-    };
-  }
-}
-
-async function resolveDeveloperAccess(currentUser) {
-  let claimsRole = "";
-  let isDeveloperByClaims = false;
-
+async function getClaimsAccess(currentUser) {
   try {
     const tokenResult = await getIdTokenResult(currentUser, true);
     const claims = tokenResult?.claims || {};
 
-    if (claims.admin === true) {
-      claimsRole = "admin";
-      isDeveloperByClaims = true;
+    const isAdmin = claims.admin === true;
+    const isDeveloper = claims.developer === true || isAdmin;
+
+    let role = "";
+    if (isAdmin) {
+      role = "admin";
     } else if (claims.developer === true) {
-      claimsRole = "developer";
-      isDeveloperByClaims = true;
+      role = "developer";
     }
+
+    return {
+      ok: true,
+      isDeveloper,
+      isAdmin,
+      role,
+      claims
+    };
   } catch (error) {
     console.error("Failed to read token claims:", error);
+    return {
+      ok: false,
+      isDeveloper: false,
+      isAdmin: false,
+      role: "",
+      claims: {}
+    };
   }
-
-  const roleData = await getUserRoleData(currentUser.uid);
-
-  const isDeveloperByFirestore =
-    roleData.exists && roleData.firestoreRole === "developer";
-
-  return {
-    isDeveloper: isDeveloperByClaims || isDeveloperByFirestore,
-    claimsRole,
-    firestoreRole: roleData.firestoreRole,
-    userDocExists: roleData.exists
-  };
 }
 
-function createSingleRunGuard(handler) {
+function createSingleRunGuard(handler, onError) {
   let handled = false;
 
   return onAuthStateChanged(auth, async (user) => {
@@ -137,7 +109,12 @@ function createSingleRunGuard(handler) {
     } catch (error) {
       console.error("Auth guard failed:", error);
       handled = true;
-      handleUnauthedState();
+
+      if (typeof onError === "function") {
+        onError(error);
+      } else {
+        handleUnauthedState();
+      }
     }
   });
 }
@@ -170,38 +147,58 @@ export function requireAuth(callback) {
 }
 
 export function requireDeveloper(callback) {
-  return createSingleRunGuard(async (user) => {
-    if (!user) {
-      handleUnauthedState();
-      return true;
-    }
-
-    const result = await resolveVerifiedUser(user);
-
-    if (!result.ok) {
-      if (result.reason === "email-not-verified") {
-        handleUnverifiedState();
-      } else {
+  return createSingleRunGuard(
+    async (user) => {
+      if (!user) {
         handleUnauthedState();
+        return true;
+      }
+
+      const result = await resolveVerifiedUser(user);
+
+      if (!result.ok) {
+        if (result.reason === "email-not-verified") {
+          handleUnverifiedState();
+        } else {
+          handleUnauthedState();
+        }
+
+        return true;
+      }
+
+      const currentUser = result.user;
+      const access = await getClaimsAccess(currentUser);
+
+      if (!access.ok || !access.isDeveloper) {
+        handleNonDeveloperState();
+        return true;
+      }
+
+      if (typeof callback === "function") {
+        await callback(currentUser, access);
       }
 
       return true;
-    }
-
-    const currentUser = result.user;
-    const access = await resolveDeveloperAccess(currentUser);
-
-    if (!access.isDeveloper) {
+    },
+    () => {
       handleNonDeveloperState();
-      return true;
     }
+  );
+}
 
-    if (typeof callback === "function") {
-      await callback(currentUser, access);
-    }
+export async function getFreshIdToken() {
+  const currentUser = auth.currentUser;
 
-    return true;
-  });
+  if (!currentUser) {
+    return "";
+  }
+
+  try {
+    return await currentUser.getIdToken(true);
+  } catch (error) {
+    console.error("Failed to get fresh ID token:", error);
+    return "";
+  }
 }
 
 export { auth };
