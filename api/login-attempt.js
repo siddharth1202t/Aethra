@@ -1,4 +1,5 @@
 import { writeSecurityLog } from "./_security-log.js";
+import { checkApiRateLimit } from "./_rate-limit.js";
 
 const loginAttemptStore = new Map();
 const ipAttemptStore = new Map();
