@@ -444,26 +444,52 @@
 
           <div class="field">
             <label for="name">Username</label>
-            <input id="name" type="text" placeholder="Choose a username" required>
+            <input
+              id="name"
+              type="text"
+              placeholder="Choose a username"
+              required
+              autocomplete="username"
+              maxlength="30"
+              spellcheck="false">
             <small id="nameError" class="error-text"></small>
           </div>
 
           <div class="field">
             <label for="email">Email</label>
-            <input id="email" type="email" placeholder="Enter your email" required>
+            <input
+              id="email"
+              type="email"
+              placeholder="Enter your email"
+              required
+              autocomplete="email"
+              inputmode="email"
+              spellcheck="false">
             <small id="emailError" class="error-text"></small>
           </div>
 
           <div class="field">
             <label for="password">Password</label>
-            <input id="password" type="password" placeholder="Create a password" required>
+            <input
+              id="password"
+              type="password"
+              placeholder="Create a password"
+              required
+              autocomplete="new-password"
+              spellcheck="false">
             <small id="passwordError" class="error-text"></small>
             <small class="field-hint">Use at least 8 characters, 1 uppercase letter, and 1 number.</small>
           </div>
 
           <div class="field">
             <label for="confirmPassword">Confirm Password</label>
-            <input id="confirmPassword" type="password" placeholder="Confirm your password" required>
+            <input
+              id="confirmPassword"
+              type="password"
+              placeholder="Confirm your password"
+              required
+              autocomplete="new-password"
+              spellcheck="false">
             <small id="confirmPasswordError" class="error-text"></small>
           </div>
 
@@ -499,27 +525,9 @@
     </div>
   </div>
 
-  <script>
-    const starsContainer = document.getElementById("stars");
-
-    for (let i = 0; i < 90; i++) {
-      const star = document.createElement("div");
-      star.classList.add("star");
-
-      const size = Math.random() * 2.2 + 1;
-      star.style.width = size + "px";
-      star.style.height = size + "px";
-      star.style.left = Math.random() * 100 + "vw";
-      star.style.top = Math.random() * 100 + "vh";
-      star.style.animationDuration = (Math.random() * 4 + 2) + "s";
-      star.style.animationDelay = Math.random() * 4 + "s";
-
-      starsContainer.appendChild(star);
-    }
-  </script>
-
   <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit" defer></script>
   <script type="module" src="js/app-check.js"></script>
-  <script type="module" src="js/login.js"></script>
+  <script type="module" src="js/signup-page.js"></script>
+  <script type="module" src="js/signup.js"></script>
 </body>
 </html>
