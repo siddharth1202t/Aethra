@@ -1,7 +1,12 @@
-import { writeSecurityLog } from "./_security-log.js";
-import { checkApiRateLimit } from "./_rate-limit.js";
-import { trackApiAbuse } from "./_api-abuse-protection.js";
-import { analyzeBotBehavior } from "./_bot-detection.js";
+import { writeSecurityLog } from "./_security-log-writer.js";
+import {
+  safeString,
+  sanitizeBody,
+  sanitizeMetadata,
+  buildBlockedResponse,
+  buildMethodNotAllowedResponse,
+  runRouteSecurity
+} from "./_api-security.js";
 
 const ROUTE = "/api/verify-turnstile";
 
@@ -14,37 +19,6 @@ const ALLOWED_HOSTNAMES = new Set([
   "aethra-gules.vercel.app",
   "aethra-hb2h.vercel.app"
 ]);
-
-function safeString(value, maxLength = 300) {
-  return String(value || "").slice(0, maxLength);
-}
-
-function safeNumber(value, fallback = 0) {
-  const num = Number(value);
-  return Number.isFinite(num) ? num : fallback;
-}
-
-function getClientIp(req) {
-  const forwarded = req.headers["x-forwarded-for"];
-
-  if (typeof forwarded === "string" && forwarded.length > 0) {
-    const ip = forwarded.split(",")[0]?.trim();
-    if (ip && ip.length < 100) {
-      return ip;
-    }
-  }
-
-  const realIp = req.headers["x-real-ip"];
-  if (typeof realIp === "string" && realIp.length > 0 && realIp.length < 100) {
-    return realIp.trim();
-  }
-
-  return safeString(req.socket?.remoteAddress || "unknown", 100);
-}
-
-function isAllowedOrigin(origin) {
-  return ALLOWED_ORIGINS.has(origin);
-}
 
 function normalizeHostname(hostname = "") {
   return safeString(hostname, 200).trim().toLowerCase();
@@ -62,57 +36,41 @@ function safeErrorCodes(value) {
   return value.slice(0, 10).map((item) => safeString(item, 100));
 }
 
-function getFinalSecurityAction({ abuseAnalysis, botAnalysis }) {
-  if (
-    abuseAnalysis?.recommendedAction === "block" ||
-    botAnalysis?.recommendedAction === "block"
-  ) {
-    return "block";
-  }
-
-  if (
-    abuseAnalysis?.recommendedAction === "challenge" ||
-    botAnalysis?.recommendedAction === "challenge"
-  ) {
-    return "challenge";
-  }
-
-  if (
-    abuseAnalysis?.recommendedAction === "throttle" ||
-    botAnalysis?.recommendedAction === "throttle"
-  ) {
-    return "throttle";
-  }
-
-  return "allow";
-}
-
 export default async function handler(req, res) {
-  const ip = getClientIp(req);
-
   if (req.method !== "POST") {
-    return res.status(405).json({
-      success: false,
-      message: "Method not allowed."
-    });
+    return res.status(405).json(buildMethodNotAllowedResponse());
   }
 
   try {
-    const origin = safeString(req.headers.origin || "", 200);
-    const requestUserAgent = safeString(req.headers["user-agent"] || "", 500);
-    const body = req.body && typeof req.body === "object" && !Array.isArray(req.body)
-      ? req.body
-      : {};
+    const body = sanitizeBody(req.body, 20);
 
     const token = safeString(body.token || "", 5000);
     const sessionId = safeString(body.sessionId || "", 120);
-    const behavior = body.behavior && typeof body.behavior === "object"
-      ? body.behavior
-      : {};
+    const behavior =
+      body.behavior && typeof body.behavior === "object" && !Array.isArray(body.behavior)
+        ? body.behavior
+        : {};
 
+    const security = runRouteSecurity({
+      req,
+      route: ROUTE,
+      allowedOrigins: ALLOWED_ORIGINS,
+      rateLimit: {
+        key: `verify-turnstile:${safeString(req?.headers?.["x-forwarded-for"] || req?.headers?.["x-real-ip"] || req?.socket?.remoteAddress || "unknown", 100)}`,
+        limit: 10,
+        windowMs: 60 * 1000
+      },
+      body,
+      behavior,
+      sessionId,
+      abuseSuccess: Boolean(token)
+    });
+
+    const ip = security.ip;
+    const origin = security.origin;
     const secret = process.env.TURNSTILE_SECRET_KEY;
 
-    if (!isAllowedOrigin(origin)) {
+    if (!security.originAllowed) {
       await writeSecurityLog({
         type: "forbidden_turnstile_origin",
         level: "warning",
@@ -122,24 +80,16 @@ export default async function handler(req, res) {
         metadata: {
           source: "server_enforced",
           origin,
-          requestUserAgent
+          requestUserAgent: security.requestUserAgent
         }
       });
 
-      return res.status(403).json({
-        success: false,
-        message: "Forbidden origin."
-      });
+      return res.status(403).json(
+        buildBlockedResponse("Forbidden origin.", { action: "block" })
+      );
     }
 
-    const rateLimitResult = checkApiRateLimit({
-      key: `verify-turnstile:${ip}`,
-      limit: 10,
-      windowMs: 60 * 1000,
-      route: ROUTE
-    });
-
-    if (!rateLimitResult.allowed) {
+    if (security.rateLimitResult && !security.rateLimitResult.allowed) {
       await writeSecurityLog({
         type: "turnstile_rate_limited",
         level: "warning",
@@ -148,56 +98,57 @@ export default async function handler(req, res) {
         route: ROUTE,
         metadata: {
           source: "server_enforced",
-          action: rateLimitResult.recommendedAction,
-          remainingMs: rateLimitResult.remainingMs,
-          violations: rateLimitResult.violations || 0
+          action: security.rateLimitResult.recommendedAction,
+          remainingMs: security.rateLimitResult.remainingMs || 0,
+          violations: security.rateLimitResult.violations || 0
         }
       });
 
       return res.status(429).json({
         success: false,
         message: "Too many requests. Please try again later.",
-        action: rateLimitResult.recommendedAction,
-        remainingMs: rateLimitResult.remainingMs || 0
+        action: security.rateLimitResult.recommendedAction,
+        remainingMs: security.rateLimitResult.remainingMs || 0
       });
     }
 
-    const abuseAnalysis = trackApiAbuse({
-      ip,
-      sessionId,
-      route: ROUTE,
-      success: Boolean(token)
-    });
-
-    const botAnalysis = analyzeBotBehavior(
-      { ...behavior, route: ROUTE, sessionId },
-      req
-    );
-
-    const finalAction = getFinalSecurityAction({
-      abuseAnalysis,
-      botAnalysis
-    });
-
-    if (finalAction === "block") {
+    if (security.finalAction === "block") {
       await writeSecurityLog({
         type: "blocked_suspicious_turnstile_request",
         level: "critical",
         message: "Blocked suspicious verify-turnstile request",
         ip,
         route: ROUTE,
-        metadata: {
+        metadata: sanitizeMetadata({
           source: "server_enforced",
-          abuseAnalysis,
-          botAnalysis,
-          finalAction
-        }
+          botAnalysis: security.botAnalysis,
+          abuseAnalysis: security.abuseAnalysis,
+          combinedRisk: security.combinedRisk,
+          finalAction: security.finalAction
+        })
       });
 
-      return res.status(429).json({
-        success: false,
-        message: "Suspicious activity detected. Please try again later.",
-        action: finalAction
+      return res.status(429).json(
+        buildBlockedResponse("Suspicious activity detected. Please try again later.", {
+          action: security.finalAction
+        })
+      );
+    }
+
+    if (security.finalAction === "challenge" || security.finalAction === "throttle") {
+      await writeSecurityLog({
+        type: "temporary_turnstile_security_challenge",
+        level: "warning",
+        message: "Suspicious behavior detected on verify-turnstile API",
+        ip,
+        route: ROUTE,
+        metadata: sanitizeMetadata({
+          source: "server_enforced",
+          botAnalysis: security.botAnalysis,
+          abuseAnalysis: security.abuseAnalysis,
+          combinedRisk: security.combinedRisk,
+          finalAction: security.finalAction
+        })
       });
     }
 
@@ -267,8 +218,8 @@ export default async function handler(req, res) {
         metadata: {
           source: "server_enforced",
           errorCodes: safeErrorCodes(data["error-codes"]),
-          abuseLevel: abuseAnalysis.level,
-          botLevel: botAnalysis.level
+          abuseLevel: security.abuseAnalysis?.level || "low",
+          botLevel: security.botAnalysis?.level || "low"
         }
       });
 
@@ -299,7 +250,7 @@ export default async function handler(req, res) {
 
     return res.status(200).json({
       success: true,
-      action: finalAction === "allow" ? "allow" : finalAction
+      action: security.finalAction === "allow" ? "allow" : security.finalAction
     });
   } catch (error) {
     console.error("Turnstile API error:", error);
@@ -309,7 +260,6 @@ export default async function handler(req, res) {
         type: "turnstile_api_error",
         level: "error",
         message: "Unhandled server error in verify-turnstile API",
-        ip,
         route: ROUTE,
         metadata: {
           source: "server_enforced",
