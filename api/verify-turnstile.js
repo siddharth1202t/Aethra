@@ -1,4 +1,5 @@
 import { writeSecurityLog } from "./_security-log.js";
+import { checkApiRateLimit } from "./_rate-limit.js";
 
 const rateLimitStore = new Map();
 const RATE_LIMIT_MAX = 10;
