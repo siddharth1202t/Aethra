@@ -1,19 +1,15 @@
-const apiLimiter = new Map();
+import { redis } from "./_redis.js";
 
 const DEFAULT_LIMIT = 60;
 const DEFAULT_WINDOW_MS = 60 * 1000;
 const STALE_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_KEY_LENGTH = 200;
 
-const CLEANUP_INTERVAL_MS = 60 * 1000;
-
 const PENALTY_BASE_MS = 5 * 60 * 1000;
 const MAX_PENALTY_MS = 2 * 60 * 60 * 1000;
 
 const BURST_WINDOW_MS = 15 * 1000;
 const VIOLATION_DECAY_MS = 30 * 60 * 1000;
-
-let lastCleanupAt = 0;
 
 function safeNumber(value, fallback = 0) {
   const num = Number(value);
@@ -34,20 +30,8 @@ function normalizeRoute(route) {
   return String(route || "unknown-route").trim().toLowerCase().slice(0, 150);
 }
 
-function cleanupStaleEntries(force = false) {
-  const now = Date.now();
-
-  if (!force && now - lastCleanupAt < CLEANUP_INTERVAL_MS) {
-    return;
-  }
-
-  lastCleanupAt = now;
-
-  for (const [key, record] of apiLimiter.entries()) {
-    if (!record || now - safeNumber(record.updatedAt) > STALE_TTL_MS) {
-      apiLimiter.delete(key);
-    }
-  }
+function buildRedisKey(key) {
+  return `ratelimit:${normalizeKey(key)}`;
 }
 
 function createEmptyRecord(now) {
@@ -177,9 +161,41 @@ function updateBurstMemory(record, now) {
   return record.recentHits.length;
 }
 
-export function checkApiRateLimit(options = {}) {
-  cleanupStaleEntries();
+async function getStoredRecord(redisKey) {
+  try {
+    const raw = await redis.get(redisKey);
 
+    if (!raw) {
+      return null;
+    }
+
+    if (typeof raw === "string") {
+      return JSON.parse(raw);
+    }
+
+    if (typeof raw === "object") {
+      return raw;
+    }
+
+    return null;
+  } catch (error) {
+    console.error("Redis rate-limit read failed:", error);
+    return null;
+  }
+}
+
+async function storeRecord(redisKey, record) {
+  try {
+    const ttlSeconds = Math.max(1, Math.ceil(STALE_TTL_MS / 1000));
+    await redis.set(redisKey, JSON.stringify(record), { ex: ttlSeconds });
+    return true;
+  } catch (error) {
+    console.error("Redis rate-limit write failed:", error);
+    return false;
+  }
+}
+
+export async function checkApiRateLimit(options = {}) {
   const now = Date.now();
 
   let key = "unknown";
@@ -198,8 +214,9 @@ export function checkApiRateLimit(options = {}) {
 
   const routeSensitivity = getRouteSensitivity(route);
   const routeWeight = getRouteWeight(route);
+  const redisKey = buildRedisKey(key);
 
-  let record = apiLimiter.get(key);
+  let record = await getStoredRecord(redisKey);
 
   if (!record) {
     record = createEmptyRecord(now);
@@ -240,7 +257,7 @@ export function checkApiRateLimit(options = {}) {
     }
   }
 
-  apiLimiter.set(key, record);
+  await storeRecord(redisKey, record);
 
   const overBy = Math.max(0, record.count - limit);
   const remaining = Math.max(0, limit - record.count);
