@@ -1,16 +1,11 @@
-export const SECURITY_CONFIG = {
-  developerEmail:
-    typeof process !== "undefined" && process.env.DEVELOPER_EMAIL
-      ? process.env.DEVELOPER_EMAIL
-      : "siddharthkumar9127@gmail.com",
-
-  allowedOrigins: [
+export const SECURITY_CONFIG = Object.freeze({
+  allowedOrigins: Object.freeze([
     "https://aethra-gules.vercel.app",
     "https://aethra-hb2h.vercel.app"
-  ],
+  ]),
 
-  allowedHostnames: [
+  allowedHostnames: Object.freeze([
     "aethra-gules.vercel.app",
     "aethra-hb2h.vercel.app"
-  ]
-};
+  ])
+});
