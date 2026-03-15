@@ -1,4 +1,3 @@
-import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
 import {
   getAuth,
   createUserWithEmailAndPassword,
@@ -9,18 +8,10 @@ import {
   updateProfile,
   sendEmailVerification
 } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+
+import { app } from "./firestore-config.js";
 import { ensureUserProfile } from "./user-profile.js";
 
-const firebaseConfig = {
-  apiKey: "AIzaSyCbfEQyTwry7qNOluYqlHUZuU8AF3bkpgQ",
-  authDomain: "aethra-web.firebaseapp.com",
-  projectId: "aethra-web",
-  storageBucket: "aethra-web.firebasestorage.app",
-  messagingSenderId: "280560043528",
-  appId: "1:280560043528:web:a6c2e485c8da32c9dab3bd"
-};
-
-const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const provider = new GoogleAuthProvider();
 
@@ -52,13 +43,10 @@ function waitForTurnstile(timeout = 10000) {
     const start = Date.now();
 
     const check = () => {
-      if (window.turnstile) {
-        resolve();
-      } else if (Date.now() - start > timeout) {
+      if (window.turnstile) resolve();
+      else if (Date.now() - start > timeout)
         reject(new Error("Turnstile script did not load."));
-      } else {
-        setTimeout(check, 100);
-      }
+      else setTimeout(check, 100);
     };
 
     check();
@@ -77,12 +65,12 @@ async function verifyTurnstileToken(token) {
   const data = await res.json();
 
   if (!res.ok || !data.success) {
-    throw new Error("Captcha verification failed. Please try again.");
+    throw new Error("Captcha verification failed.");
   }
 }
 
 function getTurnstileToken() {
-  if (widgetId === null || !window.turnstile) return "";
+  if (!window.turnstile || widgetId === null) return "";
   return window.turnstile.getResponse(widgetId);
 }
 
@@ -93,7 +81,9 @@ function resetTurnstile() {
 }
 
 function isMobileDevice() {
-  return /Android|iPhone|iPad|iPod|Opera Mini|IEMobile|WPDesktop/i.test(navigator.userAgent);
+  return /Android|iPhone|iPad|iPod|Opera Mini|IEMobile|WPDesktop/i.test(
+    navigator.userAgent
+  );
 }
 
 function normalizeEmail(email) {
@@ -108,27 +98,11 @@ function sanitizeUsername(value) {
     .trim();
 }
 
-function setTemporaryCooldown(button, ms = 3000) {
+function setLoading(button, text = "Please wait...") {
   if (!button) return;
-
-  const originalText = button.dataset.originalText || button.textContent;
-  button.dataset.originalText = originalText;
+  button.dataset.originalText ??= button.textContent;
   button.disabled = true;
-  button.textContent = "Please wait...";
-
-  setTimeout(() => {
-    button.disabled = false;
-    button.textContent = originalText;
-  }, ms);
-}
-
-function setLoading(button, loadingText = "Please wait...") {
-  if (!button) return;
-  if (!button.dataset.originalText) {
-    button.dataset.originalText = button.textContent;
-  }
-  button.disabled = true;
-  button.textContent = loadingText;
+  button.textContent = text;
 }
 
 function clearLoading(button) {
@@ -137,38 +111,19 @@ function clearLoading(button) {
   button.textContent = button.dataset.originalText || button.textContent;
 }
 
-function redirectToVerifyEmail() {
-  goTo("verify-email.html");
-}
+function setTemporaryCooldown(button, ms = 3000) {
+  if (!button) return;
 
-function redirectToHome() {
-  goTo("home.html");
-}
+  const original = button.dataset.originalText || button.textContent;
 
-function clearFieldState(input, errorEl) {
-  if (!input || !errorEl) return;
-  errorEl.textContent = "";
-  input.classList.remove("input-invalid", "input-valid");
-}
+  button.dataset.originalText = original;
+  button.disabled = true;
+  button.textContent = "Please wait...";
 
-function setFieldError(input, errorEl, message) {
-  if (!input || !errorEl) return;
-  errorEl.textContent = message;
-  input.classList.add("input-invalid");
-  input.classList.remove("input-valid");
-}
-
-function setFieldValid(input, errorEl) {
-  if (!input || !errorEl) return;
-  errorEl.textContent = "";
-  input.classList.remove("input-invalid");
-  input.classList.add("input-valid");
-}
-
-function showFormError(message) {
-  if (!formError) return;
-  formError.textContent = message;
-  formError.classList.add("show");
+  setTimeout(() => {
+    button.disabled = false;
+    button.textContent = original;
+  }, ms);
 }
 
 function clearFormError() {
@@ -177,23 +132,21 @@ function clearFormError() {
   formError.classList.remove("show");
 }
 
+function showFormError(message) {
+  if (!formError) return;
+  formError.textContent = message;
+  formError.classList.add("show");
+}
+
 function showCaptchaError(message) {
-  if (captchaError) {
-    captchaError.textContent = message;
-  }
+  if (captchaError) captchaError.textContent = message;
 }
 
 function clearCaptchaError() {
-  if (captchaError) {
-    captchaError.textContent = "";
-  }
+  if (captchaError) captchaError.textContent = "";
 }
 
 function clearAllErrors() {
-  clearFieldState(nameInput, nameError);
-  clearFieldState(emailInput, emailError);
-  clearFieldState(passwordInput, passwordError);
-  clearFieldState(confirmPasswordInput, confirmPasswordError);
   clearCaptchaError();
   clearFormError();
 }
@@ -202,146 +155,65 @@ function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
-function hasUppercase(value) {
-  return /[A-Z]/.test(value);
+function hasUppercase(v) {
+  return /[A-Z]/.test(v);
 }
 
-function hasNumber(value) {
-  return /\d/.test(value);
+function hasNumber(v) {
+  return /\d/.test(v);
 }
 
-function validateName(showUI = true) {
+function validateName() {
   const name = sanitizeUsername(nameInput.value);
   nameInput.value = name;
 
-  if (!name) {
-    if (showUI) setFieldError(nameInput, nameError, "Please enter a username.");
+  if (!name || name.length < 3 || name.length > 20) {
+    nameError.textContent = "Username must be 3-20 characters.";
     return false;
   }
 
-  if (name.length < 3) {
-    if (showUI) setFieldError(nameInput, nameError, "Username must be at least 3 characters.");
-    return false;
-  }
-
-  if (name.length > 20) {
-    if (showUI) setFieldError(nameInput, nameError, "Username must be 20 characters or less.");
-    return false;
-  }
-
-  if (showUI) setFieldValid(nameInput, nameError);
+  nameError.textContent = "";
   return true;
 }
 
-function validateEmail(showUI = true) {
+function validateEmail() {
   const email = normalizeEmail(emailInput.value);
   emailInput.value = email;
 
-  if (!email) {
-    if (showUI) setFieldError(emailInput, emailError, "Please enter your email.");
-    return false;
-  }
-
   if (!isValidEmail(email)) {
-    if (showUI) setFieldError(emailInput, emailError, "Please enter a valid email address.");
+    emailError.textContent = "Please enter a valid email address.";
     return false;
   }
 
-  if (showUI) setFieldValid(emailInput, emailError);
+  emailError.textContent = "";
   return true;
 }
 
-function validatePassword(showUI = true) {
+function validatePassword() {
   const password = passwordInput.value;
 
-  if (!password) {
-    if (showUI) setFieldError(passwordInput, passwordError, "Please enter your password.");
+  if (
+    password.length < 8 ||
+    !hasUppercase(password) ||
+    !hasNumber(password)
+  ) {
+    passwordError.textContent =
+      "Password must be 8+ chars, include uppercase & number.";
     return false;
   }
 
-  if (password.length < 8) {
-    if (showUI) setFieldError(passwordInput, passwordError, "Password must be at least 8 characters.");
-    return false;
-  }
-
-  if (!hasUppercase(password)) {
-    if (showUI) setFieldError(passwordInput, passwordError, "Password must contain at least 1 uppercase letter.");
-    return false;
-  }
-
-  if (!hasNumber(password)) {
-    if (showUI) setFieldError(passwordInput, passwordError, "Password must contain at least 1 number.");
-    return false;
-  }
-
-  if (showUI) setFieldValid(passwordInput, passwordError);
+  passwordError.textContent = "";
   return true;
 }
 
-function validateConfirmPassword(showUI = true) {
-  const password = passwordInput.value;
-  const confirmPassword = confirmPasswordInput.value;
-
-  if (!confirmPassword) {
-    if (showUI) {
-      setFieldError(confirmPasswordInput, confirmPasswordError, "Please confirm your password.");
-    }
+function validateConfirmPassword() {
+  if (passwordInput.value !== confirmPasswordInput.value) {
+    confirmPasswordError.textContent = "Passwords do not match.";
     return false;
   }
 
-  if (password !== confirmPassword) {
-    if (showUI) {
-      setFieldError(confirmPasswordInput, confirmPasswordError, "Passwords do not match.");
-    }
-    return false;
-  }
-
-  if (showUI) setFieldValid(confirmPasswordInput, confirmPasswordError);
+  confirmPasswordError.textContent = "";
   return true;
-}
-
-function mapSignupErrorToField(error) {
-  const code = error?.code || "";
-
-  if (code === "auth/email-already-in-use") {
-    setFieldError(emailInput, emailError, "This email is already in use.");
-    emailInput.focus();
-    return;
-  }
-
-  if (code === "auth/invalid-email") {
-    setFieldError(emailInput, emailError, "Please enter a valid email address.");
-    emailInput.focus();
-    return;
-  }
-
-  if (code === "auth/weak-password" || code === "auth/password-does-not-meet-requirements") {
-    setFieldError(passwordInput, passwordError, "Password does not meet the required rules.");
-    passwordInput.focus();
-    return;
-  }
-
-  if (code === "auth/network-request-failed") {
-    showFormError("Network error. Please check your internet connection and try again.");
-    return;
-  }
-
-  showFormError("Signup failed. Please try again.");
-}
-
-function getFriendlyGoogleError(error) {
-  const code = error?.code || "";
-
-  switch (code) {
-    case "auth/popup-closed-by-user":
-      return "Google sign-up was closed before completion.";
-    case "auth/popup-blocked":
-      return "Popup was blocked by the browser. Please allow popups and try again.";
-    case "auth/network-request-failed":
-      return "Network error. Please check your internet connection.";
-    default:
-      return "Google sign-up failed. Please try again.";
-  }
 }
 
 async function handleRedirectResult() {
@@ -350,14 +222,14 @@ async function handleRedirectResult() {
 
     if (result?.user) {
       await ensureUserProfile(result.user);
-      redirectToHome();
+      goTo("home.html");
       return true;
     }
 
     return false;
   } catch (error) {
-    console.error("Signup redirect error:", error);
-    showFormError(getFriendlyGoogleError(error));
+    console.error(error);
+    showFormError("Google signup failed.");
     return false;
   }
 }
@@ -368,20 +240,16 @@ async function handleEmailSignup() {
 
   clearAllErrors();
 
-  const isNameValid = validateName(true);
-  const isEmailValid = validateEmail(true);
-  const isPasswordValid = validatePassword(true);
-  const isConfirmPasswordValid = validateConfirmPassword(true);
+  const valid =
+    validateName() &&
+    validateEmail() &&
+    validatePassword() &&
+    validateConfirmPassword();
+
   const token = getTurnstileToken();
 
-  if (!isNameValid || !isEmailValid || !isPasswordValid || !isConfirmPasswordValid) {
-    isSubmitting = false;
-    setTemporaryCooldown(signupBtn, 1200);
-    return;
-  }
-
-  if (!token) {
-    showCaptchaError("Please complete the captcha first.");
+  if (!valid || !token) {
+    if (!token) showCaptchaError("Please complete captcha.");
     isSubmitting = false;
     setTemporaryCooldown(signupBtn, 1500);
     return;
@@ -393,25 +261,21 @@ async function handleEmailSignup() {
 
   try {
     setLoading(signupBtn, "Creating account...");
-    clearCaptchaError();
-
     await verifyTurnstileToken(token);
 
-    const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+    const cred = await createUserWithEmailAndPassword(auth, email, password);
 
-    await updateProfile(userCredential.user, {
-      displayName: name
-    });
+    await updateProfile(cred.user, { displayName: name });
 
-    await ensureUserProfile(userCredential.user);
-    await sendEmailVerification(userCredential.user);
+    await ensureUserProfile(cred.user);
 
-    redirectToVerifyEmail();
+    await sendEmailVerification(cred.user);
+
+    goTo("verify-email.html");
   } catch (error) {
-    console.error("Signup error:", error);
-    mapSignupErrorToField(error);
+    console.error(error);
+    showFormError("Signup failed. Please try again.");
     resetTurnstile();
-    setTemporaryCooldown(signupBtn, 3000);
   } finally {
     clearLoading(signupBtn);
     isSubmitting = false;
@@ -427,31 +291,27 @@ async function handleGoogleSignup() {
   const token = getTurnstileToken();
 
   if (!token) {
-    showCaptchaError("Please complete the captcha first.");
+    showCaptchaError("Please complete captcha.");
     isSubmitting = false;
-    setTemporaryCooldown(googleBtn, 1500);
     return;
   }
 
   try {
-    setLoading(googleBtn, "Please wait...");
-    clearCaptchaError();
+    setLoading(googleBtn);
 
     await verifyTurnstileToken(token);
 
     if (isMobileDevice()) {
       await signInWithRedirect(auth, provider);
-      return;
     } else {
-      const userCredential = await signInWithPopup(auth, provider);
-      await ensureUserProfile(userCredential.user);
-      redirectToHome();
+      const cred = await signInWithPopup(auth, provider);
+      await ensureUserProfile(cred.user);
+      goTo("home.html");
     }
   } catch (error) {
-    console.error("Google signup error:", error);
-    showFormError(getFriendlyGoogleError(error));
+    console.error(error);
+    showFormError("Google signup failed.");
     resetTurnstile();
-    setTemporaryCooldown(googleBtn, 3000);
   } finally {
     clearLoading(googleBtn);
     isSubmitting = false;
@@ -461,78 +321,30 @@ async function handleGoogleSignup() {
 async function initTurnstile() {
   await waitForTurnstile();
 
-  const container = document.getElementById("turnstile-container");
-  if (!container) {
-    throw new Error("Turnstile container not found.");
-  }
-
-  container.innerHTML = "";
-
   widgetId = window.turnstile.render("#turnstile-container", {
     sitekey: "0x4AAAAAACqA_Z98nhvcobbI",
     theme: "dark",
     size: "flexible",
     retry: "auto",
-    "refresh-expired": "auto",
-    "error-callback": function () {
-      showCaptchaError("Captcha failed to load. Please refresh and try again.");
-    },
-    "expired-callback": function () {
-      showCaptchaError("Captcha expired. Please complete it again.");
-    }
+    "refresh-expired": "auto"
   });
 }
 
-nameInput?.addEventListener("input", () => {
-  clearFormError();
-  if (nameInput.value.trim()) validateName(true);
-  else clearFieldState(nameInput, nameError);
+signupForm?.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  await handleEmailSignup();
 });
 
-emailInput?.addEventListener("input", () => {
-  clearFormError();
-  if (emailInput.value.trim()) validateEmail(true);
-  else clearFieldState(emailInput, emailError);
+googleBtn?.addEventListener("click", async () => {
+  await handleGoogleSignup();
 });
-
-passwordInput?.addEventListener("input", () => {
-  clearFormError();
-  if (passwordInput.value.trim()) validatePassword(true);
-  else clearFieldState(passwordInput, passwordError);
-
-  if (confirmPasswordInput.value.trim()) {
-    validateConfirmPassword(true);
-  }
-});
-
-confirmPasswordInput?.addEventListener("input", () => {
-  clearFormError();
-  if (confirmPasswordInput.value.trim()) validateConfirmPassword(true);
-  else clearFieldState(confirmPasswordInput, confirmPasswordError);
-});
-
-if (signupForm) {
-  signupForm.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    await handleEmailSignup();
-  });
-}
-
-if (googleBtn) {
-  googleBtn.addEventListener("click", async () => {
-    await handleGoogleSignup();
-  });
-}
 
 window.addEventListener("load", async () => {
   try {
     const redirected = await handleRedirectResult();
-
-    if (!redirected) {
-      await initTurnstile();
-    }
+    if (!redirected) await initTurnstile();
   } catch (error) {
-    console.error("Page init failed:", error);
-    showFormError("Page failed to load properly. Please refresh and try again.");
+    console.error(error);
+    showFormError("Page failed to load.");
   }
 });
