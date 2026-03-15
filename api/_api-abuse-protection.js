@@ -2,6 +2,10 @@ const abuseStore = new Map();
 
 const WINDOW_MS = 10 * 60 * 1000;
 const STALE_TTL_MS = 24 * 60 * 60 * 1000;
+const MAX_REQUEST_HISTORY = 200;
+const CLEANUP_INTERVAL_MS = 60 * 1000;
+
+let lastCleanupAt = 0;
 
 function safeString(value, maxLength = 200) {
   return String(value || "").slice(0, maxLength);
@@ -12,8 +16,19 @@ function safeNumber(value, fallback = 0) {
   return Number.isFinite(num) ? num : fallback;
 }
 
-function cleanupAbuseStore() {
+function safePositiveInt(value, fallback = 0) {
+  const num = Math.floor(safeNumber(value, fallback));
+  return num >= 0 ? num : fallback;
+}
+
+function cleanupAbuseStore(force = false) {
   const now = Date.now();
+
+  if (!force && now - lastCleanupAt < CLEANUP_INTERVAL_MS) {
+    return;
+  }
+
+  lastCleanupAt = now;
 
   for (const [key, value] of abuseStore.entries()) {
     if (!value || now - safeNumber(value.updatedAt) > STALE_TTL_MS) {
@@ -66,9 +81,9 @@ export function trackApiAbuse({
     success: Boolean(success)
   });
 
-  record.requests = record.requests.filter((item) => {
-    return item && now - safeNumber(item.at) <= WINDOW_MS;
-  });
+  record.requests = record.requests
+    .filter((item) => item && now - safeNumber(item.at) <= WINDOW_MS)
+    .slice(-MAX_REQUEST_HISTORY);
 
   abuseStore.set(key, record);
 
@@ -110,6 +125,8 @@ export function trackApiAbuse({
     reasons.push("same_route_burst");
   }
 
+  abuseScore = Math.min(100, abuseScore);
+
   let level = "low";
   if (abuseScore >= 70) {
     level = "high";
@@ -122,11 +139,11 @@ export function trackApiAbuse({
     level,
     reasons,
     snapshot: {
-      totalRequests,
-      failedRecent,
-      uniqueRoutes,
-      sameRouteBurst,
-      clientKey: key
+      totalRequests: safePositiveInt(totalRequests),
+      failedRecent: safePositiveInt(failedRecent),
+      uniqueRoutes: safePositiveInt(uniqueRoutes),
+      sameRouteBurst: safePositiveInt(sameRouteBurst),
+      clientKey: safeString(key, 240)
     }
   };
 }
