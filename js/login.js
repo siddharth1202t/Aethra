@@ -5,7 +5,8 @@ import {
   GoogleAuthProvider,
   signInWithPopup,
   signInWithRedirect,
-  getRedirectResult
+  getRedirectResult,
+  sendPasswordResetEmail
 } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
 import { ensureUserProfile } from "./user-profile.js";
 
@@ -25,8 +26,15 @@ const provider = new GoogleAuthProvider();
 const form = document.getElementById("loginForm");
 const googleBtn = document.getElementById("googleLoginBtn");
 const loginBtn = document.querySelector(".login-btn");
+const forgotPasswordBtn = document.getElementById("forgotPasswordBtn");
+
 const emailInput = document.getElementById("email");
 const passwordInput = document.getElementById("password");
+
+const emailError = document.getElementById("emailError");
+const passwordError = document.getElementById("passwordError");
+const captchaError = document.getElementById("captchaError");
+const formError = document.getElementById("formError");
 
 let widgetId = null;
 let isSubmitting = false;
@@ -102,6 +110,10 @@ function normalizeEmail(email) {
   return email.trim().toLowerCase();
 }
 
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
 function setTemporaryCooldown(button, ms = 3000) {
   if (!button) return;
 
@@ -136,6 +148,87 @@ function formatRemainingMinutes(ms) {
   return minutes <= 1 ? "1 minute" : `${minutes} minutes`;
 }
 
+function clearFieldState(input, errorEl) {
+  if (!input || !errorEl) return;
+  errorEl.textContent = "";
+  input.classList.remove("input-invalid", "input-valid");
+}
+
+function setFieldError(input, errorEl, message) {
+  if (!input || !errorEl) return;
+  errorEl.textContent = message;
+  input.classList.add("input-invalid");
+  input.classList.remove("input-valid");
+}
+
+function setFieldValid(input, errorEl) {
+  if (!input || !errorEl) return;
+  errorEl.textContent = "";
+  input.classList.remove("input-invalid");
+  input.classList.add("input-valid");
+}
+
+function showFormError(message) {
+  if (!formError) return;
+  formError.textContent = message;
+  formError.classList.add("show");
+}
+
+function clearFormError() {
+  if (!formError) return;
+  formError.textContent = "";
+  formError.classList.remove("show");
+}
+
+function showCaptchaError(message) {
+  if (captchaError) {
+    captchaError.textContent = message;
+  }
+}
+
+function clearCaptchaError() {
+  if (captchaError) {
+    captchaError.textContent = "";
+  }
+}
+
+function clearAllErrors() {
+  clearFieldState(emailInput, emailError);
+  clearFieldState(passwordInput, passwordError);
+  clearCaptchaError();
+  clearFormError();
+}
+
+function validateEmail(showUI = true) {
+  const email = normalizeEmail(emailInput.value);
+  emailInput.value = email;
+
+  if (!email) {
+    if (showUI) setFieldError(emailInput, emailError, "Please enter your email.");
+    return false;
+  }
+
+  if (!isValidEmail(email)) {
+    if (showUI) setFieldError(emailInput, emailError, "Please enter a valid email address.");
+    return false;
+  }
+
+  if (showUI) setFieldValid(emailInput, emailError);
+  return true;
+}
+
+function validatePassword(showUI = true) {
+  const password = passwordInput.value;
+
+  if (!password) {
+    if (showUI) setFieldError(passwordInput, passwordError, "Please enter your password.");
+    return false;
+  }
+
+  if (showUI) setFieldValid(passwordInput, passwordError);
+  return true;
+}
+
 function getFriendlyAuthMessage(error) {
   const code = error?.code || "";
 
@@ -143,8 +236,9 @@ function getFriendlyAuthMessage(error) {
     case "auth/invalid-credential":
     case "auth/wrong-password":
     case "auth/user-not-found":
-    case "auth/invalid-email":
       return "Invalid email or password.";
+    case "auth/invalid-email":
+      return "Please enter a valid email address.";
     case "auth/too-many-requests":
       return "Too many attempts. Please wait and try again later.";
     case "auth/network-request-failed":
@@ -175,7 +269,7 @@ async function handleRedirectResult() {
     return false;
   } catch (error) {
     console.error("Redirect sign-in failed:", error);
-    alert(getFriendlyAuthMessage(error));
+    showFormError(getFriendlyAuthMessage(error));
     return false;
   }
 }
@@ -184,41 +278,36 @@ async function handleEmailLogin() {
   if (isSubmitting) return;
   isSubmitting = true;
 
-  const email = normalizeEmail(emailInput.value);
-  const password = passwordInput.value;
+  clearAllErrors();
+
+  const isEmailValid = validateEmail(true);
+  const isPasswordValid = validatePassword(true);
   const token = getTurnstileToken();
 
-  emailInput.value = email;
-
-  if (!email) {
-    alert("Please enter your email.");
-    emailInput.focus();
+  if (!isEmailValid || !isPasswordValid) {
     isSubmitting = false;
-    setTemporaryCooldown(loginBtn, 1500);
-    return;
-  }
-
-  if (!password) {
-    alert("Please enter your password.");
-    passwordInput.focus();
-    isSubmitting = false;
-    setTemporaryCooldown(loginBtn, 1500);
+    setTemporaryCooldown(loginBtn, 1200);
     return;
   }
 
   if (!token) {
-    alert("Please complete the captcha first.");
+    showCaptchaError("Please complete the captcha first.");
     isSubmitting = false;
     setTemporaryCooldown(loginBtn, 1500);
     return;
   }
 
+  const email = normalizeEmail(emailInput.value);
+  const password = passwordInput.value;
+  emailInput.value = email;
+
   try {
     setLoading(loginBtn, "Logging in...");
+    clearCaptchaError();
 
     const lockStatus = await callLoginAttemptApi(email, "check");
     if (lockStatus.isLocked) {
-      alert(
+      showFormError(
         `This account is temporarily locked. Please try again in ${formatRemainingMinutes(lockStatus.remainingMs)}.`
       );
       resetTurnstile();
@@ -242,23 +331,27 @@ async function handleEmailLogin() {
       authCode === "auth/user-not-found" ||
       authCode === "auth/invalid-email";
 
+    if (authCode === "auth/invalid-email") {
+      setFieldError(emailInput, emailError, "Please enter a valid email address.");
+    }
+
     if (isFailedLogin) {
       try {
         const failStatus = await callLoginAttemptApi(email, "fail");
 
         if (failStatus.isLocked) {
-          alert(
+          showFormError(
             `Too many failed attempts. This account is locked for ${formatRemainingMinutes(failStatus.remainingMs)}.`
           );
         } else {
-          alert(getFriendlyAuthMessage(error));
+          showFormError(getFriendlyAuthMessage(error));
         }
       } catch (attemptError) {
         console.error("Failed to record login attempt:", attemptError);
-        alert(getFriendlyAuthMessage(error));
+        showFormError(getFriendlyAuthMessage(error));
       }
     } else {
-      alert(getFriendlyAuthMessage(error));
+      showFormError(getFriendlyAuthMessage(error));
     }
 
     resetTurnstile();
@@ -273,10 +366,12 @@ async function handleGoogleLogin() {
   if (isSubmitting) return;
   isSubmitting = true;
 
+  clearAllErrors();
+
   const token = getTurnstileToken();
 
   if (!token) {
-    alert("Please complete the captcha first.");
+    showCaptchaError("Please complete the captcha first.");
     isSubmitting = false;
     setTemporaryCooldown(googleBtn, 1500);
     return;
@@ -284,6 +379,8 @@ async function handleGoogleLogin() {
 
   try {
     setLoading(googleBtn, "Please wait...");
+    clearCaptchaError();
+
     await verifyTurnstileToken(token);
 
     if (isMobileDevice()) {
@@ -296,12 +393,50 @@ async function handleGoogleLogin() {
     }
   } catch (error) {
     console.error(error);
-    alert(getFriendlyAuthMessage(error));
+    showFormError(getFriendlyAuthMessage(error));
     resetTurnstile();
     setTemporaryCooldown(googleBtn, 3000);
   } finally {
     clearLoading(googleBtn);
     isSubmitting = false;
+  }
+}
+
+async function handleForgotPassword() {
+  clearAllErrors();
+
+  const email = normalizeEmail(emailInput.value);
+  emailInput.value = email;
+
+  if (!email) {
+    setFieldError(emailInput, emailError, "Enter your email first to reset your password.");
+    emailInput.focus();
+    return;
+  }
+
+  if (!isValidEmail(email)) {
+    setFieldError(emailInput, emailError, "Please enter a valid email address.");
+    emailInput.focus();
+    return;
+  }
+
+  try {
+    setLoading(forgotPasswordBtn, "Sending...");
+    await sendPasswordResetEmail(auth, email);
+    showFormError("Password reset email sent. Please check your inbox.");
+    formError?.classList.remove("show");
+    formError?.classList.add("show");
+    formError.style.background = "rgba(125, 255, 179, 0.12)";
+    formError.style.borderColor = "rgba(125, 255, 179, 0.2)";
+    formError.style.color = "#d4ffe6";
+  } catch (error) {
+    console.error("Password reset failed:", error);
+    showFormError("Could not send reset email. Please check the email address and try again.");
+    formError.style.background = "rgba(255, 102, 102, 0.12)";
+    formError.style.borderColor = "rgba(255, 102, 102, 0.2)";
+    formError.style.color = "#ffd0d0";
+  } finally {
+    clearLoading(forgotPasswordBtn);
   }
 }
 
@@ -321,15 +456,27 @@ async function initTurnstile() {
     size: "flexible",
     retry: "auto",
     "refresh-expired": "auto",
-    "error-callback": function (code) {
-      console.error("Turnstile error code:", code);
-      alert("Captcha failed to load. Error code: " + code);
+    "error-callback": function () {
+      showCaptchaError("Captcha failed to load. Please refresh and try again.");
     },
     "expired-callback": function () {
-      console.warn("Turnstile expired.");
+      showCaptchaError("Captcha expired. Please complete it again.");
     }
   });
 }
+
+emailInput?.addEventListener("input", () => {
+  clearFormError();
+  clearCaptchaError();
+  if (emailInput.value.trim()) validateEmail(true);
+  else clearFieldState(emailInput, emailError);
+});
+
+passwordInput?.addEventListener("input", () => {
+  clearFormError();
+  if (passwordInput.value.trim()) validatePassword(true);
+  else clearFieldState(passwordInput, passwordError);
+});
 
 if (form) {
   form.addEventListener("submit", async (e) => {
@@ -344,6 +491,12 @@ if (googleBtn) {
   });
 }
 
+if (forgotPasswordBtn) {
+  forgotPasswordBtn.addEventListener("click", async () => {
+    await handleForgotPassword();
+  });
+}
+
 window.addEventListener("load", async () => {
   try {
     const redirected = await handleRedirectResult();
@@ -353,6 +506,6 @@ window.addEventListener("load", async () => {
     }
   } catch (error) {
     console.error("Page init failed:", error);
-    alert("Page init failed: " + error.message);
+    showFormError("Page failed to load properly. Please refresh and try again.");
   }
 });
