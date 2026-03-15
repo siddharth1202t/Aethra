@@ -565,6 +565,7 @@
 
     const auth = getAuth(app);
 
+    const shell = document.querySelector(".shell");
     const userRoleEl = document.getElementById("userRole");
     const heroUsernameEl = document.getElementById("heroUsername");
     const logoutBtn = document.getElementById("logoutBtn");
@@ -576,6 +577,8 @@
     }
 
     function createStars() {
+      if (!starsContainer) return;
+
       for (let i = 0; i < 90; i++) {
         const star = document.createElement("div");
         star.classList.add("star");
@@ -592,16 +595,29 @@
       }
     }
 
+    function setPageVisible() {
+      if (shell) {
+        shell.style.visibility = "visible";
+      }
+    }
+
+    function getBestDisplayName(user) {
+      const directName = user?.displayName?.trim();
+      const providerName = user?.providerData?.[0]?.displayName?.trim();
+      const emailName = user?.email ? user.email.split("@")[0] : "";
+  
+      return directName || providerName || emailName || "Explorer";
+    }
+
+    if (shell) {
+      shell.style.visibility = "hidden";
+    }
+
     requireAuth(async (user) => {
       try {
         await ensureUserProfile(user);
 
-        const displayName =
-          (user.displayName && user.displayName.trim()) ||
-          (user.providerData?.[0]?.displayName && user.providerData[0].displayName.trim()) ||
-          (user.email ? user.email.split("@")[0] : "Explorer");
-
-        heroUsernameEl.textContent = displayName;
+        heroUsernameEl.textContent = getBestDisplayName(user);
 
         let isDeveloper = false;
 
@@ -609,28 +625,30 @@
         const userSnap = await getDoc(userRef);
 
         if (userSnap.exists()) {
-          const userData = userSnap.data();
-          if (userData.role === "developer") {
-            isDeveloper = true;
-          }
+          const userData = userSnap.data() || {};
+          isDeveloper = String(userData.role || "").toLowerCase() === "developer";
         }
 
         userRoleEl.textContent = isDeveloper ? "Developer" : "User";
         devBtn.style.display = isDeveloper ? "block" : "none";
+        setPageVisible();
       } catch (error) {
         console.error("Home auth setup failed:", error);
         heroUsernameEl.textContent = "Explorer";
         userRoleEl.textContent = "User";
         devBtn.style.display = "none";
+        setPageVisible();
       }
     });
 
-    devBtn.addEventListener("click", () => {
+    devBtn?.addEventListener("click", () => {
       goTo("developer.html");
     });
 
-    logoutBtn.addEventListener("click", async () => {
+    logoutBtn?.addEventListener("click", async () => {
       try {
+        logoutBtn.disabled = true;
+        logoutBtn.textContent = "Logging out...";
         await signOut(auth);
       } catch (error) {
         console.error("Logout failed:", error);
