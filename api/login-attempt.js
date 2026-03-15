@@ -6,6 +6,10 @@ function normalizeEmail(email) {
   return String(email || "").trim().toLowerCase();
 }
 
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
 function getClientIp(req) {
   const forwarded = req.headers["x-forwarded-for"];
   if (typeof forwarded === "string" && forwarded.length > 0) {
@@ -45,21 +49,30 @@ function saveRecord(key, record) {
   loginAttemptStore.set(key, record);
 }
 
+function isAllowedOrigin(origin) {
+  const allowedOrigins = [
+    "https://aethra-gules.vercel.app",
+    "https://aethra-hb2h.vercel.app"
+  ];
+  return allowedOrigins.includes(origin);
+}
+
+function isTrustedSuccessReset(req) {
+  const incomingSecret = req.headers["x-login-reset-secret"];
+  const expectedSecret = process.env.LOGIN_RESET_SECRET;
+  return Boolean(expectedSecret && incomingSecret && incomingSecret === expectedSecret);
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ success: false, message: "Method not allowed" });
   }
 
   try {
-    const allowedOrigins = [
-      "https://aethra-gules.vercel.app",
-      "https://aethra-hb2h.vercel.app"
-    ];
-
     const origin = req.headers.origin || "";
     const ip = getClientIp(req);
 
-    if (!allowedOrigins.includes(origin)) {
+    if (!isAllowedOrigin(origin)) {
       await writeSecurityLog({
         type: "forbidden_origin",
         level: "warning",
@@ -94,7 +107,24 @@ export default async function handler(req, res) {
       });
     }
 
-    if (!action || !["check", "fail", "reset"].includes(action)) {
+    if (!isValidEmail(normalizedEmail)) {
+      await writeSecurityLog({
+        type: "invalid_login_attempt_email",
+        level: "warning",
+        message: "Invalid email format sent to login-attempt API",
+        email: normalizedEmail,
+        ip,
+        route: "/api/login-attempt",
+        metadata: { action: action || "" }
+      });
+
+      return res.status(400).json({
+        success: false,
+        message: "Invalid email format"
+      });
+    }
+
+    if (!action || !["check", "fail", "success"].includes(action)) {
       await writeSecurityLog({
         type: "invalid_login_attempt_action",
         level: "warning",
@@ -172,13 +202,30 @@ export default async function handler(req, res) {
       });
     }
 
-    if (action === "reset") {
+    if (action === "success") {
+      if (!isTrustedSuccessReset(req)) {
+        await writeSecurityLog({
+          type: "unauthorized_login_success_reset",
+          level: "critical",
+          message: "Blocked unauthorized login success reset attempt",
+          email: normalizedEmail,
+          ip,
+          route: "/api/login-attempt",
+          metadata: {}
+        });
+
+        return res.status(403).json({
+          success: false,
+          message: "Unauthorized reset attempt"
+        });
+      }
+
       loginAttemptStore.delete(key);
 
       await writeSecurityLog({
         type: "login_attempt_reset",
         level: "info",
-        message: "Login attempt counter reset after successful login",
+        message: "Login attempt counter reset after trusted success flow",
         email: normalizedEmail,
         ip,
         route: "/api/login-attempt",
