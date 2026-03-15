@@ -3,23 +3,33 @@ function toNumber(value, fallback = 0) {
   return Number.isFinite(num) ? num : fallback;
 }
 
+function toSafeInt(value, fallback = 0, min = 0, max = 1_000_000_000) {
+  const num = Math.floor(toNumber(value, fallback));
+  if (!Number.isFinite(num)) return fallback;
+  return Math.min(max, Math.max(min, num));
+}
+
 function safeString(value, maxLength = 300) {
   return String(value || "").slice(0, maxLength);
+}
+
+function isSuspiciousUserAgent(userAgent) {
+  return /headless|phantom|selenium|playwright|puppeteer|crawler|spider|bot/i.test(userAgent);
 }
 
 export function analyzeBotBehavior(behavior = {}, req = null) {
   const now = Date.now();
 
-  const pageLoadedAt = toNumber(behavior.pageLoadedAt, 0);
-  const firstInteractionAt = toNumber(behavior.firstInteractionAt, 0);
-  const submitAt = toNumber(behavior.submitAt, now);
+  const pageLoadedAt = toSafeInt(behavior.pageLoadedAt, 0, 0, now + 60_000);
+  const firstInteractionAt = toSafeInt(behavior.firstInteractionAt, 0, 0, now + 60_000);
+  const submitAt = toSafeInt(behavior.submitAt, now, 0, now + 60_000);
 
-  const mouseMoves = toNumber(behavior.mouseMoves, 0);
-  const keyPresses = toNumber(behavior.keyPresses, 0);
-  const clicks = toNumber(behavior.clicks, 0);
-  const touches = toNumber(behavior.touches, 0);
-  const scrolls = toNumber(behavior.scrolls, 0);
-  const visibilityChanges = toNumber(behavior.visibilityChanges, 0);
+  const mouseMoves = toSafeInt(behavior.mouseMoves, 0, 0, 5000);
+  const keyPresses = toSafeInt(behavior.keyPresses, 0, 0, 5000);
+  const clicks = toSafeInt(behavior.clicks, 0, 0, 5000);
+  const touches = toSafeInt(behavior.touches, 0, 0, 5000);
+  const scrolls = toSafeInt(behavior.scrolls, 0, 0, 5000);
+  const visibilityChanges = toSafeInt(behavior.visibilityChanges, 0, 0, 5000);
 
   const sessionId = safeString(behavior.sessionId || "", 120);
 
@@ -36,7 +46,9 @@ export function analyzeBotBehavior(behavior = {}, req = null) {
       : 0;
 
   const timeToFirstInteractionMs =
-    firstInteractionAt > 0 && pageLoadedAt > 0 && firstInteractionAt >= pageLoadedAt
+    firstInteractionAt > 0 &&
+    pageLoadedAt > 0 &&
+    firstInteractionAt >= pageLoadedAt
       ? firstInteractionAt - pageLoadedAt
       : null;
 
@@ -46,6 +58,20 @@ export function analyzeBotBehavior(behavior = {}, req = null) {
   if (!sessionId) {
     riskScore += 15;
     reasons.push("missing_session_id");
+  }
+
+  if (pageLoadedAt > 0 && submitAt > 0 && submitAt < pageLoadedAt) {
+    riskScore += 20;
+    reasons.push("invalid_submit_timeline");
+  }
+
+  if (
+    firstInteractionAt > 0 &&
+    pageLoadedAt > 0 &&
+    firstInteractionAt < pageLoadedAt
+  ) {
+    riskScore += 15;
+    reasons.push("invalid_interaction_timeline");
   }
 
   if (timeOnPageMs > 0 && timeOnPageMs < 1200) {
@@ -78,10 +104,17 @@ export function analyzeBotBehavior(behavior = {}, req = null) {
     reasons.push("excessive_visibility_changes");
   }
 
-  if (/headless|phantom|selenium|playwright|puppeteer|crawler|spider|bot/i.test(userAgent)) {
+  if (requestUserAgent && behaviorUserAgent && requestUserAgent !== behaviorUserAgent) {
+    riskScore += 10;
+    reasons.push("user_agent_mismatch");
+  }
+
+  if (isSuspiciousUserAgent(userAgent)) {
     riskScore += 50;
     reasons.push("suspicious_user_agent");
   }
+
+  riskScore = Math.min(100, riskScore);
 
   let level = "low";
   if (riskScore >= 70) {
@@ -104,7 +137,9 @@ export function analyzeBotBehavior(behavior = {}, req = null) {
       touches,
       scrolls,
       visibilityChanges,
-      sessionIdPresent: Boolean(sessionId)
+      sessionIdPresent: Boolean(sessionId),
+      requestUserAgentPresent: Boolean(requestUserAgent),
+      behaviorUserAgentPresent: Boolean(behaviorUserAgent)
     }
   };
 }
