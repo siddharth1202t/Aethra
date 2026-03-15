@@ -1,6 +1,8 @@
 import { writeSecurityLog } from "./_security-log.js";
 import { checkApiRateLimit } from "./_rate-limit.js";
 
+const ROUTE = "/api/verify-turnstile";
+
 const ALLOWED_ORIGINS = new Set([
   "https://aethra-gules.vercel.app",
   "https://aethra-hb2h.vercel.app"
@@ -19,11 +21,13 @@ function getClientIp(req) {
   const forwarded = req.headers["x-forwarded-for"];
   if (typeof forwarded === "string" && forwarded.length > 0) {
     const ip = forwarded.split(",")[0]?.trim();
-    if (ip) return ip;
+    if (ip && ip.length < 100) {
+      return ip;
+    }
   }
 
   const realIp = req.headers["x-real-ip"];
-  if (typeof realIp === "string" && realIp.length > 0) {
+  if (typeof realIp === "string" && realIp.length > 0 && realIp.length < 100) {
     return realIp.trim();
   }
 
@@ -34,8 +38,20 @@ function isAllowedOrigin(origin) {
   return ALLOWED_ORIGINS.has(origin);
 }
 
+function normalizeHostname(hostname = "") {
+  return safeString(hostname, 200).trim().toLowerCase();
+}
+
 function isExpectedHostname(hostname = "") {
-  return ALLOWED_HOSTNAMES.has(hostname);
+  return ALLOWED_HOSTNAMES.has(normalizeHostname(hostname));
+}
+
+function safeErrorCodes(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.slice(0, 10).map((item) => safeString(item, 100));
 }
 
 export default async function handler(req, res) {
@@ -49,7 +65,8 @@ export default async function handler(req, res) {
   try {
     const origin = safeString(req.headers.origin || "", 200);
     const ip = getClientIp(req);
-    const token = safeString(req.body?.token || "", 5000);
+    const body = req.body && typeof req.body === "object" ? req.body : {};
+    const token = safeString(body.token || "", 5000);
     const secret = process.env.TURNSTILE_SECRET_KEY;
 
     if (!isAllowedOrigin(origin)) {
@@ -58,7 +75,7 @@ export default async function handler(req, res) {
         level: "warning",
         message: "Blocked request from forbidden origin on verify-turnstile API",
         ip,
-        route: "/api/verify-turnstile",
+        route: ROUTE,
         metadata: { origin }
       });
 
@@ -80,7 +97,7 @@ export default async function handler(req, res) {
         level: "warning",
         message: "Rate limit exceeded on verify-turnstile API",
         ip,
-        route: "/api/verify-turnstile",
+        route: ROUTE,
         metadata: {
           remainingMs: rateLimitResult.remainingMs
         }
@@ -99,7 +116,7 @@ export default async function handler(req, res) {
         level: "error",
         message: "Missing token or server secret in verify-turnstile API",
         ip,
-        route: "/api/verify-turnstile",
+        route: ROUTE,
         metadata: {
           hasToken: Boolean(token),
           hasSecret: Boolean(secret)
@@ -135,7 +152,7 @@ export default async function handler(req, res) {
         level: "error",
         message: "Turnstile upstream verification request failed",
         ip,
-        route: "/api/verify-turnstile",
+        route: ROUTE,
         metadata: {
           status: response.status
         }
@@ -153,11 +170,9 @@ export default async function handler(req, res) {
         level: "warning",
         message: "Turnstile verification failed",
         ip,
-        route: "/api/verify-turnstile",
+        route: ROUTE,
         metadata: {
-          errorCodes: Array.isArray(data["error-codes"])
-            ? data["error-codes"].slice(0, 10)
-            : []
+          errorCodes: safeErrorCodes(data["error-codes"])
         }
       });
 
@@ -173,9 +188,9 @@ export default async function handler(req, res) {
         level: "critical",
         message: "Turnstile token hostname did not match allowed hostnames",
         ip,
-        route: "/api/verify-turnstile",
+        route: ROUTE,
         metadata: {
-          hostname: safeString(data.hostname, 200)
+          hostname: normalizeHostname(data.hostname)
         }
       });
 
@@ -197,7 +212,7 @@ export default async function handler(req, res) {
         level: "error",
         message: "Unhandled server error in verify-turnstile API",
         ip: getClientIp(req),
-        route: "/api/verify-turnstile",
+        route: ROUTE,
         metadata: {
           error: safeString(error?.message || "Unknown error", 500)
         }
