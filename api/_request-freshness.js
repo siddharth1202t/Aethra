@@ -1,33 +1,21 @@
 import { safeNumber, safeString } from "./_api-security.js";
+import { redis } from "./_redis.js";
 
 const DEFAULT_MAX_AGE_MS = 2 * 60 * 1000;
 const DEFAULT_FUTURE_TOLERANCE_MS = 15 * 1000;
 const MAX_NONCE_LENGTH = 200;
-
-const recentNonceStore = new Map();
 const NONCE_TTL_MS = 10 * 60 * 1000;
-const CLEANUP_INTERVAL_MS = 60 * 1000;
-
-let lastCleanupAt = 0;
-
-function cleanupNonceStore(force = false) {
-  const now = Date.now();
-
-  if (!force && now - lastCleanupAt < CLEANUP_INTERVAL_MS) {
-    return;
-  }
-
-  lastCleanupAt = now;
-
-  for (const [key, value] of recentNonceStore.entries()) {
-    if (!value || now - safeNumber(value.createdAt, 0) > NONCE_TTL_MS) {
-      recentNonceStore.delete(key);
-    }
-  }
-}
 
 function normalizeNonce(value) {
   return safeString(value || "", MAX_NONCE_LENGTH).trim();
+}
+
+function normalizeScope(value) {
+  return safeString(value || "default", 100).trim().toLowerCase();
+}
+
+function buildNonceKey(scope, nonce) {
+  return `nonce:${normalizeScope(scope)}:${normalizeNonce(nonce)}`;
 }
 
 export function validateRequestFreshness({
@@ -80,17 +68,14 @@ export function validateRequestFreshness({
   };
 }
 
-export function checkAndStoreNonce({
+export async function checkAndStoreNonce({
   nonce,
   scope = "default",
   ttlMs = NONCE_TTL_MS
 } = {}) {
-  cleanupNonceStore();
-
   const normalizedNonce = normalizeNonce(nonce);
-  const normalizedScope = safeString(scope || "default", 100);
+  const normalizedScope = normalizeScope(scope);
   const safeTtlMs = Math.max(30 * 1000, safeNumber(ttlMs, NONCE_TTL_MS));
-  const now = Date.now();
 
   if (!normalizedNonce) {
     return {
@@ -99,27 +84,37 @@ export function checkAndStoreNonce({
     };
   }
 
-  const key = `${normalizedScope}::${normalizedNonce}`;
-  const existing = recentNonceStore.get(key);
+  const key = buildNonceKey(normalizedScope, normalizedNonce);
+  const ttlSeconds = Math.max(1, Math.ceil(safeTtlMs / 1000));
 
-  if (existing && now - safeNumber(existing.createdAt, 0) <= safeTtlMs) {
+  try {
+    const result = await redis.set(key, "1", {
+      nx: true,
+      ex: ttlSeconds
+    });
+
+    if (result !== "OK") {
+      return {
+        ok: false,
+        code: "replayed_nonce"
+      };
+    }
+
+    return {
+      ok: true,
+      code: "stored"
+    };
+  } catch (error) {
+    console.error("Redis nonce store failed:", error);
+
     return {
       ok: false,
-      code: "replayed_nonce"
+      code: "nonce_store_error"
     };
   }
-
-  recentNonceStore.set(key, {
-    createdAt: now
-  });
-
-  return {
-    ok: true,
-    code: "stored"
-  };
 }
 
-export function validateFreshRequest({
+export async function validateFreshRequest({
   requestAt,
   nonce = "",
   scope = "default",
@@ -152,7 +147,7 @@ export function validateFreshRequest({
     };
   }
 
-  const nonceResult = checkAndStoreNonce({
+  const nonceResult = await checkAndStoreNonce({
     nonce,
     scope,
     ttlMs: nonceTtlMs
