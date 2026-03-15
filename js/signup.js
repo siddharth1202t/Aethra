@@ -30,10 +30,14 @@ const signupBtn = document.querySelector(".signup-btn");
 const nameInput = document.getElementById("name");
 const emailInput = document.getElementById("email");
 const passwordInput = document.getElementById("password");
+const confirmPasswordInput = document.getElementById("confirmPassword");
 
 const nameError = document.getElementById("nameError");
 const emailError = document.getElementById("emailError");
 const passwordError = document.getElementById("passwordError");
+const confirmPasswordError = document.getElementById("confirmPasswordError");
+const captchaError = document.getElementById("captchaError");
+const formError = document.getElementById("formError");
 
 let widgetId = null;
 let isSubmitting = false;
@@ -152,10 +156,37 @@ function setFieldValid(input, errorEl) {
   input.classList.add("input-valid");
 }
 
+function showFormError(message) {
+  if (!formError) return;
+  formError.textContent = message;
+  formError.classList.add("show");
+}
+
+function clearFormError() {
+  if (!formError) return;
+  formError.textContent = "";
+  formError.classList.remove("show");
+}
+
+function showCaptchaError(message) {
+  if (captchaError) {
+    captchaError.textContent = message;
+  }
+}
+
+function clearCaptchaError() {
+  if (captchaError) {
+    captchaError.textContent = "";
+  }
+}
+
 function clearAllErrors() {
   clearFieldState(nameInput, nameError);
   clearFieldState(emailInput, emailError);
   clearFieldState(passwordInput, passwordError);
+  clearFieldState(confirmPasswordInput, confirmPasswordError);
+  clearCaptchaError();
+  clearFormError();
 }
 
 function isValidEmail(email) {
@@ -238,9 +269,30 @@ function validatePassword(showUI = true) {
   return true;
 }
 
+function validateConfirmPassword(showUI = true) {
+  const password = passwordInput.value;
+  const confirmPassword = confirmPasswordInput.value;
+
+  if (!confirmPassword) {
+    if (showUI) {
+      setFieldError(confirmPasswordInput, confirmPasswordError, "Please confirm your password.");
+    }
+    return false;
+  }
+
+  if (password !== confirmPassword) {
+    if (showUI) {
+      setFieldError(confirmPasswordInput, confirmPasswordError, "Passwords do not match.");
+    }
+    return false;
+  }
+
+  if (showUI) setFieldValid(confirmPasswordInput, confirmPasswordError);
+  return true;
+}
+
 function mapSignupErrorToField(error) {
   const code = error?.code || "";
-  const message = error?.message || "";
 
   if (code === "auth/email-already-in-use") {
     setFieldError(emailInput, emailError, "This email is already in use.");
@@ -254,25 +306,33 @@ function mapSignupErrorToField(error) {
     return;
   }
 
-  if (code === "auth/password-does-not-meet-requirements" || code === "auth/weak-password") {
-    if (message.toLowerCase().includes("upper")) {
-      setFieldError(passwordInput, passwordError, "Password must contain at least 1 uppercase letter.");
-    } else if (message.toLowerCase().includes("number")) {
-      setFieldError(passwordInput, passwordError, "Password must contain at least 1 number.");
-    } else {
-      setFieldError(passwordInput, passwordError, "Password does not meet the required rules.");
-    }
+  if (code === "auth/weak-password" || code === "auth/password-does-not-meet-requirements") {
+    setFieldError(passwordInput, passwordError, "Password does not meet the required rules.");
     passwordInput.focus();
     return;
   }
 
   if (code === "auth/network-request-failed") {
-    setFieldError(emailInput, emailError, "Network error. Please check your internet connection.");
-    emailInput.focus();
+    showFormError("Network error. Please check your internet connection and try again.");
     return;
   }
 
-  alert(`Message: ${message || "none"}\nCode: ${code || "none"}`);
+  showFormError("Signup failed. Please try again.");
+}
+
+function getFriendlyGoogleError(error) {
+  const code = error?.code || "";
+
+  switch (code) {
+    case "auth/popup-closed-by-user":
+      return "Google sign-up was closed before completion.";
+    case "auth/popup-blocked":
+      return "Popup was blocked by the browser. Please allow popups and try again.";
+    case "auth/network-request-failed":
+      return "Network error. Please check your internet connection.";
+    default:
+      return "Google sign-up failed. Please try again.";
+  }
 }
 
 async function handleRedirectResult() {
@@ -288,7 +348,7 @@ async function handleRedirectResult() {
     return false;
   } catch (error) {
     console.error("Signup redirect error:", error);
-    alert(`Message: ${error?.message || "none"}\nCode: ${error?.code || "none"}`);
+    showFormError(getFriendlyGoogleError(error));
     return false;
   }
 }
@@ -302,17 +362,19 @@ async function handleEmailSignup() {
   const isNameValid = validateName(true);
   const isEmailValid = validateEmail(true);
   const isPasswordValid = validatePassword(true);
+  const isConfirmPasswordValid = validateConfirmPassword(true);
   const token = getTurnstileToken();
 
-  if (!isNameValid || !isEmailValid || !isPasswordValid) {
+  if (!isNameValid || !isEmailValid || !isPasswordValid || !isConfirmPasswordValid) {
     isSubmitting = false;
     setTemporaryCooldown(signupBtn, 1200);
     return;
   }
 
   if (!token) {
-    alert("Please complete the captcha first.");
+    showCaptchaError("Please complete the captcha first.");
     isSubmitting = false;
+    setTemporaryCooldown(signupBtn, 1500);
     return;
   }
 
@@ -322,6 +384,8 @@ async function handleEmailSignup() {
 
   try {
     setLoading(signupBtn, "Creating account...");
+    clearCaptchaError();
+
     await verifyTurnstileToken(token);
 
     const userCredential = await createUserWithEmailAndPassword(auth, email, password);
@@ -353,13 +417,16 @@ async function handleGoogleSignup() {
   const token = getTurnstileToken();
 
   if (!token) {
-    alert("Please complete the captcha first.");
+    showCaptchaError("Please complete the captcha first.");
     isSubmitting = false;
+    setTemporaryCooldown(googleBtn, 1500);
     return;
   }
 
   try {
     setLoading(googleBtn, "Please wait...");
+    clearCaptchaError();
+
     await verifyTurnstileToken(token);
 
     if (isMobileDevice()) {
@@ -372,7 +439,7 @@ async function handleGoogleSignup() {
     }
   } catch (error) {
     console.error("Google signup error:", error);
-    alert(`Message: ${error?.message || "none"}\nCode: ${error?.code || "none"}`);
+    showFormError(getFriendlyGoogleError(error));
     resetTurnstile();
     setTemporaryCooldown(googleBtn, 3000);
   } finally {
@@ -394,23 +461,44 @@ async function initTurnstile() {
   widgetId = window.turnstile.render("#turnstile-container", {
     sitekey: "0x4AAAAAACqA_Z98nhvcobbI",
     theme: "dark",
-    size: "flexible"
+    size: "flexible",
+    retry: "auto",
+    "refresh-expired": "auto",
+    "error-callback": function () {
+      showCaptchaError("Captcha failed to load. Please refresh and try again.");
+    },
+    "expired-callback": function () {
+      showCaptchaError("Captcha expired. Please complete it again.");
+    }
   });
 }
 
 nameInput?.addEventListener("input", () => {
+  clearFormError();
   if (nameInput.value.trim()) validateName(true);
   else clearFieldState(nameInput, nameError);
 });
 
 emailInput?.addEventListener("input", () => {
+  clearFormError();
   if (emailInput.value.trim()) validateEmail(true);
   else clearFieldState(emailInput, emailError);
 });
 
 passwordInput?.addEventListener("input", () => {
+  clearFormError();
   if (passwordInput.value.trim()) validatePassword(true);
   else clearFieldState(passwordInput, passwordError);
+
+  if (confirmPasswordInput.value.trim()) {
+    validateConfirmPassword(true);
+  }
+});
+
+confirmPasswordInput?.addEventListener("input", () => {
+  clearFormError();
+  if (confirmPasswordInput.value.trim()) validateConfirmPassword(true);
+  else clearFieldState(confirmPasswordInput, confirmPasswordError);
 });
 
 if (signupForm) {
@@ -427,9 +515,14 @@ if (googleBtn) {
 }
 
 window.addEventListener("load", async () => {
-  const redirected = await handleRedirectResult();
+  try {
+    const redirected = await handleRedirectResult();
 
-  if (!redirected) {
-    await initTurnstile();
+    if (!redirected) {
+      await initTurnstile();
+    }
+  } catch (error) {
+    console.error("Page init failed:", error);
+    showFormError("Page failed to load properly. Please refresh and try again.");
   }
 });
