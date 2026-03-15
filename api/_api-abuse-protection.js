@@ -3,18 +3,37 @@ const abuseStore = new Map();
 const WINDOW_MS = 10 * 60 * 1000;
 const STALE_TTL_MS = 24 * 60 * 60 * 1000;
 
+function safeString(value, maxLength = 200) {
+  return String(value || "").slice(0, maxLength);
+}
+
+function safeNumber(value, fallback = 0) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : fallback;
+}
+
 function cleanupAbuseStore() {
   const now = Date.now();
 
   for (const [key, value] of abuseStore.entries()) {
-    if (!value || now - value.updatedAt > STALE_TTL_MS) {
+    if (!value || now - safeNumber(value.updatedAt) > STALE_TTL_MS) {
       abuseStore.delete(key);
     }
   }
 }
 
 function getClientKey(ip, sessionId = "") {
-  return `${ip || "unknown"}::${sessionId || "no-session"}`;
+  const safeIp = safeString(ip || "unknown", 100);
+  const safeSessionId = safeString(sessionId || "no-session", 120);
+  return `${safeIp}::${safeSessionId}`;
+}
+
+function createEmptyRecord(now) {
+  return {
+    createdAt: now,
+    updatedAt: now,
+    requests: []
+  };
 }
 
 export function trackApiAbuse({
@@ -22,44 +41,41 @@ export function trackApiAbuse({
   sessionId,
   route,
   success = true
-}) {
+} = {}) {
   cleanupAbuseStore();
 
   const now = Date.now();
+  const safeRoute = safeString(route || "unknown-route", 150);
   const key = getClientKey(ip, sessionId);
 
   let record = abuseStore.get(key);
+
   if (!record) {
-    record = {
-      createdAt: now,
-      updatedAt: now,
-      requests: [],
-      failedCount: 0,
-      routeHits: {}
-    };
+    record = createEmptyRecord(now);
+  }
+
+  if (!Array.isArray(record.requests)) {
+    record.requests = [];
   }
 
   record.updatedAt = now;
+
   record.requests.push({
     at: now,
-    route,
-    success
+    route: safeRoute,
+    success: Boolean(success)
   });
 
-  record.requests = record.requests.filter(item => now - item.at <= WINDOW_MS);
-
-  if (!success) {
-    record.failedCount += 1;
-  }
-
-  record.routeHits[route] = (record.routeHits[route] || 0) + 1;
+  record.requests = record.requests.filter((item) => {
+    return item && now - safeNumber(item.at) <= WINDOW_MS;
+  });
 
   abuseStore.set(key, record);
 
   const totalRequests = record.requests.length;
-  const failedRecent = record.requests.filter(item => !item.success).length;
-  const uniqueRoutes = new Set(record.requests.map(item => item.route)).size;
-  const sameRouteBurst = record.requests.filter(item => item.route === route).length;
+  const failedRecent = record.requests.filter((item) => item.success === false).length;
+  const uniqueRoutes = new Set(record.requests.map((item) => item.route)).size;
+  const sameRouteBurst = record.requests.filter((item) => item.route === safeRoute).length;
 
   let abuseScore = 0;
   const reasons = [];
@@ -95,8 +111,11 @@ export function trackApiAbuse({
   }
 
   let level = "low";
-  if (abuseScore >= 70) level = "high";
-  else if (abuseScore >= 40) level = "medium";
+  if (abuseScore >= 70) {
+    level = "high";
+  } else if (abuseScore >= 40) {
+    level = "medium";
+  }
 
   return {
     abuseScore,
@@ -106,7 +125,8 @@ export function trackApiAbuse({
       totalRequests,
       failedRecent,
       uniqueRoutes,
-      sameRouteBurst
+      sameRouteBurst,
+      clientKey: key
     }
   };
 }
