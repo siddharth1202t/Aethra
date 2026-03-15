@@ -2,6 +2,23 @@ import { checkApiRateLimit } from "./_rate-limit.js";
 import { trackApiAbuse } from "./_api-abuse-protection.js";
 import { analyzeBotBehavior } from "./_bot-detection.js";
 
+const securityStateStore = {
+  mode: "normal",
+  updatedAt: Date.now(),
+  lastEscalationReason: "",
+  suspiciousEvents: []
+};
+
+const actorMemoryStore = new Map();
+
+const SECURITY_MODE_TTL_MS = 15 * 60 * 1000;
+const SUSPICIOUS_EVENT_WINDOW_MS = 10 * 60 * 1000;
+const MAX_SUSPICIOUS_EVENTS = 200;
+
+const ACTOR_MEMORY_TTL_MS = 24 * 60 * 60 * 1000;
+const ACTOR_CLEANUP_INTERVAL_MS = 60 * 1000;
+let lastActorCleanupAt = 0;
+
 export function safeString(value, maxLength = 300) {
   return String(value || "").slice(0, maxLength);
 }
@@ -75,7 +92,13 @@ export function sanitizeBody(body, maxKeys = 20) {
   return output;
 }
 
-export function sanitizeMetadata(value, depth = 0, maxDepth = 4, maxKeys = 20, maxArrayItems = 20) {
+export function sanitizeMetadata(
+  value,
+  depth = 0,
+  maxDepth = 4,
+  maxKeys = 20,
+  maxArrayItems = 20
+) {
   if (depth > maxDepth) {
     return "[max-depth]";
   }
@@ -144,11 +167,266 @@ export function buildMethodNotAllowedResponse() {
   };
 }
 
-export function getCombinedRisk(botAnalysis, abuseAnalysis) {
+function normalizeRoute(route = "") {
+  return safeString(route || "unknown-route", 150).toLowerCase();
+}
+
+function getRouteSensitivity(route = "") {
+  const normalized = normalizeRoute(route);
+
+  if (
+    normalized.includes("admin") ||
+    normalized.includes("developer") ||
+    normalized.includes("role") ||
+    normalized.includes("claims")
+  ) {
+    return "critical";
+  }
+
+  if (
+    normalized.includes("login") ||
+    normalized.includes("signup") ||
+    normalized.includes("verify") ||
+    normalized.includes("security-log")
+  ) {
+    return "high";
+  }
+
+  return "normal";
+}
+
+function getRouteRiskWeight(route = "") {
+  const sensitivity = getRouteSensitivity(route);
+
+  if (sensitivity === "critical") return 3;
+  if (sensitivity === "high") return 2;
+  return 1;
+}
+
+function cleanupActorMemory(force = false) {
+  const now = Date.now();
+
+  if (!force && now - lastActorCleanupAt < ACTOR_CLEANUP_INTERVAL_MS) {
+    return;
+  }
+
+  lastActorCleanupAt = now;
+
+  for (const [key, record] of actorMemoryStore.entries()) {
+    if (!record || now - safeNumber(record.updatedAt, 0) > ACTOR_MEMORY_TTL_MS) {
+      actorMemoryStore.delete(key);
+    }
+  }
+}
+
+function getActorKey(ip, sessionId = "") {
+  return `${safeString(ip || "unknown", 100)}::${safeString(sessionId || "no-session", 120)}`;
+}
+
+function recordSuspiciousEvent({
+  route = "unknown-route",
+  ip = "unknown",
+  finalAction = "allow",
+  combinedRisk = 0,
+  reason = ""
+} = {}) {
+  const now = Date.now();
+
+  securityStateStore.suspiciousEvents.push({
+    at: now,
+    route: normalizeRoute(route),
+    ip: safeString(ip, 100),
+    finalAction: safeString(finalAction, 30),
+    combinedRisk: safePositiveInt(combinedRisk, 0),
+    reason: safeString(reason, 120)
+  });
+
+  securityStateStore.suspiciousEvents = securityStateStore.suspiciousEvents
+    .filter((item) => item && now - safeNumber(item.at, 0) <= SUSPICIOUS_EVENT_WINDOW_MS)
+    .slice(-MAX_SUSPICIOUS_EVENTS);
+}
+
+function updateSecurityMode() {
+  const now = Date.now();
+
+  securityStateStore.suspiciousEvents = securityStateStore.suspiciousEvents.filter(
+    (item) => item && now - safeNumber(item.at, 0) <= SUSPICIOUS_EVENT_WINDOW_MS
+  );
+
+  const recentBlocks = securityStateStore.suspiciousEvents.filter(
+    (item) => item.finalAction === "block"
+  ).length;
+
+  const recentChallenges = securityStateStore.suspiciousEvents.filter(
+    (item) => item.finalAction === "challenge"
+  ).length;
+
+  const recentHighRisk = securityStateStore.suspiciousEvents.filter(
+    (item) => safePositiveInt(item.combinedRisk, 0) >= 70
+  ).length;
+
+  let mode = "normal";
+  let reason = "";
+
+  if (recentBlocks >= 10 || recentHighRisk >= 20) {
+    mode = "lockdown";
+    reason = "high_block_or_high_risk_volume";
+  } else if (recentBlocks >= 4 || recentChallenges >= 12 || recentHighRisk >= 10) {
+    mode = "attack";
+    reason = "elevated_suspicious_activity";
+  } else if (recentChallenges >= 5 || recentHighRisk >= 5) {
+    mode = "elevated";
+    reason = "moderate_suspicious_activity";
+  }
+
+  if (
+    now - safeNumber(securityStateStore.updatedAt, 0) > SECURITY_MODE_TTL_MS &&
+    mode !== "lockdown"
+  ) {
+    // allow decay naturally
+  }
+
+  securityStateStore.mode = mode;
+  securityStateStore.updatedAt = now;
+  securityStateStore.lastEscalationReason = reason;
+
+  return {
+    mode,
+    reason,
+    updatedAt: securityStateStore.updatedAt
+  };
+}
+
+function getSecurityModeRiskBonus(mode = "normal") {
+  if (mode === "lockdown") return 25;
+  if (mode === "attack") return 15;
+  if (mode === "elevated") return 8;
+  return 0;
+}
+
+function getAdaptiveLimitMultiplier(mode = "normal", route = "") {
+  const sensitivity = getRouteSensitivity(route);
+
+  if (mode === "lockdown") {
+    if (sensitivity === "critical") return 0.2;
+    if (sensitivity === "high") return 0.35;
+    return 0.5;
+  }
+
+  if (mode === "attack") {
+    if (sensitivity === "critical") return 0.35;
+    if (sensitivity === "high") return 0.5;
+    return 0.7;
+  }
+
+  if (mode === "elevated") {
+    if (sensitivity === "critical") return 0.5;
+    if (sensitivity === "high") return 0.7;
+    return 0.85;
+  }
+
+  return 1;
+}
+
+function getOrCreateActorMemory(ip, sessionId = "") {
+  cleanupActorMemory();
+
+  const key = getActorKey(ip, sessionId);
+  const now = Date.now();
+
+  let record = actorMemoryStore.get(key);
+
+  if (!record) {
+    record = {
+      createdAt: now,
+      updatedAt: now,
+      suspiciousCount: 0,
+      blockedCount: 0,
+      challengedCount: 0,
+      highestRisk: 0,
+      lastRoute: "unknown-route",
+      lastAction: "allow"
+    };
+  }
+
+  return { key, record };
+}
+
+function updateActorMemory({
+  ip,
+  sessionId = "",
+  route = "",
+  combinedRisk = 0,
+  finalAction = "allow"
+} = {}) {
+  const now = Date.now();
+  const { key, record } = getOrCreateActorMemory(ip, sessionId);
+
+  record.updatedAt = now;
+  record.highestRisk = Math.max(
+    safePositiveInt(record.highestRisk, 0),
+    safePositiveInt(combinedRisk, 0)
+  );
+  record.lastRoute = normalizeRoute(route);
+  record.lastAction = safeString(finalAction, 30);
+
+  if (finalAction === "block") {
+    record.blockedCount = safePositiveInt(record.blockedCount, 0) + 1;
+    record.suspiciousCount = safePositiveInt(record.suspiciousCount, 0) + 2;
+  } else if (finalAction === "challenge") {
+    record.challengedCount = safePositiveInt(record.challengedCount, 0) + 1;
+    record.suspiciousCount = safePositiveInt(record.suspiciousCount, 0) + 1;
+  } else if (combinedRisk >= 60) {
+    record.suspiciousCount = safePositiveInt(record.suspiciousCount, 0) + 1;
+  }
+
+  actorMemoryStore.set(key, record);
+
+  return {
+    actorKey: key,
+    actorMemory: {
+      suspiciousCount: safePositiveInt(record.suspiciousCount, 0),
+      blockedCount: safePositiveInt(record.blockedCount, 0),
+      challengedCount: safePositiveInt(record.challengedCount, 0),
+      highestRisk: safePositiveInt(record.highestRisk, 0),
+      lastRoute: safeString(record.lastRoute, 150),
+      lastAction: safeString(record.lastAction, 30)
+    }
+  };
+}
+
+function getActorRiskBonus(actorMemory) {
+  if (!actorMemory) return 0;
+
+  let bonus = 0;
+
+  if (safePositiveInt(actorMemory.suspiciousCount, 0) >= 3) {
+    bonus += 8;
+  }
+
+  if (safePositiveInt(actorMemory.challengedCount, 0) >= 2) {
+    bonus += 7;
+  }
+
+  if (safePositiveInt(actorMemory.blockedCount, 0) >= 1) {
+    bonus += 15;
+  }
+
+  if (safePositiveInt(actorMemory.highestRisk, 0) >= 80) {
+    bonus += 10;
+  }
+
+  return Math.min(30, bonus);
+}
+
+export function getCombinedRisk(botAnalysis, abuseAnalysis, extra = {}) {
   let score = 0;
 
   score += safePositiveInt(botAnalysis?.riskScore, 0);
   score += safePositiveInt(abuseAnalysis?.abuseScore, 0);
+  score += safePositiveInt(extra.modeRiskBonus, 0);
+  score += safePositiveInt(extra.actorRiskBonus, 0);
+  score += safePositiveInt(extra.routeRiskBonus, 0);
 
   if (botAnalysis?.recommendedAction === "block") {
     score += 25;
@@ -173,10 +451,18 @@ export function getFinalSecurityAction({
   rateLimitResult = null,
   botAnalysis = null,
   abuseAnalysis = null,
-  combinedRisk = 0
+  combinedRisk = 0,
+  securityMode = "normal",
+  route = ""
 } = {}) {
+  const sensitivity = getRouteSensitivity(route);
+
   if (rateLimitResult && !rateLimitResult.allowed) {
-    if (rateLimitResult.recommendedAction === "block") {
+    if (
+      securityMode === "lockdown" ||
+      sensitivity === "critical" ||
+      rateLimitResult.recommendedAction === "block"
+    ) {
       return "block";
     }
 
@@ -188,11 +474,26 @@ export function getFinalSecurityAction({
   }
 
   if (
+    securityMode === "lockdown" &&
+    (sensitivity === "critical" || combinedRisk >= 50)
+  ) {
+    return "block";
+  }
+
+  if (
     botAnalysis?.recommendedAction === "block" ||
     abuseAnalysis?.recommendedAction === "block" ||
     combinedRisk >= 90
   ) {
     return "block";
+  }
+
+  if (
+    securityMode === "attack" &&
+    sensitivity !== "normal" &&
+    combinedRisk >= 50
+  ) {
+    return "challenge";
   }
 
   if (
@@ -214,12 +515,42 @@ export function getFinalSecurityAction({
   return "allow";
 }
 
+function getContainmentAction({
+  finalAction = "allow",
+  securityMode = "normal",
+  route = ""
+} = {}) {
+  const sensitivity = getRouteSensitivity(route);
+
+  if (securityMode === "lockdown" && sensitivity === "critical") {
+    return "freeze_sensitive_route";
+  }
+
+  if (finalAction === "block") {
+    return "temporary_containment";
+  }
+
+  if (finalAction === "challenge") {
+    return "step_up_verification";
+  }
+
+  if (finalAction === "throttle") {
+    return "slow_down_actor";
+  }
+
+  return "none";
+}
+
 export function buildRiskPayload({
   rateLimitResult = null,
   botAnalysis = null,
   abuseAnalysis = null,
   combinedRisk = 0,
-  finalAction = "allow"
+  finalAction = "allow",
+  securityMode = "normal",
+  route = "",
+  actorMemory = null,
+  containmentAction = "none"
 } = {}) {
   return {
     rateLimitAllowed: rateLimitResult ? Boolean(rateLimitResult.allowed) : true,
@@ -229,7 +560,27 @@ export function buildRiskPayload({
     abuseLevel: abuseAnalysis?.level || "low",
     abuseRecommendedAction: abuseAnalysis?.recommendedAction || "allow",
     combinedRisk: safePositiveInt(combinedRisk, 0),
-    finalAction: safeString(finalAction, 30)
+    finalAction: safeString(finalAction, 30),
+    securityMode: safeString(securityMode, 30),
+    routeSensitivity: getRouteSensitivity(route),
+    containmentAction: safeString(containmentAction, 50),
+    actorMemory: actorMemory
+      ? {
+          suspiciousCount: safePositiveInt(actorMemory.suspiciousCount, 0),
+          blockedCount: safePositiveInt(actorMemory.blockedCount, 0),
+          challengedCount: safePositiveInt(actorMemory.challengedCount, 0),
+          highestRisk: safePositiveInt(actorMemory.highestRisk, 0)
+        }
+      : null
+  };
+}
+
+export function getSecurityModeSnapshot() {
+  return {
+    mode: safeString(securityStateStore.mode || "normal", 30),
+    updatedAt: safePositiveInt(securityStateStore.updatedAt, Date.now()),
+    lastEscalationReason: safeString(securityStateStore.lastEscalationReason || "", 120),
+    recentSuspiciousEvents: safePositiveInt(securityStateStore.suspiciousEvents.length, 0)
   };
 }
 
@@ -243,43 +594,90 @@ export function runRouteSecurity({
   sessionId = "",
   abuseSuccess = true
 } = {}) {
+  const normalizedRoute = normalizeRoute(route);
   const ip = getClientIp(req);
   const origin = normalizeOrigin(req?.headers?.origin || "");
   const requestUserAgent = safeString(req?.headers?.["user-agent"] || "", 500);
 
   const originAllowed = isAllowedOrigin(origin, allowedOrigins);
+  const securityModeBefore = updateSecurityMode();
+
+  const adaptiveMultiplier = getAdaptiveLimitMultiplier(
+    securityModeBefore.mode,
+    normalizedRoute
+  );
 
   const rateLimitResult = rateLimit
     ? checkApiRateLimit({
-        key: safeString(rateLimit.key || `route:${route}:${ip}`, 200),
-        limit: safePositiveInt(rateLimit.limit, 60),
+        key: safeString(rateLimit.key || `route:${normalizedRoute}:${ip}`, 200),
+        limit: Math.max(
+          1,
+          Math.floor(safePositiveInt(rateLimit.limit, 60) * adaptiveMultiplier)
+        ),
         windowMs: safePositiveInt(rateLimit.windowMs, 60 * 1000),
-        route: safeString(route || "unknown-route", 150)
+        route: normalizedRoute
       })
     : null;
 
   const abuseAnalysis = trackApiAbuse({
     ip,
     sessionId: safeString(sessionId || "", 120),
-    route: safeString(route || "unknown-route", 150),
+    route: normalizedRoute,
     success: Boolean(abuseSuccess)
   });
 
   const botAnalysis = analyzeBotBehavior(
     {
       ...(isPlainObject(behavior) ? behavior : {}),
-      route: safeString(route || "unknown-route", 150),
+      route: normalizedRoute,
       sessionId: safeString(sessionId || "", 120)
     },
     req
   );
 
-  const combinedRisk = getCombinedRisk(botAnalysis, abuseAnalysis);
+  const actorBaseline = getOrCreateActorMemory(ip, sessionId).record;
+  const actorRiskBonus = getActorRiskBonus(actorBaseline);
+  const modeRiskBonus = getSecurityModeRiskBonus(securityModeBefore.mode);
+  const routeRiskBonus = getRouteRiskWeight(normalizedRoute) * 5;
+
+  const combinedRisk = getCombinedRisk(botAnalysis, abuseAnalysis, {
+    modeRiskBonus,
+    actorRiskBonus,
+    routeRiskBonus
+  });
+
   const finalAction = getFinalSecurityAction({
     rateLimitResult,
     botAnalysis,
     abuseAnalysis,
-    combinedRisk
+    combinedRisk,
+    securityMode: securityModeBefore.mode,
+    route: normalizedRoute
+  });
+
+  const actorUpdate = updateActorMemory({
+    ip,
+    sessionId,
+    route: normalizedRoute,
+    combinedRisk,
+    finalAction
+  });
+
+  if (finalAction !== "allow" || combinedRisk >= 60) {
+    recordSuspiciousEvent({
+      route: normalizedRoute,
+      ip,
+      finalAction,
+      combinedRisk,
+      reason: `${securityModeBefore.mode}:${finalAction}`
+    });
+  }
+
+  const securityModeAfter = updateSecurityMode();
+  const containmentAction = getContainmentAction({
+    finalAction,
+    securityMode: securityModeAfter.mode,
+    route: normalizedRoute
   });
 
   return {
@@ -292,12 +690,22 @@ export function runRouteSecurity({
     botAnalysis,
     combinedRisk,
     finalAction,
+    containmentAction,
+    routeSensitivity: getRouteSensitivity(normalizedRoute),
+    actorKey: actorUpdate.actorKey,
+    actorMemory: actorUpdate.actorMemory,
+    securityMode: securityModeAfter.mode,
+    securityModeSnapshot: getSecurityModeSnapshot(),
     riskPayload: buildRiskPayload({
       rateLimitResult,
       botAnalysis,
       abuseAnalysis,
       combinedRisk,
-      finalAction
+      finalAction,
+      securityMode: securityModeAfter.mode,
+      route: normalizedRoute,
+      actorMemory: actorUpdate.actorMemory,
+      containmentAction
     })
   };
 }
