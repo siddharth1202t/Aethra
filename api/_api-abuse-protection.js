@@ -5,6 +5,9 @@ const STALE_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_REQUEST_HISTORY = 200;
 const CLEANUP_INTERVAL_MS = 60 * 1000;
 
+const PENALTY_BASE_MS = 15 * 60 * 1000;
+const MAX_PENALTY_MS = 6 * 60 * 60 * 1000;
+
 let lastCleanupAt = 0;
 
 function safeString(value, maxLength = 200) {
@@ -37,9 +40,17 @@ function cleanupAbuseStore(force = false) {
   }
 }
 
+function normalizeRoute(route) {
+  return safeString(route || "unknown-route", 150).toLowerCase();
+}
+
+function normalizeSessionId(sessionId = "") {
+  return safeString(sessionId || "no-session", 120);
+}
+
 function getClientKey(ip, sessionId = "") {
   const safeIp = safeString(ip || "unknown", 100);
-  const safeSessionId = safeString(sessionId || "no-session", 120);
+  const safeSessionId = normalizeSessionId(sessionId);
   return `${safeIp}::${safeSessionId}`;
 }
 
@@ -47,8 +58,70 @@ function createEmptyRecord(now) {
   return {
     createdAt: now,
     updatedAt: now,
-    requests: []
+    requests: [],
+    suspiciousEvents: 0,
+    penaltyUntil: 0,
+    penaltyCount: 0,
+    lastPenaltyReason: ""
   };
+}
+
+function getRouteRiskWeight(route) {
+  const normalized = normalizeRoute(route);
+
+  if (
+    normalized.includes("login") ||
+    normalized.includes("signup") ||
+    normalized.includes("verify") ||
+    normalized.includes("developer") ||
+    normalized.includes("admin") ||
+    normalized.includes("security-log")
+  ) {
+    return 2;
+  }
+
+  return 1;
+}
+
+function applyPenalty(record, now, reason, abuseScore) {
+  const existingPenaltyUntil = safeNumber(record.penaltyUntil);
+  const activePenaltyRemaining = Math.max(0, existingPenaltyUntil - now);
+
+  const nextPenaltyMs = Math.min(
+    MAX_PENALTY_MS,
+    Math.max(
+      PENALTY_BASE_MS,
+      activePenaltyRemaining > 0
+        ? activePenaltyRemaining * 1.5
+        : PENALTY_BASE_MS + safePositiveInt(record.penaltyCount) * 10 * 60 * 1000
+    )
+  );
+
+  record.penaltyUntil = now + nextPenaltyMs;
+  record.penaltyCount = safePositiveInt(record.penaltyCount) + 1;
+  record.lastPenaltyReason = safeString(reason, 120);
+
+  if (abuseScore >= 80) {
+    record.suspiciousEvents = safePositiveInt(record.suspiciousEvents) + 2;
+  } else {
+    record.suspiciousEvents = safePositiveInt(record.suspiciousEvents) + 1;
+  }
+}
+
+function getRecommendedAction({ abuseScore, penaltyActive, failedRecent, totalRequests }) {
+  if (penaltyActive || abuseScore >= 85) {
+    return "block";
+  }
+
+  if (abuseScore >= 65 || failedRecent >= 10) {
+    return "challenge";
+  }
+
+  if (abuseScore >= 40 || totalRequests >= 20) {
+    return "throttle";
+  }
+
+  return "allow";
 }
 
 export function trackApiAbuse({
@@ -60,7 +133,8 @@ export function trackApiAbuse({
   cleanupAbuseStore();
 
   const now = Date.now();
-  const safeRoute = safeString(route || "unknown-route", 150);
+  const safeRoute = normalizeRoute(route);
+  const routeWeight = getRouteRiskWeight(safeRoute);
   const key = getClientKey(ip, sessionId);
 
   let record = abuseStore.get(key);
@@ -78,40 +152,48 @@ export function trackApiAbuse({
   record.requests.push({
     at: now,
     route: safeRoute,
-    success: Boolean(success)
+    success: Boolean(success),
+    weight: routeWeight
   });
 
   record.requests = record.requests
     .filter((item) => item && now - safeNumber(item.at) <= WINDOW_MS)
     .slice(-MAX_REQUEST_HISTORY);
 
-  abuseStore.set(key, record);
-
   const totalRequests = record.requests.length;
+  const weightedRequests = record.requests.reduce(
+    (sum, item) => sum + Math.max(1, safePositiveInt(item.weight, 1)),
+    0
+  );
   const failedRecent = record.requests.filter((item) => item.success === false).length;
+  const weightedFailures = record.requests
+    .filter((item) => item.success === false)
+    .reduce((sum, item) => sum + Math.max(1, safePositiveInt(item.weight, 1)), 0);
+
   const uniqueRoutes = new Set(record.requests.map((item) => item.route)).size;
   const sameRouteBurst = record.requests.filter((item) => item.route === safeRoute).length;
+  const penaltyActive = safeNumber(record.penaltyUntil) > now;
 
   let abuseScore = 0;
   const reasons = [];
 
-  if (totalRequests >= 20) {
+  if (weightedRequests >= 20) {
     abuseScore += 20;
     reasons.push("high_total_requests");
   }
 
-  if (totalRequests >= 40) {
-    abuseScore += 25;
+  if (weightedRequests >= 40) {
+    abuseScore += 20;
     reasons.push("extreme_request_volume");
   }
 
-  if (failedRecent >= 5) {
+  if (weightedFailures >= 6) {
     abuseScore += 20;
     reasons.push("repeated_failures");
   }
 
-  if (failedRecent >= 10) {
-    abuseScore += 25;
+  if (weightedFailures >= 12) {
+    abuseScore += 20;
     reasons.push("heavy_failed_requests");
   }
 
@@ -121,8 +203,18 @@ export function trackApiAbuse({
   }
 
   if (sameRouteBurst >= 10) {
-    abuseScore += 20;
+    abuseScore += 15;
     reasons.push("same_route_burst");
+  }
+
+  if (record.suspiciousEvents >= 3) {
+    abuseScore += 15;
+    reasons.push("repeat_suspicious_history");
+  }
+
+  if (penaltyActive) {
+    abuseScore += 25;
+    reasons.push("active_penalty_window");
   }
 
   abuseScore = Math.min(100, abuseScore);
@@ -134,16 +226,41 @@ export function trackApiAbuse({
     level = "medium";
   }
 
+  if (abuseScore >= 70 || (failedRecent >= 10 && sameRouteBurst >= 8)) {
+    applyPenalty(
+      record,
+      now,
+      abuseScore >= 85 ? "severe_abuse_pattern" : "sustained_abuse_pattern",
+      abuseScore
+    );
+  }
+
+  abuseStore.set(key, record);
+
+  const recommendedAction = getRecommendedAction({
+    abuseScore,
+    penaltyActive: safeNumber(record.penaltyUntil) > now,
+    failedRecent,
+    totalRequests
+  });
+
   return {
     abuseScore,
     level,
     reasons,
+    recommendedAction,
+    penaltyActive: safeNumber(record.penaltyUntil) > now,
+    penaltyUntil: safeNumber(record.penaltyUntil) || 0,
     snapshot: {
       totalRequests: safePositiveInt(totalRequests),
+      weightedRequests: safePositiveInt(weightedRequests),
       failedRecent: safePositiveInt(failedRecent),
+      weightedFailures: safePositiveInt(weightedFailures),
       uniqueRoutes: safePositiveInt(uniqueRoutes),
       sameRouteBurst: safePositiveInt(sameRouteBurst),
-      clientKey: safeString(key, 240)
+      suspiciousEvents: safePositiveInt(record.suspiciousEvents),
+      penaltyCount: safePositiveInt(record.penaltyCount),
+      clientKeyPreview: safeString(key, 24)
     }
   };
 }
