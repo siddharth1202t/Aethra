@@ -10,6 +10,7 @@ import {
 } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
 import { app } from "./firestore-config.js";
 import { ensureUserProfile } from "./user-profile.js";
+import { writeSecurityLog } from "./security-logger.js";
 
 const auth = getAuth(app);
 const provider = new GoogleAuthProvider();
@@ -305,6 +306,13 @@ async function handleEmailLogin() {
   }
 
   if (!token) {
+
+    await writeSecurityLog({
+      type: "captcha_missing",
+      message: "User attempted email login without captcha",
+      email: emailInput.value
+    });
+
     showCaptchaError("Please complete the captcha first.");
     isSubmitting = false;
     setTemporaryCooldown(loginBtn, 1500);
@@ -342,9 +350,22 @@ async function handleEmailLogin() {
       return;
     }
 
+    await writeSecurityLog({
+      type: "login_success",
+      message: "User logged in successfully",
+      email: email,
+      userId: user.uid
+    });
+    
     redirectToHome();
   } catch (error) {
     console.error(error);
+
+    await writeSecurityLog({
+      type: "login_failed",
+      message: error?.message || "Unknown login error",
+      email: email
+    });
 
     const authCode = error?.code || "";
     const isFailedLogin =
@@ -392,7 +413,14 @@ async function handleGoogleLogin() {
 
   const token = getTurnstileToken();
 
-  if (!token) {
+ if (!token) {
+
+    await writeSecurityLog({
+      type: "captcha_missing",
+      message: "User tried login without captcha",
+      email: emailInput.value
+    });
+
     showCaptchaError("Please complete the captcha first.");
     isSubmitting = false;
     setTemporaryCooldown(googleBtn, 1500);
@@ -410,11 +438,28 @@ async function handleGoogleLogin() {
       return;
     } else {
       const userCredential = await signInWithPopup(auth, provider);
-      await ensureUserProfile(userCredential.user);
+      const user = userCredential.user;
+
+      await ensureUserProfile(user);
+
+      await writeSecurityLog({
+        type: "google_login_success",
+        message: "User logged in with Google",
+        email: user.email,
+        userId: user.uid
+      });
+
       redirectToHome();
     }
   } catch (error) {
     console.error(error);
+
+    await writeSecurityLog({
+      type: "google_login_failed",
+      message: error?.message || "Google login failed",
+      email: emailInput.value
+    });
+
     showFormError(getFriendlyAuthMessage(error));
     resetTurnstile();
     setTemporaryCooldown(googleBtn, 3000);
