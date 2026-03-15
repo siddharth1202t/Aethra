@@ -13,6 +13,8 @@ const LOCK_WINDOW_MS = 15 * 60 * 1000;
 const IP_LOCK_WINDOW_MS = 10 * 60 * 1000;
 const STALE_RECORD_TTL_MS = 24 * 60 * 60 * 1000;
 
+const ROUTE = "/api/signup-attempt";
+
 const ALLOWED_ORIGINS = new Set([
   "https://aethra-gules.vercel.app",
   "https://aethra-hb2h.vercel.app"
@@ -33,6 +35,11 @@ function safeString(value, maxLength = 300) {
 function safeNumber(value, fallback = 0) {
   const num = Number(value);
   return Number.isFinite(num) ? num : fallback;
+}
+
+function safePositiveInt(value, fallback = 0) {
+  const num = Math.floor(safeNumber(value, fallback));
+  return num >= 0 ? num : fallback;
 }
 
 function safeMetadata(metadata = {}) {
@@ -95,7 +102,13 @@ function getRecord(store, key) {
     };
   }
 
-  if (record.lockUntil && now > record.lockUntil) {
+  const normalized = {
+    count: safePositiveInt(record.count, 0),
+    lockUntil: safePositiveInt(record.lockUntil, 0),
+    lastAttempt: safePositiveInt(record.lastAttempt, now)
+  };
+
+  if (normalized.lockUntil && now > normalized.lockUntil) {
     return {
       count: 0,
       lockUntil: 0,
@@ -103,18 +116,14 @@ function getRecord(store, key) {
     };
   }
 
-  return {
-    count: safeNumber(record.count),
-    lockUntil: safeNumber(record.lockUntil),
-    lastAttempt: safeNumber(record.lastAttempt, now)
-  };
+  return normalized;
 }
 
 function saveRecord(store, key, record) {
   store.set(key, {
-    count: safeNumber(record.count),
-    lockUntil: safeNumber(record.lockUntil),
-    lastAttempt: safeNumber(record.lastAttempt, Date.now())
+    count: safePositiveInt(record.count, 0),
+    lockUntil: safePositiveInt(record.lockUntil, 0),
+    lastAttempt: safePositiveInt(record.lastAttempt, Date.now())
   });
 }
 
@@ -126,10 +135,27 @@ function isGooglePlaceholderEmail(email) {
   return email === "google-signup";
 }
 
+function buildRiskPayload(botAnalysis, abuseAnalysis, combinedRisk) {
+  return {
+    botLevel: botAnalysis.level,
+    abuseLevel: abuseAnalysis.level,
+    combinedRisk
+  };
+}
+
 function buildSuspiciousResponse(message = "Suspicious activity detected. Please try again later.") {
   return {
     success: false,
     message
+  };
+}
+
+function buildLockResponse(isLocked, remainingMs = 0, extra = {}) {
+  return {
+    success: true,
+    isLocked,
+    remainingMs: isLocked ? Math.max(0, safePositiveInt(remainingMs, 0)) : 0,
+    ...extra
   };
 }
 
@@ -146,12 +172,12 @@ export default async function handler(req, res) {
 
     const origin = safeString(req.headers.origin || "", 200);
     const ip = getClientIp(req);
-    const body = req.body || {};
+    const body = req.body && typeof req.body === "object" ? req.body : {};
 
     const rawEmail = normalizeEmail(body.email);
     const action = safeString(body.action, 50);
     const actionLabel = safeString(body.actionLabel, 100);
-    const behavior = body.behavior || {};
+    const behavior = body.behavior && typeof body.behavior === "object" ? body.behavior : {};
     const sessionId = safeString(behavior.sessionId || body.sessionId || "", 120);
 
     if (!isAllowedOrigin(origin)) {
@@ -160,7 +186,7 @@ export default async function handler(req, res) {
         level: "warning",
         message: "Blocked request from forbidden origin on signup-attempt API",
         ip,
-        route: "/api/signup-attempt",
+        route: ROUTE,
         metadata: { origin }
       });
 
@@ -182,7 +208,7 @@ export default async function handler(req, res) {
         level: "warning",
         message: "Rate limit exceeded for signup attempt API",
         ip,
-        route: "/api/signup-attempt",
+        route: ROUTE,
         metadata: {
           remainingMs: rateLimitResult.remainingMs
         }
@@ -202,7 +228,7 @@ export default async function handler(req, res) {
         message: "Invalid action sent to signup-attempt API",
         email: rawEmail,
         ip,
-        route: "/api/signup-attempt",
+        route: ROUTE,
         metadata: { action }
       });
 
@@ -212,8 +238,7 @@ export default async function handler(req, res) {
       });
     }
 
-    const emailIsAllowed =
-      isValidEmail(rawEmail) || isGooglePlaceholderEmail(rawEmail);
+    const emailIsAllowed = isValidEmail(rawEmail) || isGooglePlaceholderEmail(rawEmail);
 
     if (!rawEmail || !emailIsAllowed) {
       await writeSecurityLog({
@@ -222,7 +247,7 @@ export default async function handler(req, res) {
         message: "Invalid email sent to signup-attempt API",
         email: rawEmail,
         ip,
-        route: "/api/signup-attempt"
+        route: ROUTE
       });
 
       return res.status(400).json({
@@ -237,11 +262,12 @@ export default async function handler(req, res) {
     const abuseAnalysis = trackApiAbuse({
       ip,
       sessionId,
-      route: `/api/signup-attempt:${action}${actionLabel ? `:${actionLabel}` : ""}`,
+      route: `${ROUTE}:${action}${actionLabel ? `:${actionLabel}` : ""}`,
       success: action !== "fail"
     });
 
-    const combinedRisk = botAnalysis.riskScore + abuseAnalysis.abuseScore;
+    const combinedRisk =
+      safePositiveInt(botAnalysis.riskScore, 0) + safePositiveInt(abuseAnalysis.abuseScore, 0);
 
     if (
       botAnalysis.level === "high" ||
@@ -254,7 +280,7 @@ export default async function handler(req, res) {
         message: "Blocked signup attempt API request due to suspicious behavior",
         email: rawEmail,
         ip,
-        route: "/api/signup-attempt",
+        route: ROUTE,
         metadata: safeMetadata({
           action,
           actionLabel,
@@ -279,7 +305,7 @@ export default async function handler(req, res) {
         message: "Suspicious signup behavior detected",
         email: rawEmail,
         ip,
-        route: "/api/signup-attempt",
+        route: ROUTE,
         metadata: safeMetadata({
           action,
           actionLabel,
@@ -292,11 +318,9 @@ export default async function handler(req, res) {
     const ipRecord = getRecord(ipAttemptStore, ip);
 
     if (ipRecord.lockUntil > now) {
-      return res.status(200).json({
-        success: true,
-        isLocked: true,
-        remainingMs: ipRecord.lockUntil - now
-      });
+      return res.status(200).json(
+        buildLockResponse(true, ipRecord.lockUntil - now)
+      );
     }
 
     const key = getKey(rawEmail, ip);
@@ -305,16 +329,15 @@ export default async function handler(req, res) {
     if (action === "check") {
       const isLocked = record.lockUntil > now;
 
-      return res.status(200).json({
-        success: true,
-        isLocked,
-        remainingMs: isLocked ? record.lockUntil - now : 0,
-        risk: {
-          botLevel: botAnalysis.level,
-          abuseLevel: abuseAnalysis.level,
-          combinedRisk
-        }
-      });
+      return res.status(200).json(
+        buildLockResponse(
+          isLocked,
+          record.lockUntil - now,
+          {
+            risk: buildRiskPayload(botAnalysis, abuseAnalysis, combinedRisk)
+          }
+        )
+      );
     }
 
     if (action === "fail") {
@@ -333,7 +356,7 @@ export default async function handler(req, res) {
           message: "Too many signup attempts",
           email: rawEmail,
           ip,
-          route: "/api/signup-attempt",
+          route: ROUTE,
           metadata: safeMetadata({
             attempts: record.count,
             actionLabel,
@@ -351,7 +374,7 @@ export default async function handler(req, res) {
           level: "critical",
           message: "IP temporarily blocked due to excessive signup attempts",
           ip,
-          route: "/api/signup-attempt",
+          route: ROUTE,
           metadata: safeMetadata({
             attempts: ipRecord.count,
             actionLabel
@@ -364,17 +387,16 @@ export default async function handler(req, res) {
 
       const isLocked = record.lockUntil > now;
 
-      return res.status(200).json({
-        success: true,
-        isLocked,
-        remainingMs: isLocked ? record.lockUntil - now : 0,
-        attempts: record.count,
-        risk: {
-          botLevel: botAnalysis.level,
-          abuseLevel: abuseAnalysis.level,
-          combinedRisk
-        }
-      });
+      return res.status(200).json(
+        buildLockResponse(
+          isLocked,
+          record.lockUntil - now,
+          {
+            attempts: record.count,
+            risk: buildRiskPayload(botAnalysis, abuseAnalysis, combinedRisk)
+          }
+        )
+      );
     }
 
     return res.status(400).json({
@@ -389,7 +411,7 @@ export default async function handler(req, res) {
         type: "signup_attempt_api_error",
         level: "error",
         message: "Unhandled server error in signup-attempt API",
-        route: "/api/signup-attempt",
+        route: ROUTE,
         metadata: {
           error: safeString(error?.message || "Unknown error", 500)
         }
