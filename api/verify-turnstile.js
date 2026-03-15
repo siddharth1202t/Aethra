@@ -1,12 +1,21 @@
 import { writeSecurityLog } from "./_security-log.js";
 
 const rateLimitStore = new Map();
+const RATE_LIMIT_MAX = 10;
+const RATE_LIMIT_WINDOW_MS = 60 * 1000;
+const STALE_RATE_RECORD_TTL_MS = 24 * 60 * 60 * 1000;
 
 function getClientIp(req) {
   const forwarded = req.headers["x-forwarded-for"];
   if (typeof forwarded === "string" && forwarded.length > 0) {
     return forwarded.split(",")[0].trim();
   }
+
+  const realIp = req.headers["x-real-ip"];
+  if (typeof realIp === "string" && realIp.length > 0) {
+    return realIp.trim();
+  }
+
   return "unknown";
 }
 
@@ -18,7 +27,18 @@ function isAllowedOrigin(origin) {
   return allowedOrigins.includes(origin);
 }
 
-function isRateLimited(ip, limit = 10, windowMs = 60 * 1000) {
+function cleanupStaleRateRecords() {
+  const now = Date.now();
+
+  for (const [ip, record] of rateLimitStore.entries()) {
+    if (!record?.windowStart) continue;
+    if (now - record.windowStart > STALE_RATE_RECORD_TTL_MS) {
+      rateLimitStore.delete(ip);
+    }
+  }
+}
+
+function isRateLimited(ip, limit = RATE_LIMIT_MAX, windowMs = RATE_LIMIT_WINDOW_MS) {
   const now = Date.now();
   const record = rateLimitStore.get(ip);
 
@@ -47,6 +67,14 @@ function isRateLimited(ip, limit = 10, windowMs = 60 * 1000) {
   return false;
 }
 
+function isExpectedHostname(hostname = "") {
+  const allowedHostnames = [
+    "aethra-gules.vercel.app",
+    "aethra-hb2h.vercel.app"
+  ];
+  return allowedHostnames.includes(hostname);
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({
@@ -56,6 +84,8 @@ export default async function handler(req, res) {
   }
 
   try {
+    cleanupStaleRateRecords();
+
     const origin = req.headers.origin || "";
     const ip = getClientIp(req);
 
@@ -75,7 +105,7 @@ export default async function handler(req, res) {
       });
     }
 
-    if (isRateLimited(ip, 10, 60 * 1000)) {
+    if (isRateLimited(ip, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS)) {
       await writeSecurityLog({
         type: "turnstile_rate_limited",
         level: "warning",
@@ -145,6 +175,24 @@ export default async function handler(req, res) {
       return res.status(400).json({
         success: false,
         message: "Captcha verification failed"
+      });
+    }
+
+    if (data.hostname && !isExpectedHostname(data.hostname)) {
+      await writeSecurityLog({
+        type: "turnstile_hostname_mismatch",
+        level: "critical",
+        message: "Turnstile token hostname did not match allowed hostnames",
+        ip,
+        route: "/api/verify-turnstile",
+        metadata: {
+          hostname: data.hostname
+        }
+      });
+
+      return res.status(400).json({
+        success: false,
+        message: "Captcha hostname validation failed"
       });
     }
 
