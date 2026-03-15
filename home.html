@@ -73,6 +73,7 @@
       max-width: 1280px;
       margin: 0 auto;
       padding: 24px;
+      visibility: hidden;
     }
 
     .topbar {
@@ -154,6 +155,12 @@
     .logout-btn:hover {
       transform: translateY(-2px);
       box-shadow: 0 16px 38px rgba(123, 97, 255, 0.5);
+    }
+
+    .logout-btn:disabled {
+      opacity: 0.7;
+      cursor: not-allowed;
+      transform: none;
     }
 
     .hero {
@@ -466,11 +473,12 @@
         <button
           class="logout-btn"
           id="devBtn"
+          type="button"
           style="display:none; background:linear-gradient(135deg,#ff7a18,#ff3d3d);">
           Developer
         </button>
 
-        <button class="logout-btn" id="logoutBtn">Logout</button>
+        <button class="logout-btn" id="logoutBtn" type="button">Logout</button>
       </div>
     </header>
 
@@ -484,8 +492,8 @@
         </p>
 
         <div class="hero-buttons">
-          <button class="primary-btn">Start Chatting</button>
-          <button class="secondary-btn">Explore Characters</button>
+          <button class="primary-btn" type="button">Start Chatting</button>
+          <button class="secondary-btn" type="button">Explore Characters</button>
         </div>
 
         <div class="stats">
@@ -555,109 +563,6 @@
   </div>
 
   <script type="module" src="js/app-check.js"></script>
-
-  <script type="module">
-    import { getAuth, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-    import { doc, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-    import { app, db } from "./js/firestore-config.js";
-    import { ensureUserProfile } from "./js/user-profile.js";
-    import { requireAuth } from "./js/auth-guard.js";
-
-    const auth = getAuth(app);
-
-    const shell = document.querySelector(".shell");
-    const userRoleEl = document.getElementById("userRole");
-    const heroUsernameEl = document.getElementById("heroUsername");
-    const logoutBtn = document.getElementById("logoutBtn");
-    const devBtn = document.getElementById("devBtn");
-    const starsContainer = document.getElementById("stars");
-
-    function goTo(page) {
-      window.location.replace(page);
-    }
-
-    function createStars() {
-      if (!starsContainer) return;
-
-      for (let i = 0; i < 90; i++) {
-        const star = document.createElement("div");
-        star.classList.add("star");
-
-        const size = Math.random() * 2.2 + 1;
-        star.style.width = size + "px";
-        star.style.height = size + "px";
-        star.style.left = Math.random() * 100 + "vw";
-        star.style.top = Math.random() * 100 + "vh";
-        star.style.animationDuration = (Math.random() * 4 + 2) + "s";
-        star.style.animationDelay = Math.random() * 4 + "s";
-
-        starsContainer.appendChild(star);
-      }
-    }
-
-    function setPageVisible() {
-      if (shell) {
-        shell.style.visibility = "visible";
-      }
-    }
-
-    function getBestDisplayName(user) {
-      const directName = user?.displayName?.trim();
-      const providerName = user?.providerData?.[0]?.displayName?.trim();
-      const emailName = user?.email ? user.email.split("@")[0] : "";
-  
-      return directName || providerName || emailName || "Explorer";
-    }
-
-    if (shell) {
-      shell.style.visibility = "hidden";
-    }
-
-    requireAuth(async (user) => {
-      try {
-        await ensureUserProfile(user);
-
-        heroUsernameEl.textContent = getBestDisplayName(user);
-
-        let isDeveloper = false;
-
-        const userRef = doc(db, "users", user.uid);
-        const userSnap = await getDoc(userRef);
-
-        if (userSnap.exists()) {
-          const userData = userSnap.data() || {};
-          isDeveloper = String(userData.role || "").toLowerCase() === "developer";
-        }
-
-        userRoleEl.textContent = isDeveloper ? "Developer" : "User";
-        devBtn.style.display = isDeveloper ? "block" : "none";
-        setPageVisible();
-      } catch (error) {
-        console.error("Home auth setup failed:", error);
-        heroUsernameEl.textContent = "Explorer";
-        userRoleEl.textContent = "User";
-        devBtn.style.display = "none";
-        setPageVisible();
-      }
-    });
-
-    devBtn?.addEventListener("click", () => {
-      goTo("developer.html");
-    });
-
-    logoutBtn?.addEventListener("click", async () => {
-      try {
-        logoutBtn.disabled = true;
-        logoutBtn.textContent = "Logging out...";
-        await signOut(auth);
-      } catch (error) {
-        console.error("Logout failed:", error);
-      } finally {
-        goTo("login.html");
-      }
-    });
-
-    createStars();
-  </script>
+  <script type="module" src="js/home.js"></script>
 </body>
 </html>
