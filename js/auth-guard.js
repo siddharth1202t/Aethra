@@ -1,7 +1,6 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
 import { getAuth, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
 import { doc, getDoc, getFirestore } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-import { SECURITY_CONFIG } from "./security-config.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyCbfEQyTwry7qNOluYqlHUZuU8AF3bkpgQ",
@@ -17,9 +16,14 @@ const auth = getAuth(app);
 const db = getFirestore(app);
 
 export function requireAuth(callback) {
-  onAuthStateChanged(auth, (user) => {
+  onAuthStateChanged(auth, async (user) => {
     if (!user) {
       window.location.href = "login.html";
+      return;
+    }
+
+    if (!user.emailVerified) {
+      window.location.href = "verify-email.html";
       return;
     }
 
@@ -34,8 +38,8 @@ export function requireDeveloper(callback) {
       return;
     }
 
-    if (user.email !== SECURITY_CONFIG.developerEmail) {
-      window.location.href = "home.html";
+    if (!user.emailVerified) {
+      window.location.href = "verify-email.html";
       return;
     }
 
