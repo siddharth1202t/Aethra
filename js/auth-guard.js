@@ -1,7 +1,8 @@
 import {
   getAuth,
   onAuthStateChanged,
-  reload
+  reload,
+  getIdTokenResult
 } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
 import {
   doc,
@@ -26,6 +27,24 @@ function goTo(page) {
   }
 }
 
+function handleUnauthedState() {
+  if (!isPage("login.html")) {
+    goTo("login.html");
+  }
+}
+
+function handleUnverifiedState() {
+  if (!isPage("verify-email.html")) {
+    goTo("verify-email.html");
+  }
+}
+
+function handleNonDeveloperState() {
+  if (!isPage("home.html")) {
+    goTo("home.html");
+  }
+}
+
 async function resolveVerifiedUser(user) {
   if (!user) {
     return { ok: false, reason: "not-authenticated" };
@@ -46,49 +65,74 @@ async function resolveVerifiedUser(user) {
   return { ok: true, user: currentUser };
 }
 
-function handleUnauthedState() {
-  if (!isPage("login.html")) {
-    goTo("login.html");
+async function getUserRoleData(uid) {
+  try {
+    const userRef = doc(db, "users", uid);
+    const userSnap = await getDoc(userRef);
+
+    if (!userSnap.exists()) {
+      return {
+        exists: false,
+        firestoreRole: ""
+      };
+    }
+
+    const userData = userSnap.data() || {};
+    return {
+      exists: true,
+      firestoreRole: String(userData.role || "").toLowerCase()
+    };
+  } catch (error) {
+    console.error("Failed to read user role data:", error);
+    return {
+      exists: false,
+      firestoreRole: ""
+    };
   }
 }
 
-function handleUnverifiedState() {
-  if (!isPage("verify-email.html")) {
-    goTo("verify-email.html");
+async function resolveDeveloperAccess(currentUser) {
+  let claimsRole = "";
+  let isDeveloperByClaims = false;
+
+  try {
+    const tokenResult = await getIdTokenResult(currentUser, true);
+    const claims = tokenResult?.claims || {};
+
+    if (claims.admin === true) {
+      claimsRole = "admin";
+      isDeveloperByClaims = true;
+    } else if (claims.developer === true) {
+      claimsRole = "developer";
+      isDeveloperByClaims = true;
+    }
+  } catch (error) {
+    console.error("Failed to read token claims:", error);
   }
+
+  const roleData = await getUserRoleData(currentUser.uid);
+
+  const isDeveloperByFirestore =
+    roleData.exists && roleData.firestoreRole === "developer";
+
+  return {
+    isDeveloper: isDeveloperByClaims || isDeveloperByFirestore,
+    claimsRole,
+    firestoreRole: roleData.firestoreRole,
+    userDocExists: roleData.exists
+  };
 }
 
-export function requireAuth(callback) {
+function createSingleRunGuard(handler) {
   let handled = false;
 
   return onAuthStateChanged(auth, async (user) => {
     if (handled) return;
 
-    if (!user) {
-      handled = true;
-      handleUnauthedState();
-      return;
-    }
-
     try {
-      const result = await resolveVerifiedUser(user);
-
-      if (!result.ok) {
+      const done = await handler(user);
+      if (done) {
         handled = true;
-
-        if (result.reason === "email-not-verified") {
-          handleUnverifiedState();
-        } else {
-          handleUnauthedState();
-        }
-
-        return;
-      }
-
-      handled = true;
-
-      if (typeof callback === "function") {
-        await callback(result.user);
       }
     } catch (error) {
       console.error("Auth guard failed:", error);
@@ -98,62 +142,65 @@ export function requireAuth(callback) {
   });
 }
 
-export function requireDeveloper(callback) {
-  let handled = false;
-
-  return onAuthStateChanged(auth, async (user) => {
-    if (handled) return;
-
+export function requireAuth(callback) {
+  return createSingleRunGuard(async (user) => {
     if (!user) {
-      handled = true;
       handleUnauthedState();
-      return;
+      return true;
     }
 
-    try {
-      const result = await resolveVerifiedUser(user);
+    const result = await resolveVerifiedUser(user);
 
-      if (!result.ok) {
-        handled = true;
-
-        if (result.reason === "email-not-verified") {
-          handleUnverifiedState();
-        } else {
-          handleUnauthedState();
-        }
-
-        return;
+    if (!result.ok) {
+      if (result.reason === "email-not-verified") {
+        handleUnverifiedState();
+      } else {
+        handleUnauthedState();
       }
 
-      const currentUser = result.user;
-      const userRef = doc(db, "users", currentUser.uid);
-      const userSnap = await getDoc(userRef);
-
-      if (!userSnap.exists()) {
-        handled = true;
-        goTo("home.html");
-        return;
-      }
-
-      const userData = userSnap.data() || {};
-      const role = String(userData.role || "").toLowerCase();
-
-      if (role !== "developer") {
-        handled = true;
-        goTo("home.html");
-        return;
-      }
-
-      handled = true;
-
-      if (typeof callback === "function") {
-        await callback(currentUser);
-      }
-    } catch (error) {
-      console.error("Developer guard failed:", error);
-      handled = true;
-      goTo("home.html");
+      return true;
     }
+
+    if (typeof callback === "function") {
+      await callback(result.user);
+    }
+
+    return true;
+  });
+}
+
+export function requireDeveloper(callback) {
+  return createSingleRunGuard(async (user) => {
+    if (!user) {
+      handleUnauthedState();
+      return true;
+    }
+
+    const result = await resolveVerifiedUser(user);
+
+    if (!result.ok) {
+      if (result.reason === "email-not-verified") {
+        handleUnverifiedState();
+      } else {
+        handleUnauthedState();
+      }
+
+      return true;
+    }
+
+    const currentUser = result.user;
+    const access = await resolveDeveloperAccess(currentUser);
+
+    if (!access.isDeveloper) {
+      handleNonDeveloperState();
+      return true;
+    }
+
+    if (typeof callback === "function") {
+      await callback(currentUser, access);
+    }
+
+    return true;
   });
 }
 
