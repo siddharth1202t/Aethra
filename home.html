@@ -554,91 +554,92 @@
     </section>
   </div>
 
-<script type="module">
-  import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-  import { getAuth, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-  import { doc, getDoc, getFirestore } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-  import { ensureUserProfile } from "./js/user-profile.js";
-  import { requireAuth } from "./js/auth-guard.js";
+  <script type="module" src="js/app-check.js"></script>
 
-  const firebaseConfig = {
-    apiKey: "AIzaSyCbfEQyTwry7qNOluYqlHUZuU8AF3bkpgQ",
-    authDomain: "aethra-web.firebaseapp.com",
-    projectId: "aethra-web",
-    storageBucket: "aethra-web.firebasestorage.app",
-    messagingSenderId: "280560043528",
-    appId: "1:280560043528:web:a6c2e485c8da32c9dab3bd"
-  };
+  <script type="module">
+    import { getAuth, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+    import { doc, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+    import { app, db } from "./js/firestore-config.js";
+    import { ensureUserProfile } from "./js/user-profile.js";
+    import { requireAuth } from "./js/auth-guard.js";
 
-  const app = initializeApp(firebaseConfig);
-  const auth = getAuth(app);
-  const db = getFirestore(app);
+    const auth = getAuth(app);
 
-  const userRoleEl = document.getElementById("userRole");
-  const heroUsernameEl = document.getElementById("heroUsername");
-  const logoutBtn = document.getElementById("logoutBtn");
-  const devBtn = document.getElementById("devBtn");
+    const userRoleEl = document.getElementById("userRole");
+    const heroUsernameEl = document.getElementById("heroUsername");
+    const logoutBtn = document.getElementById("logoutBtn");
+    const devBtn = document.getElementById("devBtn");
+    const starsContainer = document.getElementById("stars");
 
-  function goTo(page) {
-    window.location.replace(page);
-  }
-
-  requireAuth(async (user) => {
-    try {
-      await ensureUserProfile(user);
-
-      const displayName =
-        (user.displayName && user.displayName.trim()) ||
-        (user.providerData?.[0]?.displayName && user.providerData[0].displayName.trim()) ||
-        (user.email ? user.email.split("@")[0] : "Explorer");
-
-      heroUsernameEl.textContent = displayName;
-
-      let isDeveloper = false;
-
-      const userRef = doc(db, "users", user.uid);
-      const userSnap = await getDoc(userRef);
-
-      if (userSnap.exists()) {
-        const userData = userSnap.data();
-        if (userData.role === "developer") {
-          isDeveloper = true;
-        }
-      }
-
-      userRoleEl.textContent = isDeveloper ? "Developer" : "User";
-      devBtn.style.display = isDeveloper ? "block" : "none";
-    } catch (error) {
-      console.error("Home auth setup failed:", error);
-      heroUsernameEl.textContent = "Explorer";
-      userRoleEl.textContent = "User";
-      devBtn.style.display = "none";
+    function goTo(page) {
+      window.location.replace(page);
     }
-  });
 
-  devBtn.addEventListener("click", () => {
-    goTo("developer.html");
-  });
+    function createStars() {
+      for (let i = 0; i < 90; i++) {
+        const star = document.createElement("div");
+        star.classList.add("star");
 
-  logoutBtn.addEventListener("click", async () => {
-    await signOut(auth);
-    goTo("login.html");
-  });
+        const size = Math.random() * 2.2 + 1;
+        star.style.width = size + "px";
+        star.style.height = size + "px";
+        star.style.left = Math.random() * 100 + "vw";
+        star.style.top = Math.random() * 100 + "vh";
+        star.style.animationDuration = (Math.random() * 4 + 2) + "s";
+        star.style.animationDelay = Math.random() * 4 + "s";
 
-  const starsContainer = document.getElementById("stars");
+        starsContainer.appendChild(star);
+      }
+    }
 
-  for (let i = 0; i < 90; i++) {
-    const star = document.createElement("div");
-    star.classList.add("star");
-    const size = Math.random() * 2.2 + 1;
-    star.style.width = size + "px";
-    star.style.height = size + "px";
-    star.style.left = Math.random() * 100 + "vw";
-    star.style.top = Math.random() * 100 + "vh";
-    star.style.animationDuration = (Math.random() * 4 + 2) + "s";
-    star.style.animationDelay = Math.random() * 4 + "s";
-    starsContainer.appendChild(star);
-  }
-</script>
+    requireAuth(async (user) => {
+      try {
+        await ensureUserProfile(user);
+
+        const displayName =
+          (user.displayName && user.displayName.trim()) ||
+          (user.providerData?.[0]?.displayName && user.providerData[0].displayName.trim()) ||
+          (user.email ? user.email.split("@")[0] : "Explorer");
+
+        heroUsernameEl.textContent = displayName;
+
+        let isDeveloper = false;
+
+        const userRef = doc(db, "users", user.uid);
+        const userSnap = await getDoc(userRef);
+
+        if (userSnap.exists()) {
+          const userData = userSnap.data();
+          if (userData.role === "developer") {
+            isDeveloper = true;
+          }
+        }
+
+        userRoleEl.textContent = isDeveloper ? "Developer" : "User";
+        devBtn.style.display = isDeveloper ? "block" : "none";
+      } catch (error) {
+        console.error("Home auth setup failed:", error);
+        heroUsernameEl.textContent = "Explorer";
+        userRoleEl.textContent = "User";
+        devBtn.style.display = "none";
+      }
+    });
+
+    devBtn.addEventListener("click", () => {
+      goTo("developer.html");
+    });
+
+    logoutBtn.addEventListener("click", async () => {
+      try {
+        await signOut(auth);
+      } catch (error) {
+        console.error("Logout failed:", error);
+      } finally {
+        goTo("login.html");
+      }
+    });
+
+    createStars();
+  </script>
 </body>
 </html>
