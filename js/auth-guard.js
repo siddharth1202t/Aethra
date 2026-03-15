@@ -1,76 +1,142 @@
-import { getAuth, onAuthStateChanged, reload } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-import { doc, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+import {
+  getAuth,
+  onAuthStateChanged,
+  reload
+} from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+import {
+  doc,
+  getDoc
+} from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 import { app, db } from "./firestore-config.js";
 
 const auth = getAuth(app);
 
 function goTo(page) {
-  window.location.replace(page);
+  const currentPath = window.location.pathname || "";
+  if (!currentPath.endsWith(`/${page}`) && !currentPath.endsWith(page)) {
+    window.location.replace(page);
+  }
+}
+
+function getCurrentPath() {
+  return window.location.pathname || "";
 }
 
 function isVerifyEmailPage() {
-  const path = window.location.pathname;
+  const path = getCurrentPath();
   return path.endsWith("/verify-email.html") || path.endsWith("verify-email.html");
 }
 
+function isLoginPage() {
+  const path = getCurrentPath();
+  return path.endsWith("/login.html") || path.endsWith("login.html");
+}
+
 export function requireAuth(callback) {
-  onAuthStateChanged(auth, async (user) => {
+  let handled = false;
+
+  return onAuthStateChanged(auth, async (user) => {
+    if (handled) return;
+
     if (!user) {
-      goTo("login.html");
+      handled = true;
+      if (!isLoginPage()) {
+        goTo("login.html");
+      }
       return;
     }
 
     try {
       await reload(user);
 
-      if (!auth.currentUser?.emailVerified) {
+      const currentUser = auth.currentUser;
+
+      if (!currentUser) {
+        handled = true;
+        goTo("login.html");
+        return;
+      }
+
+      if (!currentUser.emailVerified) {
+        handled = true;
         if (!isVerifyEmailPage()) {
           goTo("verify-email.html");
         }
         return;
       }
 
-      if (callback) callback(auth.currentUser);
+      handled = true;
+
+      if (typeof callback === "function") {
+        callback(currentUser);
+      }
     } catch (error) {
       console.error("Auth guard failed:", error);
+      handled = true;
       goTo("login.html");
     }
   });
 }
 
 export function requireDeveloper(callback) {
-  onAuthStateChanged(auth, async (user) => {
+  let handled = false;
+
+  return onAuthStateChanged(auth, async (user) => {
+    if (handled) return;
+
     if (!user) {
-      goTo("login.html");
+      handled = true;
+      if (!isLoginPage()) {
+        goTo("login.html");
+      }
       return;
     }
 
     try {
       await reload(user);
 
-      if (!auth.currentUser?.emailVerified) {
-        goTo("verify-email.html");
+      const currentUser = auth.currentUser;
+
+      if (!currentUser) {
+        handled = true;
+        goTo("login.html");
         return;
       }
 
-      const userRef = doc(db, "users", user.uid);
+      if (!currentUser.emailVerified) {
+        handled = true;
+        if (!isVerifyEmailPage()) {
+          goTo("verify-email.html");
+        }
+        return;
+      }
+
+      const userRef = doc(db, "users", currentUser.uid);
       const userSnap = await getDoc(userRef);
 
       if (!userSnap.exists()) {
+        handled = true;
         goTo("home.html");
         return;
       }
 
-      const userData = userSnap.data();
+      const userData = userSnap.data() || {};
+      const role = String(userData.role || "").toLowerCase();
 
-      if (userData.role !== "developer") {
+      if (role !== "developer") {
+        handled = true;
         goTo("home.html");
         return;
       }
 
-      if (callback) callback(auth.currentUser);
+      handled = true;
+
+      if (typeof callback === "function") {
+        callback(currentUser);
+      }
     } catch (error) {
       console.error("Developer guard failed:", error);
+      handled = true;
       goTo("home.html");
     }
   });
