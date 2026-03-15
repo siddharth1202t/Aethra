@@ -1,5 +1,6 @@
 import { writeSecurityLog } from "./_security-log.js";
 import { checkApiRateLimit } from "./_rate-limit.js";
+import { trackApiAbuse } from "./_api-abuse-protection.js";
 
 const ROUTE = "/api/security-log";
 
@@ -8,21 +9,8 @@ const ALLOWED_ORIGINS = new Set([
   "https://aethra-hb2h.vercel.app"
 ]);
 
-const ALLOWED_TYPES = new Set([
-  "unknown",
+const ALLOWED_CLIENT_TYPES = new Set([
   "captcha_missing",
-  "login_success",
-  "login_failed",
-  "google_login_success",
-  "google_login_failed",
-  "google_login_redirect_started",
-  "signup_success",
-  "signup_failed",
-  "google_signup_success",
-  "google_signup_failed",
-  "google_signup_redirect_started",
-  "password_reset_requested",
-  "password_reset_failed",
   "client_security_event",
   "page_error",
   "suspicious_client_behavior"
@@ -31,9 +19,11 @@ const ALLOWED_TYPES = new Set([
 const ALLOWED_LEVELS = new Set([
   "info",
   "warning",
-  "error",
-  "critical"
+  "error"
 ]);
+
+const MAX_BODY_KEYS = 12;
+const MAX_EVENT_AGE_MS = 2 * 60 * 1000;
 
 function safeString(value, maxLength = 300) {
   return String(value || "").slice(0, maxLength);
@@ -42,6 +32,10 @@ function safeString(value, maxLength = 300) {
 function safeNumber(value, fallback = 0) {
   const num = Number(value);
   return Number.isFinite(num) ? num : fallback;
+}
+
+function safeBoolean(value) {
+  return Boolean(value);
 }
 
 function getClientIp(req) {
@@ -59,25 +53,27 @@ function getClientIp(req) {
     return realIp.trim();
   }
 
-  return req.socket?.remoteAddress || "unknown";
+  return safeString(req.socket?.remoteAddress || "unknown", 100);
 }
 
 function isAllowedOrigin(origin) {
   return ALLOWED_ORIGINS.has(origin);
 }
 
-function safeType(type) {
-  const normalized = safeString(type || "unknown", 50);
-  return ALLOWED_TYPES.has(normalized) ? normalized : "client_security_event";
+function isPlainObject(value) {
+  return Object.prototype.toString.call(value) === "[object Object]";
+}
+
+function safeClientType(type) {
+  const normalized = safeString(type || "client_security_event", 50).toLowerCase();
+  return ALLOWED_CLIENT_TYPES.has(normalized)
+    ? normalized
+    : "client_security_event";
 }
 
 function safeLevel(level) {
   const normalized = safeString(level || "warning", 20).toLowerCase();
   return ALLOWED_LEVELS.has(normalized) ? normalized : "warning";
-}
-
-function isPlainObject(value) {
-  return Object.prototype.toString.call(value) === "[object Object]";
 }
 
 function sanitizeMetadata(value, depth = 0) {
@@ -107,7 +103,7 @@ function sanitizeMetadata(value, depth = 0) {
 
   if (isPlainObject(value)) {
     const output = {};
-    const entries = Object.entries(value).slice(0, 25);
+    const entries = Object.entries(value).slice(0, 20);
 
     for (const [key, val] of entries) {
       output[safeString(key, 100)] = sanitizeMetadata(val, depth + 1);
@@ -131,7 +127,61 @@ function sanitizeClient(client = {}) {
   };
 }
 
+function sanitizeBody(body) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return {};
+  }
+
+  const entries = Object.entries(body).slice(0, MAX_BODY_KEYS);
+  const output = {};
+
+  for (const [key, value] of entries) {
+    output[safeString(key, 50)] = value;
+  }
+
+  return output;
+}
+
+function getEventFreshness(eventAt) {
+  const now = Date.now();
+  const safeEventAt = safeNumber(eventAt, 0);
+
+  if (!safeEventAt) {
+    return {
+      valid: false,
+      ageMs: null,
+      reason: "missing_event_timestamp"
+    };
+  }
+
+  const ageMs = now - safeEventAt;
+
+  if (ageMs < -15_000) {
+    return {
+      valid: false,
+      ageMs,
+      reason: "future_event_timestamp"
+    };
+  }
+
+  if (ageMs > MAX_EVENT_AGE_MS) {
+    return {
+      valid: false,
+      ageMs,
+      reason: "stale_event_timestamp"
+    };
+  }
+
+  return {
+    valid: true,
+    ageMs,
+    reason: null
+  };
+}
+
 export default async function handler(req, res) {
+  const ip = getClientIp(req);
+
   if (req.method !== "POST") {
     return res.status(405).json({
       success: false,
@@ -141,8 +191,8 @@ export default async function handler(req, res) {
 
   try {
     const origin = safeString(req.headers.origin || "", 200);
-    const ip = getClientIp(req);
-    const body = req.body && typeof req.body === "object" ? req.body : {};
+    const requestUserAgent = safeString(req.headers["user-agent"] || "", 500);
+    const body = sanitizeBody(req.body);
 
     if (!isAllowedOrigin(origin)) {
       await writeSecurityLog({
@@ -152,7 +202,10 @@ export default async function handler(req, res) {
         ip,
         route: ROUTE,
         metadata: {
-          origin
+          source: "server_enforced",
+          blockedReason: "forbidden_origin",
+          requestOrigin: origin,
+          requestUserAgent
         }
       });
 
@@ -164,36 +217,112 @@ export default async function handler(req, res) {
 
     const rateLimitResult = checkApiRateLimit({
       key: `security-log:${ip}`,
-      limit: 30,
-      windowMs: 5 * 60 * 1000
+      limit: 20,
+      windowMs: 5 * 60 * 1000,
+      route: ROUTE
     });
 
     if (!rateLimitResult.allowed) {
+      await writeSecurityLog({
+        type: "client_security_event",
+        level: "warning",
+        message: "Security log endpoint rate limited",
+        ip,
+        route: ROUTE,
+        metadata: {
+          source: "server_enforced",
+          action: rateLimitResult.recommendedAction,
+          remainingMs: rateLimitResult.remainingMs || 0,
+          violations: rateLimitResult.violations || 0
+        }
+      });
+
       return res.status(429).json({
         success: false,
         message: "Too many requests.",
+        action: rateLimitResult.recommendedAction,
         remainingMs: rateLimitResult.remainingMs || 0
       });
     }
 
-    const type = safeType(body.type);
+    const abuseResult = trackApiAbuse({
+      ip,
+      sessionId: safeString(body.sessionId || "", 120),
+      route: ROUTE,
+      success: true
+    });
+
+    if (
+      abuseResult.recommendedAction === "block" ||
+      abuseResult.recommendedAction === "challenge"
+    ) {
+      await writeSecurityLog({
+        type: "client_security_event",
+        level: "warning",
+        message: "Blocked suspicious client telemetry request",
+        ip,
+        route: ROUTE,
+        metadata: {
+          source: "server_enforced",
+          abuseScore: abuseResult.abuseScore,
+          abuseLevel: abuseResult.level,
+          reasons: abuseResult.reasons
+        }
+      });
+
+      return res.status(403).json({
+        success: false,
+        message: "Suspicious request blocked."
+      });
+    }
+
+    const type = safeClientType(body.type);
     const level = safeLevel(body.level);
     const message = safeString(body.message || "", 500);
     const email = safeString(body.email || "", 200);
     const userId = safeString(body.userId || "", 128);
     const metadata = sanitizeMetadata(body.metadata || {});
     const client = sanitizeClient(body.client || {});
+    const eventFreshness = getEventFreshness(body.eventAt);
+
+    if (!eventFreshness.valid) {
+      await writeSecurityLog({
+        type: "client_security_event",
+        level: "warning",
+        message: "Rejected stale or invalid client telemetry timestamp",
+        ip,
+        route: ROUTE,
+        metadata: {
+          source: "server_enforced",
+          freshnessReason: eventFreshness.reason,
+          ageMs: eventFreshness.ageMs,
+          requestUserAgent
+        }
+      });
+
+      return res.status(400).json({
+        success: false,
+        message: "Invalid event timestamp."
+      });
+    }
 
     await writeSecurityLog({
       type,
       level,
-      message,
+      message: message || "Client security telemetry received",
       email,
       userId,
       ip,
       route: ROUTE,
       metadata: {
-        ...metadata,
+        source: "client_untrusted",
+        eventAt: safeNumber(body.eventAt, 0),
+        receivedAt: Date.now(),
+        ageMs: eventFreshness.ageMs,
+        requestOrigin: origin,
+        requestUserAgent,
+        sessionIdPresent: safeBoolean(body.sessionId),
+        metadata,
         client
       }
     });
@@ -209,9 +338,10 @@ export default async function handler(req, res) {
         type: "client_security_event",
         level: "error",
         message: "Unhandled server error in security-log API",
-        ip: getClientIp(req),
+        ip,
         route: ROUTE,
         metadata: {
+          source: "server_enforced",
           error: safeString(error?.message || "Unknown error", 500)
         }
       });
