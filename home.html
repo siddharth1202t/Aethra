@@ -554,105 +554,90 @@
     </section>
   </div>
 
-  <script type="module">
-    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-    import { getAuth, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-    import { doc, getDoc, getFirestore } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-    import { SECURITY_CONFIG } from "./js/security-config.js";
-    import { ensureUserProfile } from "./js/user-profile.js";
-    import { requireAuth } from "./js/auth-guard.js";
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+  import { getAuth, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+  import { doc, getDoc, getFirestore } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+  import { ensureUserProfile } from "./js/user-profile.js";
+  import { requireAuth } from "./js/auth-guard.js";
 
-    const firebaseConfig = {
-      apiKey: "AIzaSyCbfEQyTwry7qNOluYqlHUZuU8AF3bkpgQ",
-      authDomain: "aethra-web.firebaseapp.com",
-      projectId: "aethra-web",
-      storageBucket: "aethra-web.firebasestorage.app",
-      messagingSenderId: "280560043528",
-      appId: "1:280560043528:web:a6c2e485c8da32c9dab3bd"
-    };
+  const firebaseConfig = {
+    apiKey: "AIzaSyCbfEQyTwry7qNOluU8AF3bkpgQ",
+    authDomain: "aethra-web.firebaseapp.com",
+    projectId: "aethra-web",
+    storageBucket: "aethra-web.firebasestorage.app",
+    messagingSenderId: "280560043528",
+    appId: "1:280560043528:web:a6c2e485c8da32c9dab3bd"
+  };
 
-    const app = initializeApp(firebaseConfig);
-    const auth = getAuth(app);
-    const db = getFirestore(app);
+  const app = initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  const db = getFirestore(app);
 
-    const userRoleEl = document.getElementById("userRole");
-    const heroUsernameEl = document.getElementById("heroUsername");
-    const logoutBtn = document.getElementById("logoutBtn");
-    const devBtn = document.getElementById("devBtn");
+  const userRoleEl = document.getElementById("userRole");
+  const heroUsernameEl = document.getElementById("heroUsername");
+  const logoutBtn = document.getElementById("logoutBtn");
+  const devBtn = document.getElementById("devBtn");
 
-    requireAuth((user) => {
-      console.log("User logged in:", user.email);
-    });
+  requireAuth(async (user) => {
+    try {
+      await ensureUserProfile(user);
 
-    onAuthStateChanged(auth, async (user) => {
-      if (!user) {
-        window.location.href = "login.html";
-        return;
-      }
+      const displayName =
+        user.displayName ||
+        (user.email ? user.email.split("@")[0] : "Explorer");
 
-      try {
-        await ensureUserProfile(user);
-
-        const displayName =
-          user.displayName ||
-          (user.email ? user.email.split("@")[0] : "Explorer");
-
-        heroUsernameEl.textContent = displayName;
-
-        const currentEmail = (user.email || "").trim().toLowerCase();
-        const developerEmail = (SECURITY_CONFIG.developerEmail || "").trim().toLowerCase();
+      heroUsernameEl.textContent = displayName;
 
       let isDeveloper = false;
 
-        if (currentEmail === developerEmail) {
-          const userRef = doc(db, "users", user.uid);
-          const userSnap = await getDoc(userRef);
+      const userRef = doc(db, "users", user.uid);
+      const userSnap = await getDoc(userRef);
 
-          if (userSnap.exists()) {
-            const userData = userSnap.data();
-            if (userData.role === "developer") {
-              isDeveloper = true;
-            }
-          }
+      if (userSnap.exists()) {
+        const userData = userSnap.data();
+        if (userData.role === "developer") {
+          isDeveloper = true;
         }
+      }
 
-        if (isDeveloper) {
-          userRoleEl.textContent = "Developer";
-          devBtn.style.display = "block";
-        } else {
-          userRoleEl.textContent = "User";
-          devBtn.style.display = "none";
-        }
-      } catch (error) {
-        console.error("Home auth setup failed:", error);
+      if (isDeveloper) {
+        userRoleEl.textContent = "Developer";
+        devBtn.style.display = "block";
+      } else {
         userRoleEl.textContent = "User";
         devBtn.style.display = "none";
       }
-    });
-
-    devBtn.addEventListener("click", () => {
-      window.location.href = "developer.html";
-    });
-
-    logoutBtn.addEventListener("click", async () => {
-      await signOut(auth);
-      window.location.href = "login.html";
-    });
-
-    const starsContainer = document.getElementById("stars");
-
-    for (let i = 0; i < 90; i++) {
-      const star = document.createElement("div");
-      star.classList.add("star");
-      const size = Math.random() * 2.2 + 1;
-      star.style.width = size + "px";
-      star.style.height = size + "px";
-      star.style.left = Math.random() * 100 + "vw";
-      star.style.top = Math.random() * 100 + "vh";
-      star.style.animationDuration = (Math.random() * 4 + 2) + "s";
-      star.style.animationDelay = Math.random() * 4 + "s";
-      starsContainer.appendChild(star);
+    } catch (error) {
+      console.error("Home auth setup failed:", error);
+      userRoleEl.textContent = "User";
+      devBtn.style.display = "none";
     }
+  });
+
+  devBtn.addEventListener("click", () => {
+    window.location.href = "developer.html";
+  });
+
+  logoutBtn.addEventListener("click", async () => {
+    await signOut(auth);
+    window.location.href = "login.html";
+  });
+
+  const starsContainer = document.getElementById("stars");
+
+  for (let i = 0; i < 90; i++) {
+    const star = document.createElement("div");
+    star.classList.add("star");
+    const size = Math.random() * 2.2 + 1;
+    star.style.width = size + "px";
+    star.style.height = size + "px";
+    star.style.left = Math.random() * 100 + "vw";
+    star.style.top = Math.random() * 100 + "vh";
+    star.style.animationDuration = (Math.random() * 4 + 2) + "s";
+    star.style.animationDelay = Math.random() * 4 + "s";
+    starsContainer.appendChild(star);
+  }
 </script>
 </body>
 </html>
