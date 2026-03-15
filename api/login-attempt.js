@@ -57,12 +57,6 @@ function isAllowedOrigin(origin) {
   return allowedOrigins.includes(origin);
 }
 
-function isTrustedSuccessReset(req) {
-  const incomingSecret = req.headers["x-login-reset-secret"];
-  const expectedSecret = process.env.LOGIN_RESET_SECRET;
-  return Boolean(expectedSecret && incomingSecret && incomingSecret === expectedSecret);
-}
-
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ success: false, message: "Method not allowed" });
@@ -124,7 +118,7 @@ export default async function handler(req, res) {
       });
     }
 
-    if (!action || !["check", "fail", "success"].includes(action)) {
+    if (!action || !["check", "fail"].includes(action)) {
       await writeSecurityLog({
         type: "invalid_login_attempt_action",
         level: "warning",
@@ -199,42 +193,6 @@ export default async function handler(req, res) {
         isLocked,
         remainingMs,
         attempts: record.count
-      });
-    }
-
-    if (action === "success") {
-      if (!isTrustedSuccessReset(req)) {
-        await writeSecurityLog({
-          type: "unauthorized_login_success_reset",
-          level: "critical",
-          message: "Blocked unauthorized login success reset attempt",
-          email: normalizedEmail,
-          ip,
-          route: "/api/login-attempt",
-          metadata: {}
-        });
-
-        return res.status(403).json({
-          success: false,
-          message: "Unauthorized reset attempt"
-        });
-      }
-
-      loginAttemptStore.delete(key);
-
-      await writeSecurityLog({
-        type: "login_attempt_reset",
-        level: "info",
-        message: "Login attempt counter reset after trusted success flow",
-        email: normalizedEmail,
-        ip,
-        route: "/api/login-attempt",
-        metadata: {}
-      });
-
-      return res.status(200).json({
-        success: true,
-        reset: true
       });
     }
 
