@@ -20,6 +20,9 @@ const ALLOWED_ORIGINS = new Set([
   "https://aethra-hb2h.vercel.app"
 ]);
 
+const ALLOWED_ACTIONS = new Set(["check", "fail"]);
+const GOOGLE_PLACEHOLDER_EMAIL = "google-signup";
+
 function normalizeEmail(email) {
   return String(email || "").trim().toLowerCase();
 }
@@ -67,7 +70,7 @@ function getClientIp(req) {
     return realIp.trim();
   }
 
-  return req.socket?.remoteAddress || "unknown";
+  return safeString(req.socket?.remoteAddress || "unknown", 100);
 }
 
 function getKey(email, ip) {
@@ -98,21 +101,24 @@ function getRecord(store, key) {
     return {
       count: 0,
       lockUntil: 0,
-      lastAttempt: now
+      lastAttempt: now,
+      escalationCount: 0
     };
   }
 
   const normalized = {
     count: safePositiveInt(record.count, 0),
     lockUntil: safePositiveInt(record.lockUntil, 0),
-    lastAttempt: safePositiveInt(record.lastAttempt, now)
+    lastAttempt: safePositiveInt(record.lastAttempt, now),
+    escalationCount: safePositiveInt(record.escalationCount, 0)
   };
 
   if (normalized.lockUntil && now > normalized.lockUntil) {
     return {
       count: 0,
       lockUntil: 0,
-      lastAttempt: now
+      lastAttempt: now,
+      escalationCount: normalized.escalationCount
     };
   }
 
@@ -123,7 +129,8 @@ function saveRecord(store, key, record) {
   store.set(key, {
     count: safePositiveInt(record.count, 0),
     lockUntil: safePositiveInt(record.lockUntil, 0),
-    lastAttempt: safePositiveInt(record.lastAttempt, Date.now())
+    lastAttempt: safePositiveInt(record.lastAttempt, Date.now()),
+    escalationCount: safePositiveInt(record.escalationCount, 0)
   });
 }
 
@@ -132,21 +139,28 @@ function isAllowedOrigin(origin) {
 }
 
 function isGooglePlaceholderEmail(email) {
-  return email === "google-signup";
+  return email === GOOGLE_PLACEHOLDER_EMAIL;
 }
 
-function buildRiskPayload(botAnalysis, abuseAnalysis, combinedRisk) {
+function buildRiskPayload(botAnalysis, abuseAnalysis, combinedRisk, finalAction) {
   return {
     botLevel: botAnalysis.level,
     abuseLevel: abuseAnalysis.level,
-    combinedRisk
+    botRecommendedAction: botAnalysis.recommendedAction,
+    abuseRecommendedAction: abuseAnalysis.recommendedAction,
+    combinedRisk,
+    finalAction
   };
 }
 
-function buildSuspiciousResponse(message = "Suspicious activity detected. Please try again later.") {
+function buildSuspiciousResponse(
+  message = "Suspicious activity detected. Please try again later.",
+  extra = {}
+) {
   return {
     success: false,
-    message
+    message,
+    ...extra
   };
 }
 
@@ -157,6 +171,64 @@ function buildLockResponse(isLocked, remainingMs = 0, extra = {}) {
     remainingMs: isLocked ? Math.max(0, safePositiveInt(remainingMs, 0)) : 0,
     ...extra
   };
+}
+
+function getCombinedRisk(botAnalysis, abuseAnalysis) {
+  let score = 0;
+
+  score += safePositiveInt(botAnalysis.riskScore, 0);
+  score += safePositiveInt(abuseAnalysis.abuseScore, 0);
+
+  if (botAnalysis.recommendedAction === "block") {
+    score += 25;
+  } else if (botAnalysis.recommendedAction === "challenge") {
+    score += 15;
+  }
+
+  if (abuseAnalysis.recommendedAction === "block") {
+    score += 25;
+  } else if (abuseAnalysis.recommendedAction === "challenge") {
+    score += 15;
+  }
+
+  if (safePositiveInt(abuseAnalysis.snapshot?.suspiciousEvents, 0) >= 3) {
+    score += 10;
+  }
+
+  return Math.min(100, score);
+}
+
+function getFinalSecurityAction({ botAnalysis, abuseAnalysis, combinedRisk }) {
+  if (
+    botAnalysis.recommendedAction === "block" ||
+    abuseAnalysis.recommendedAction === "block" ||
+    combinedRisk >= 90
+  ) {
+    return "block";
+  }
+
+  if (
+    botAnalysis.recommendedAction === "challenge" ||
+    abuseAnalysis.recommendedAction === "challenge" ||
+    combinedRisk >= 60
+  ) {
+    return "challenge";
+  }
+
+  if (
+    botAnalysis.recommendedAction === "throttle" ||
+    abuseAnalysis.recommendedAction === "throttle" ||
+    combinedRisk >= 40
+  ) {
+    return "throttle";
+  }
+
+  return "allow";
+}
+
+function getEscalatedLockMs(baseMs, escalationCount) {
+  const multiplier = Math.min(4, 1 + safePositiveInt(escalationCount, 0) * 0.5);
+  return Math.floor(baseMs * multiplier);
 }
 
 export default async function handler(req, res) {
@@ -175,7 +247,7 @@ export default async function handler(req, res) {
     const body = req.body && typeof req.body === "object" ? req.body : {};
 
     const rawEmail = normalizeEmail(body.email);
-    const action = safeString(body.action, 50);
+    const action = safeString(body.action, 50).toLowerCase();
     const actionLabel = safeString(body.actionLabel, 100);
     const behavior = body.behavior && typeof body.behavior === "object" ? body.behavior : {};
     const sessionId = safeString(behavior.sessionId || body.sessionId || "", 120);
@@ -187,7 +259,10 @@ export default async function handler(req, res) {
         message: "Blocked request from forbidden origin on signup-attempt API",
         ip,
         route: ROUTE,
-        metadata: { origin }
+        metadata: {
+          origin,
+          source: "server_enforced"
+        }
       });
 
       return res.status(403).json({
@@ -199,7 +274,8 @@ export default async function handler(req, res) {
     const rateLimitResult = checkApiRateLimit({
       key: `signup-attempt:${ip}`,
       limit: 35,
-      windowMs: 10 * 60 * 1000
+      windowMs: 10 * 60 * 1000,
+      route: ROUTE
     });
 
     if (!rateLimitResult.allowed) {
@@ -210,18 +286,22 @@ export default async function handler(req, res) {
         ip,
         route: ROUTE,
         metadata: {
-          remainingMs: rateLimitResult.remainingMs
+          source: "server_enforced",
+          action: rateLimitResult.recommendedAction,
+          remainingMs: rateLimitResult.remainingMs,
+          violations: rateLimitResult.violations || 0
         }
       });
 
       return res.status(429).json({
         success: false,
         message: "Too many requests. Please try again later.",
+        action: rateLimitResult.recommendedAction,
         remainingMs: rateLimitResult.remainingMs || 0
       });
     }
 
-    if (!["check", "fail"].includes(action)) {
+    if (!ALLOWED_ACTIONS.has(action)) {
       await writeSecurityLog({
         type: "invalid_signup_action",
         level: "warning",
@@ -229,7 +309,10 @@ export default async function handler(req, res) {
         email: rawEmail,
         ip,
         route: ROUTE,
-        metadata: { action }
+        metadata: {
+          action,
+          source: "server_enforced"
+        }
       });
 
       return res.status(400).json({
@@ -247,7 +330,10 @@ export default async function handler(req, res) {
         message: "Invalid email sent to signup-attempt API",
         email: rawEmail,
         ip,
-        route: ROUTE
+        route: ROUTE,
+        metadata: {
+          source: "server_enforced"
+        }
       });
 
       return res.status(400).json({
@@ -258,7 +344,11 @@ export default async function handler(req, res) {
 
     const now = Date.now();
 
-    const botAnalysis = analyzeBotBehavior(behavior, req);
+    const botAnalysis = analyzeBotBehavior(
+      { ...behavior, route: ROUTE },
+      req
+    );
+
     const abuseAnalysis = trackApiAbuse({
       ip,
       sessionId,
@@ -266,14 +356,14 @@ export default async function handler(req, res) {
       success: action !== "fail"
     });
 
-    const combinedRisk =
-      safePositiveInt(botAnalysis.riskScore, 0) + safePositiveInt(abuseAnalysis.abuseScore, 0);
+    const combinedRisk = getCombinedRisk(botAnalysis, abuseAnalysis);
+    const finalAction = getFinalSecurityAction({
+      botAnalysis,
+      abuseAnalysis,
+      combinedRisk
+    });
 
-    if (
-      botAnalysis.level === "high" ||
-      abuseAnalysis.level === "high" ||
-      combinedRisk >= 90
-    ) {
+    if (finalAction === "block") {
       await writeSecurityLog({
         type: "blocked_suspicious_signup_request",
         level: "critical",
@@ -282,23 +372,24 @@ export default async function handler(req, res) {
         ip,
         route: ROUTE,
         metadata: safeMetadata({
+          source: "server_enforced",
           action,
           actionLabel,
           botAnalysis,
-          abuseAnalysis
+          abuseAnalysis,
+          combinedRisk,
+          finalAction
         })
       });
 
       return res.status(429).json(
-        buildSuspiciousResponse("Suspicious activity detected. Please try again later.")
+        buildSuspiciousResponse("Suspicious activity detected. Please try again later.", {
+          action: finalAction
+        })
       );
     }
 
-    if (
-      botAnalysis.level === "medium" ||
-      abuseAnalysis.level === "medium" ||
-      combinedRisk >= 45
-    ) {
+    if (finalAction === "challenge" || finalAction === "throttle") {
       await writeSecurityLog({
         type: "temporary_signup_security_challenge",
         level: "warning",
@@ -307,10 +398,13 @@ export default async function handler(req, res) {
         ip,
         route: ROUTE,
         metadata: safeMetadata({
+          source: "server_enforced",
           action,
           actionLabel,
           botAnalysis,
-          abuseAnalysis
+          abuseAnalysis,
+          combinedRisk,
+          finalAction
         })
       });
     }
@@ -319,7 +413,9 @@ export default async function handler(req, res) {
 
     if (ipRecord.lockUntil > now) {
       return res.status(200).json(
-        buildLockResponse(true, ipRecord.lockUntil - now)
+        buildLockResponse(true, ipRecord.lockUntil - now, {
+          risk: buildRiskPayload(botAnalysis, abuseAnalysis, combinedRisk, finalAction)
+        })
       );
     }
 
@@ -330,13 +426,9 @@ export default async function handler(req, res) {
       const isLocked = record.lockUntil > now;
 
       return res.status(200).json(
-        buildLockResponse(
-          isLocked,
-          record.lockUntil - now,
-          {
-            risk: buildRiskPayload(botAnalysis, abuseAnalysis, combinedRisk)
-          }
-        )
+        buildLockResponse(isLocked, record.lockUntil - now, {
+          risk: buildRiskPayload(botAnalysis, abuseAnalysis, combinedRisk, finalAction)
+        })
       );
     }
 
@@ -347,8 +439,14 @@ export default async function handler(req, res) {
       ipRecord.count += 1;
       ipRecord.lastAttempt = now;
 
+      if (finalAction === "challenge" || finalAction === "throttle") {
+        record.escalationCount += 1;
+        ipRecord.escalationCount += 1;
+      }
+
       if (record.count >= MAX_ATTEMPTS) {
-        record.lockUntil = now + LOCK_WINDOW_MS;
+        record.escalationCount += 1;
+        record.lockUntil = now + getEscalatedLockMs(LOCK_WINDOW_MS, record.escalationCount);
 
         await writeSecurityLog({
           type: "signup_lockout",
@@ -358,16 +456,21 @@ export default async function handler(req, res) {
           ip,
           route: ROUTE,
           metadata: safeMetadata({
+            source: "server_enforced",
             attempts: record.count,
+            escalationCount: record.escalationCount,
             actionLabel,
             botAnalysis,
-            abuseAnalysis
+            abuseAnalysis,
+            combinedRisk,
+            finalAction
           })
         });
       }
 
       if (ipRecord.count >= MAX_IP_ATTEMPTS) {
-        ipRecord.lockUntil = now + IP_LOCK_WINDOW_MS;
+        ipRecord.escalationCount += 1;
+        ipRecord.lockUntil = now + getEscalatedLockMs(IP_LOCK_WINDOW_MS, ipRecord.escalationCount);
 
         await writeSecurityLog({
           type: "ip_signup_lock",
@@ -376,8 +479,12 @@ export default async function handler(req, res) {
           ip,
           route: ROUTE,
           metadata: safeMetadata({
+            source: "server_enforced",
             attempts: ipRecord.count,
-            actionLabel
+            escalationCount: ipRecord.escalationCount,
+            actionLabel,
+            combinedRisk,
+            finalAction
           })
         });
       }
@@ -388,14 +495,10 @@ export default async function handler(req, res) {
       const isLocked = record.lockUntil > now;
 
       return res.status(200).json(
-        buildLockResponse(
-          isLocked,
-          record.lockUntil - now,
-          {
-            attempts: record.count,
-            risk: buildRiskPayload(botAnalysis, abuseAnalysis, combinedRisk)
-          }
-        )
+        buildLockResponse(isLocked, record.lockUntil - now, {
+          attempts: record.count,
+          risk: buildRiskPayload(botAnalysis, abuseAnalysis, combinedRisk, finalAction)
+        })
       );
     }
 
@@ -413,6 +516,7 @@ export default async function handler(req, res) {
         message: "Unhandled server error in signup-attempt API",
         route: ROUTE,
         metadata: {
+          source: "server_enforced",
           error: safeString(error?.message || "Unknown error", 500)
         }
       });
