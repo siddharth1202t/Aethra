@@ -37,6 +37,7 @@
     .wrap {
       max-width: 1280px;
       margin: 0 auto;
+      visibility: hidden;
     }
 
     .topbar {
@@ -77,6 +78,17 @@
       cursor: pointer;
       background: linear-gradient(135deg, #7b61ff, #9a7cff);
       box-shadow: 0 10px 30px rgba(123, 97, 255, 0.35);
+      transition: 0.25s ease;
+    }
+
+    .btn:hover {
+      transform: translateY(-2px);
+    }
+
+    .btn:disabled {
+      opacity: 0.7;
+      cursor: not-allowed;
+      transform: none;
     }
 
     .btn.secondary {
@@ -139,8 +151,8 @@
       </div>
 
       <div class="actions">
-        <button class="btn secondary" id="backHomeBtn">Back to Home</button>
-        <button class="btn" id="logoutBtn">Logout</button>
+        <button class="btn secondary" id="backHomeBtn" type="button">Back to Home</button>
+        <button class="btn" id="logoutBtn" type="button">Logout</button>
       </div>
     </header>
 
@@ -186,6 +198,7 @@
 
     const auth = getAuth(app);
 
+    const wrap = document.querySelector(".wrap");
     const logoutBtn = document.getElementById("logoutBtn");
     const backHomeBtn = document.getElementById("backHomeBtn");
 
@@ -193,15 +206,24 @@
       window.location.replace(page);
     }
 
-    requireDeveloper((user) => {
+    function setPageVisible() {
+      if (wrap) {
+        wrap.style.visibility = "visible";
+      }
+    }
+
+    requireDeveloper(() => {
+      setPageVisible();
     });
 
-    backHomeBtn.addEventListener("click", () => {
+    backHomeBtn?.addEventListener("click", () => {
       goTo("home.html");
     });
 
-    logoutBtn.addEventListener("click", async () => {
+    logoutBtn?.addEventListener("click", async () => {
       try {
+        logoutBtn.disabled = true;
+        logoutBtn.textContent = "Logging out...";
         await signOut(auth);
       } catch (error) {
         console.error("Logout failed:", error);
