@@ -1,4 +1,4 @@
-import { doc, getDoc, serverTimestamp, setDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+import { doc, getDoc, serverTimestamp, setDoc, updateDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 import { db } from "./firestore-config.js";
 
 function sanitizeDisplayName(value) {
@@ -19,21 +19,48 @@ function sanitizePhotoURL(value) {
 }
 
 export async function ensureUserProfile(user) {
-  if (!user) return;
+  if (!user?.uid) return;
 
   const userRef = doc(db, "users", user.uid);
   const userSnap = await getDoc(userRef);
 
+  const safeDisplayName = sanitizeDisplayName(user.displayName) || "Explorer";
+  const safeEmail = normalizeEmail(user.email);
+  const safePhotoURL = sanitizePhotoURL(user.photoURL);
+  const emailVerified = Boolean(user.emailVerified);
+
   if (!userSnap.exists()) {
     await setDoc(userRef, {
       uid: user.uid,
-      displayName: sanitizeDisplayName(user.displayName) || "Explorer",
-      email: normalizeEmail(user.email),
-      photoURL: sanitizePhotoURL(user.photoURL),
+      displayName: safeDisplayName,
+      email: safeEmail,
+      photoURL: safePhotoURL,
       role: "user",
       isProfileComplete: false,
+      emailVerified,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp()
     });
+    return;
+  }
+
+  const existingData = userSnap.data() || {};
+  const updates = {};
+
+  if (existingData.displayName !== safeDisplayName) {
+    updates.displayName = safeDisplayName;
+  }
+
+  if ((existingData.photoURL || "") !== safePhotoURL) {
+    updates.photoURL = safePhotoURL;
+  }
+
+  if (existingData.emailVerified !== emailVerified) {
+    updates.emailVerified = emailVerified;
+  }
+
+  if (Object.keys(updates).length > 0) {
+    updates.updatedAt = serverTimestamp();
+    await updateDoc(userRef, updates);
   }
 }
