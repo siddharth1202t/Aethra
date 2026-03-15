@@ -7,7 +7,7 @@ import {
   signInWithRedirect,
   getRedirectResult,
   sendPasswordResetEmail,
-  sendEmailVerification
+  reload
 } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
 import { ensureUserProfile } from "./user-profile.js";
 
@@ -39,6 +39,10 @@ const formError = document.getElementById("formError");
 
 let widgetId = null;
 let isSubmitting = false;
+
+function goTo(page) {
+  window.location.replace(page);
+}
 
 function waitForTurnstile(timeout = 10000) {
   return new Promise((resolve, reject) => {
@@ -269,11 +273,11 @@ function getFriendlyAuthMessage(error) {
 }
 
 function redirectToHome() {
-  window.location.href = "home.html";
+  goTo("home.html");
 }
 
 function redirectToVerifyEmail() {
-  window.location.href = "verify-email.html";
+  goTo("verify-email.html");
 }
 
 async function handleRedirectResult() {
@@ -341,9 +345,9 @@ async function handleEmailLogin() {
     const user = userCredential.user;
 
     await ensureUserProfile(user);
+    await reload(user);
 
-    if (!user.emailVerified) {
-      await sendEmailVerification(user);
+    if (!auth.currentUser?.emailVerified) {
       redirectToVerifyEmail();
       return;
     }
