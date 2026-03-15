@@ -579,6 +579,10 @@
   const logoutBtn = document.getElementById("logoutBtn");
   const devBtn = document.getElementById("devBtn");
 
+  function goTo(page) {
+    window.location.replace(page);
+  }
+
   requireAuth(async (user) => {
     try {
       await ensureUserProfile(user);
@@ -613,12 +617,12 @@
   });
 
   devBtn.addEventListener("click", () => {
-    window.location.href = "developer.html";
+    goTo("developer.html");
   });
 
   logoutBtn.addEventListener("click", async () => {
     await signOut(auth);
-    window.location.replace("login.html");
+    goTo("login.html");
   });
 
   const starsContainer = document.getElementById("stars");
