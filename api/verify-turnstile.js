@@ -1,15 +1,25 @@
 import { writeSecurityLog } from "./_security-log.js";
 import { checkApiRateLimit } from "./_rate-limit.js";
 
-const rateLimitStore = new Map();
-const RATE_LIMIT_MAX = 10;
-const RATE_LIMIT_WINDOW_MS = 60 * 1000;
-const STALE_RATE_RECORD_TTL_MS = 24 * 60 * 60 * 1000;
+const ALLOWED_ORIGINS = new Set([
+  "https://aethra-gules.vercel.app",
+  "https://aethra-hb2h.vercel.app"
+]);
+
+const ALLOWED_HOSTNAMES = new Set([
+  "aethra-gules.vercel.app",
+  "aethra-hb2h.vercel.app"
+]);
+
+function safeString(value, maxLength = 300) {
+  return String(value || "").slice(0, maxLength);
+}
 
 function getClientIp(req) {
   const forwarded = req.headers["x-forwarded-for"];
   if (typeof forwarded === "string" && forwarded.length > 0) {
-    return forwarded.split(",")[0].trim();
+    const ip = forwarded.split(",")[0]?.trim();
+    if (ip) return ip;
   }
 
   const realIp = req.headers["x-real-ip"];
@@ -17,78 +27,30 @@ function getClientIp(req) {
     return realIp.trim();
   }
 
-  return "unknown";
+  return req.socket?.remoteAddress || "unknown";
 }
 
 function isAllowedOrigin(origin) {
-  const allowedOrigins = [
-    "https://aethra-gules.vercel.app",
-    "https://aethra-hb2h.vercel.app"
-  ];
-  return allowedOrigins.includes(origin);
-}
-
-function cleanupStaleRateRecords() {
-  const now = Date.now();
-
-  for (const [ip, record] of rateLimitStore.entries()) {
-    if (!record?.windowStart) continue;
-    if (now - record.windowStart > STALE_RATE_RECORD_TTL_MS) {
-      rateLimitStore.delete(ip);
-    }
-  }
-}
-
-function isRateLimited(ip, limit = RATE_LIMIT_MAX, windowMs = RATE_LIMIT_WINDOW_MS) {
-  const now = Date.now();
-  const record = rateLimitStore.get(ip);
-
-  if (!record) {
-    rateLimitStore.set(ip, {
-      count: 1,
-      windowStart: now
-    });
-    return false;
-  }
-
-  if (now - record.windowStart > windowMs) {
-    rateLimitStore.set(ip, {
-      count: 1,
-      windowStart: now
-    });
-    return false;
-  }
-
-  if (record.count >= limit) {
-    return true;
-  }
-
-  record.count += 1;
-  rateLimitStore.set(ip, record);
-  return false;
+  return ALLOWED_ORIGINS.has(origin);
 }
 
 function isExpectedHostname(hostname = "") {
-  const allowedHostnames = [
-    "aethra-gules.vercel.app",
-    "aethra-hb2h.vercel.app"
-  ];
-  return allowedHostnames.includes(hostname);
+  return ALLOWED_HOSTNAMES.has(hostname);
 }
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({
       success: false,
-      message: "Method not allowed"
+      message: "Method not allowed."
     });
   }
 
   try {
-    cleanupStaleRateRecords();
-
-    const origin = req.headers.origin || "";
+    const origin = safeString(req.headers.origin || "", 200);
     const ip = getClientIp(req);
+    const token = safeString(req.body?.token || "", 5000);
+    const secret = process.env.TURNSTILE_SECRET_KEY;
 
     if (!isAllowedOrigin(origin)) {
       await writeSecurityLog({
@@ -102,28 +64,34 @@ export default async function handler(req, res) {
 
       return res.status(403).json({
         success: false,
-        message: "Forbidden origin"
+        message: "Forbidden origin."
       });
     }
 
-    if (isRateLimited(ip, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS)) {
+    const rateLimitResult = checkApiRateLimit({
+      key: `verify-turnstile:${ip}`,
+      limit: 10,
+      windowMs: 60 * 1000
+    });
+
+    if (!rateLimitResult.allowed) {
       await writeSecurityLog({
         type: "turnstile_rate_limited",
         level: "warning",
         message: "Rate limit exceeded on verify-turnstile API",
         ip,
         route: "/api/verify-turnstile",
-        metadata: {}
+        metadata: {
+          remainingMs: rateLimitResult.remainingMs
+        }
       });
 
       return res.status(429).json({
         success: false,
-        message: "Too many requests. Please try again later."
+        message: "Too many requests. Please try again later.",
+        remainingMs: rateLimitResult.remainingMs || 0
       });
     }
-
-    const { token } = req.body || {};
-    const secret = process.env.TURNSTILE_SECRET_KEY;
 
     if (!token || !secret) {
       await writeSecurityLog({
@@ -140,7 +108,7 @@ export default async function handler(req, res) {
 
       return res.status(400).json({
         success: false,
-        message: "Missing token or secret"
+        message: "Missing token or secret."
       });
     }
 
@@ -159,7 +127,25 @@ export default async function handler(req, res) {
       }
     );
 
-    const data = await response.json();
+    const data = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      await writeSecurityLog({
+        type: "turnstile_upstream_error",
+        level: "error",
+        message: "Turnstile upstream verification request failed",
+        ip,
+        route: "/api/verify-turnstile",
+        metadata: {
+          status: response.status
+        }
+      });
+
+      return res.status(502).json({
+        success: false,
+        message: "Captcha verification service failed."
+      });
+    }
 
     if (!data.success) {
       await writeSecurityLog({
@@ -169,13 +155,15 @@ export default async function handler(req, res) {
         ip,
         route: "/api/verify-turnstile",
         metadata: {
-          errorCodes: Array.isArray(data["error-codes"]) ? data["error-codes"].join(",") : ""
+          errorCodes: Array.isArray(data["error-codes"])
+            ? data["error-codes"].slice(0, 10)
+            : []
         }
       });
 
       return res.status(400).json({
         success: false,
-        message: "Captcha verification failed"
+        message: "Captcha verification failed."
       });
     }
 
@@ -187,34 +175,40 @@ export default async function handler(req, res) {
         ip,
         route: "/api/verify-turnstile",
         metadata: {
-          hostname: data.hostname
+          hostname: safeString(data.hostname, 200)
         }
       });
 
       return res.status(400).json({
         success: false,
-        message: "Captcha hostname validation failed"
+        message: "Captcha hostname validation failed."
       });
     }
 
-    return res.status(200).json({ success: true });
+    return res.status(200).json({
+      success: true
+    });
   } catch (error) {
     console.error("Turnstile API error:", error);
 
-    await writeSecurityLog({
-      type: "turnstile_api_error",
-      level: "error",
-      message: "Unhandled server error in verify-turnstile API",
-      ip: getClientIp(req),
-      route: "/api/verify-turnstile",
-      metadata: {
-        error: error?.message || "Unknown error"
-      }
-    });
+    try {
+      await writeSecurityLog({
+        type: "turnstile_api_error",
+        level: "error",
+        message: "Unhandled server error in verify-turnstile API",
+        ip: getClientIp(req),
+        route: "/api/verify-turnstile",
+        metadata: {
+          error: safeString(error?.message || "Unknown error", 500)
+        }
+      });
+    } catch (logError) {
+      console.error("Security log write failed:", logError);
+    }
 
     return res.status(500).json({
       success: false,
-      message: "Server error"
+      message: "Server error."
     });
   }
 }
