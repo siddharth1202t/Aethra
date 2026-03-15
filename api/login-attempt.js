@@ -1,7 +1,14 @@
-import { writeSecurityLog } from "./_security-log.js";
-import { checkApiRateLimit } from "./_rate-limit.js";
-import { analyzeBotBehavior } from "./_bot-detection.js";
-import { trackApiAbuse } from "./_api-abuse-protection.js";
+import { writeSecurityLog } from "./_security-log-writer.js";
+import {
+  safeString,
+  safeNumber,
+  safePositiveInt,
+  sanitizeBody,
+  sanitizeMetadata,
+  buildBlockedResponse,
+  buildMethodNotAllowedResponse,
+  runRouteSecurity
+} from "./_api-security.js";
 
 const loginAttemptStore = new Map();
 const ipAttemptStore = new Map();
@@ -29,48 +36,6 @@ function normalizeEmail(email) {
 
 function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
-}
-
-function safeString(value, maxLength = 300) {
-  return String(value || "").slice(0, maxLength);
-}
-
-function safeNumber(value, fallback = 0) {
-  const num = Number(value);
-  return Number.isFinite(num) ? num : fallback;
-}
-
-function safePositiveInt(value, fallback = 0) {
-  const num = Math.floor(safeNumber(value, fallback));
-  return num >= 0 ? num : fallback;
-}
-
-function safeMetadata(metadata = {}) {
-  try {
-    return JSON.parse(JSON.stringify(metadata || {}));
-  } catch {
-    return {};
-  }
-}
-
-function getClientIp(req) {
-  const forwarded = req.headers["x-forwarded-for"];
-
-  if (typeof forwarded === "string") {
-    const parts = forwarded.split(",");
-    const ip = parts[0]?.trim();
-
-    if (ip && ip.length < 60) {
-      return ip;
-    }
-  }
-
-  const realIp = req.headers["x-real-ip"];
-  if (typeof realIp === "string" && realIp.length < 60) {
-    return realIp.trim();
-  }
-
-  return safeString(req.socket?.remoteAddress || "unknown", 100);
 }
 
 function getKey(email, ip) {
@@ -134,34 +99,8 @@ function saveRecord(store, key, record) {
   });
 }
 
-function isAllowedOrigin(origin) {
-  return ALLOWED_ORIGINS.has(origin);
-}
-
 function isGooglePlaceholderEmail(email) {
   return email === GOOGLE_PLACEHOLDER_EMAIL;
-}
-
-function buildRiskPayload(botAnalysis, abuseAnalysis, combinedRisk, finalAction) {
-  return {
-    botLevel: botAnalysis.level,
-    abuseLevel: abuseAnalysis.level,
-    botRecommendedAction: botAnalysis.recommendedAction,
-    abuseRecommendedAction: abuseAnalysis.recommendedAction,
-    combinedRisk,
-    finalAction
-  };
-}
-
-function buildSuspiciousResponse(
-  message = "Suspicious activity detected. Please try again later.",
-  extra = {}
-) {
-  return {
-    success: false,
-    message,
-    ...extra
-  };
 }
 
 function buildLockResponse(isLocked, remainingMs = 0, extra = {}) {
@@ -173,59 +112,6 @@ function buildLockResponse(isLocked, remainingMs = 0, extra = {}) {
   };
 }
 
-function getCombinedRisk(botAnalysis, abuseAnalysis) {
-  let score = 0;
-
-  score += safePositiveInt(botAnalysis.riskScore, 0);
-  score += safePositiveInt(abuseAnalysis.abuseScore, 0);
-
-  if (botAnalysis.recommendedAction === "block") {
-    score += 25;
-  } else if (botAnalysis.recommendedAction === "challenge") {
-    score += 15;
-  }
-
-  if (abuseAnalysis.recommendedAction === "block") {
-    score += 25;
-  } else if (abuseAnalysis.recommendedAction === "challenge") {
-    score += 15;
-  }
-
-  if (safePositiveInt(abuseAnalysis.snapshot?.suspiciousEvents, 0) >= 3) {
-    score += 10;
-  }
-
-  return Math.min(100, score);
-}
-
-function getFinalSecurityAction({ botAnalysis, abuseAnalysis, combinedRisk }) {
-  if (
-    botAnalysis.recommendedAction === "block" ||
-    abuseAnalysis.recommendedAction === "block" ||
-    combinedRisk >= 90
-  ) {
-    return "block";
-  }
-
-  if (
-    botAnalysis.recommendedAction === "challenge" ||
-    abuseAnalysis.recommendedAction === "challenge" ||
-    combinedRisk >= 60
-  ) {
-    return "challenge";
-  }
-
-  if (
-    botAnalysis.recommendedAction === "throttle" ||
-    abuseAnalysis.recommendedAction === "throttle" ||
-    combinedRisk >= 40
-  ) {
-    return "throttle";
-  }
-
-  return "allow";
-}
-
 function getEscalatedLockMs(baseMs, escalationCount) {
   const multiplier = Math.min(4, 1 + safePositiveInt(escalationCount, 0) * 0.5);
   return Math.floor(baseMs * multiplier);
@@ -233,49 +119,61 @@ function getEscalatedLockMs(baseMs, escalationCount) {
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
-    return res.status(405).json({
-      success: false,
-      message: "Method not allowed."
-    });
+    return res.status(405).json(buildMethodNotAllowedResponse());
   }
 
   try {
     cleanupStaleRecords();
 
-    const origin = safeString(req.headers.origin || "", 200);
-    const ip = getClientIp(req);
-    const body = req.body && typeof req.body === "object" ? req.body : {};
+    const body = sanitizeBody(req.body, 20);
 
     const rawEmail = normalizeEmail(body.email);
     const action = safeString(body.action, 50).toLowerCase();
     const actionLabel = safeString(body.actionLabel, 100);
-    const behavior = body.behavior && typeof body.behavior === "object" ? body.behavior : {};
+    const behavior =
+      body.behavior && typeof body.behavior === "object" && !Array.isArray(body.behavior)
+        ? body.behavior
+        : {};
     const sessionId = safeString(behavior.sessionId || body.sessionId || "", 120);
 
-    if (!isAllowedOrigin(origin)) {
+    const security = runRouteSecurity({
+      req,
+      route: `${ROUTE}:${action || "unknown"}${actionLabel ? `:${actionLabel}` : ""}`,
+      allowedOrigins: ALLOWED_ORIGINS,
+      rateLimit: {
+        key: `login-attempt:${safeString(req?.headers?.["x-forwarded-for"] || req?.headers?.["x-real-ip"] || req?.socket?.remoteAddress || "unknown", 100)}`,
+        limit: 40,
+        windowMs: 10 * 60 * 1000
+      },
+      body,
+      behavior,
+      sessionId,
+      abuseSuccess: action !== "fail"
+    });
+
+    const ip = security.ip;
+    const origin = security.origin;
+
+    if (!security.originAllowed) {
       await writeSecurityLog({
         type: "forbidden_origin",
         level: "warning",
         message: "Blocked request from forbidden origin",
         ip,
         route: ROUTE,
-        metadata: { origin, source: "server_enforced" }
+        metadata: {
+          source: "server_enforced",
+          origin,
+          requestUserAgent: security.requestUserAgent
+        }
       });
 
-      return res.status(403).json({
-        success: false,
-        message: "Forbidden origin."
-      });
+      return res.status(403).json(
+        buildBlockedResponse("Forbidden origin.", { action: "block" })
+      );
     }
 
-    const rateLimitResult = checkApiRateLimit({
-      key: `login-attempt:${ip}`,
-      limit: 40,
-      windowMs: 10 * 60 * 1000,
-      route: ROUTE
-    });
-
-    if (!rateLimitResult.allowed) {
+    if (security.rateLimitResult && !security.rateLimitResult.allowed) {
       await writeSecurityLog({
         type: "login_attempt_rate_limited",
         level: "warning",
@@ -284,17 +182,17 @@ export default async function handler(req, res) {
         route: ROUTE,
         metadata: {
           source: "server_enforced",
-          action: rateLimitResult.recommendedAction,
-          remainingMs: rateLimitResult.remainingMs,
-          violations: rateLimitResult.violations || 0
+          action: security.rateLimitResult.recommendedAction,
+          remainingMs: security.rateLimitResult.remainingMs || 0,
+          violations: security.rateLimitResult.violations || 0
         }
       });
 
       return res.status(429).json({
         success: false,
         message: "Too many requests. Please try again later.",
-        action: rateLimitResult.recommendedAction,
-        remainingMs: rateLimitResult.remainingMs || 0
+        action: security.rateLimitResult.recommendedAction,
+        remainingMs: security.rateLimitResult.remainingMs || 0
       });
     }
 
@@ -306,7 +204,10 @@ export default async function handler(req, res) {
         email: rawEmail,
         ip,
         route: ROUTE,
-        metadata: { action, source: "server_enforced" }
+        metadata: {
+          source: "server_enforced",
+          action
+        }
       });
 
       return res.status(400).json({
@@ -325,7 +226,9 @@ export default async function handler(req, res) {
         email: rawEmail,
         ip,
         route: ROUTE,
-        metadata: { source: "server_enforced" }
+        metadata: {
+          source: "server_enforced"
+        }
       });
 
       return res.status(400).json({
@@ -335,25 +238,8 @@ export default async function handler(req, res) {
     }
 
     const now = Date.now();
-
-    const botAnalysis = analyzeBotBehavior(
-      { ...behavior, route: ROUTE },
-      req
-    );
-
-    const abuseAnalysis = trackApiAbuse({
-      ip,
-      sessionId,
-      route: `${ROUTE}:${action}${actionLabel ? `:${actionLabel}` : ""}`,
-      success: action !== "fail"
-    });
-
-    const combinedRisk = getCombinedRisk(botAnalysis, abuseAnalysis);
-    const finalAction = getFinalSecurityAction({
-      botAnalysis,
-      abuseAnalysis,
-      combinedRisk
-    });
+    const combinedRisk = security.combinedRisk;
+    const finalAction = security.finalAction;
 
     if (finalAction === "block") {
       await writeSecurityLog({
@@ -363,19 +249,19 @@ export default async function handler(req, res) {
         email: rawEmail,
         ip,
         route: ROUTE,
-        metadata: safeMetadata({
+        metadata: sanitizeMetadata({
           source: "server_enforced",
           action,
           actionLabel,
-          botAnalysis,
-          abuseAnalysis,
+          botAnalysis: security.botAnalysis,
+          abuseAnalysis: security.abuseAnalysis,
           combinedRisk,
           finalAction
         })
       });
 
       return res.status(429).json(
-        buildSuspiciousResponse("Suspicious activity detected. Please try again later.", {
+        buildBlockedResponse("Suspicious activity detected. Please try again later.", {
           action: finalAction
         })
       );
@@ -389,12 +275,12 @@ export default async function handler(req, res) {
         email: rawEmail,
         ip,
         route: ROUTE,
-        metadata: safeMetadata({
+        metadata: sanitizeMetadata({
           source: "server_enforced",
           action,
           actionLabel,
-          botAnalysis,
-          abuseAnalysis,
+          botAnalysis: security.botAnalysis,
+          abuseAnalysis: security.abuseAnalysis,
           combinedRisk,
           finalAction
         })
@@ -406,7 +292,7 @@ export default async function handler(req, res) {
     if (ipRecord.lockUntil > now) {
       return res.status(200).json(
         buildLockResponse(true, ipRecord.lockUntil - now, {
-          risk: buildRiskPayload(botAnalysis, abuseAnalysis, combinedRisk, finalAction)
+          risk: security.riskPayload
         })
       );
     }
@@ -419,7 +305,7 @@ export default async function handler(req, res) {
 
       return res.status(200).json(
         buildLockResponse(isLocked, record.lockUntil - now, {
-          risk: buildRiskPayload(botAnalysis, abuseAnalysis, combinedRisk, finalAction)
+          risk: security.riskPayload
         })
       );
     }
@@ -447,13 +333,13 @@ export default async function handler(req, res) {
           email: rawEmail,
           ip,
           route: ROUTE,
-          metadata: safeMetadata({
+          metadata: sanitizeMetadata({
             source: "server_enforced",
             attempts: record.count,
             escalationCount: record.escalationCount,
             actionLabel,
-            botAnalysis,
-            abuseAnalysis,
+            botAnalysis: security.botAnalysis,
+            abuseAnalysis: security.abuseAnalysis,
             combinedRisk,
             finalAction
           })
@@ -470,7 +356,7 @@ export default async function handler(req, res) {
           message: "IP temporarily blocked due to excessive login attempts",
           ip,
           route: ROUTE,
-          metadata: safeMetadata({
+          metadata: sanitizeMetadata({
             source: "server_enforced",
             attempts: ipRecord.count,
             escalationCount: ipRecord.escalationCount,
@@ -489,7 +375,7 @@ export default async function handler(req, res) {
       return res.status(200).json(
         buildLockResponse(isLocked, record.lockUntil - now, {
           attempts: record.count,
-          risk: buildRiskPayload(botAnalysis, abuseAnalysis, combinedRisk, finalAction)
+          risk: security.riskPayload
         })
       );
     }
