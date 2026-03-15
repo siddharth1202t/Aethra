@@ -21,13 +21,17 @@
       --accent: #8a6cff;
       --accent-2: #5de4ff;
       --shadow: 0 20px 80px rgba(0, 0, 0, 0.35);
+      --error: #ff8a8a;
+      --error-border: rgba(255, 102, 102, 0.6);
+      --success: #7dffb3;
+      --success-border: rgba(125, 255, 179, 0.5);
     }
 
     html, body {
       height: 100%;
     }
 
-   body {
+    body {
       min-height: 100vh;
       overflow-x: hidden;
       overflow-y: auto;
@@ -222,6 +226,7 @@
       color: white;
       outline: none;
       font-size: 0.98rem;
+      transition: 0.2s ease;
     }
 
     .field input::placeholder {
@@ -233,8 +238,52 @@
       box-shadow: 0 0 0 3px rgba(138, 108, 255, 0.12);
     }
 
-   .captcha-wrap {
-      margin: 18px 0 12px;
+    .field input.input-invalid {
+      border-color: var(--error-border);
+      box-shadow: 0 0 0 3px rgba(255, 102, 102, 0.12);
+    }
+
+    .field input.input-valid {
+      border-color: var(--success-border);
+      box-shadow: 0 0 0 3px rgba(125, 255, 179, 0.08);
+    }
+
+    .error-text {
+      display: block;
+      min-height: 18px;
+      margin-top: 7px;
+      font-size: 0.84rem;
+      color: var(--error);
+      line-height: 1.4;
+    }
+
+    .field-hint {
+      display: block;
+      margin-top: 8px;
+      font-size: 0.82rem;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+
+    .form-error {
+      display: none;
+      margin: 0 0 14px;
+      padding: 12px 14px;
+      border-radius: 12px;
+      background: rgba(255, 102, 102, 0.12);
+      border: 1px solid rgba(255, 102, 102, 0.2);
+      color: #ffd0d0;
+      font-size: 0.9rem;
+      text-align: left;
+      line-height: 1.5;
+    }
+
+    .form-error.show {
+      display: block;
+    }
+
+    .captcha-wrap {
+      margin: 18px 0 6px;
       width: 100%;
       min-height: 70px;
       display: flex;
@@ -268,6 +317,13 @@
     .signup-btn:hover {
       transform: translateY(-2px);
       box-shadow: 0 16px 40px rgba(123, 97, 255, 0.55);
+    }
+
+    .signup-btn:disabled,
+    .google-btn:disabled {
+      opacity: 0.7;
+      cursor: not-allowed;
+      transform: none;
     }
 
     .auth-divider {
@@ -341,7 +397,8 @@
         display: none;
       }
     }
-     @media (max-width: 520px) {
+
+    @media (max-width: 520px) {
       body {
         overflow-y: auto;
       }
@@ -359,8 +416,6 @@
         font-size: 2rem;
       }
     }
-    
-    
   </style>
 </head>
 <body>
@@ -385,24 +440,37 @@
         </p>
 
         <form id="signupForm" novalidate>
+          <div id="formError" class="form-error" aria-live="polite"></div>
+
           <div class="field">
             <label for="name">Username</label>
             <input id="name" type="text" placeholder="Choose a username" required>
+            <small id="nameError" class="error-text"></small>
           </div>
 
           <div class="field">
             <label for="email">Email</label>
             <input id="email" type="email" placeholder="Enter your email" required>
+            <small id="emailError" class="error-text"></small>
           </div>
 
           <div class="field">
             <label for="password">Password</label>
             <input id="password" type="password" placeholder="Create a password" required>
+            <small id="passwordError" class="error-text"></small>
+            <small class="field-hint">Use at least 8 characters, 1 uppercase letter, and 1 number.</small>
+          </div>
+
+          <div class="field">
+            <label for="confirmPassword">Confirm Password</label>
+            <input id="confirmPassword" type="password" placeholder="Confirm your password" required>
+            <small id="confirmPasswordError" class="error-text"></small>
           </div>
 
           <div class="captcha-wrap">
             <div id="turnstile-container"></div>
           </div>
+          <small id="captchaError" class="error-text"></small>
 
           <button class="signup-btn" type="submit">Create Account</button>
         </form>
