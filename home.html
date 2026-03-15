@@ -584,7 +584,8 @@
       await ensureUserProfile(user);
 
       const displayName =
-        user.displayName ||
+        (user.displayName && user.displayName.trim()) ||
+        (user.providerData?.[0]?.displayName && user.providerData[0].displayName.trim()) ||
         (user.email ? user.email.split("@")[0] : "Explorer");
 
       heroUsernameEl.textContent = displayName;
@@ -601,15 +602,11 @@
         }
       }
 
-      if (isDeveloper) {
-        userRoleEl.textContent = "Developer";
-        devBtn.style.display = "block";
-      } else {
-        userRoleEl.textContent = "User";
-        devBtn.style.display = "none";
-      }
+      userRoleEl.textContent = isDeveloper ? "Developer" : "User";
+      devBtn.style.display = isDeveloper ? "block" : "none";
     } catch (error) {
       console.error("Home auth setup failed:", error);
+      heroUsernameEl.textContent = "Explorer";
       userRoleEl.textContent = "User";
       devBtn.style.display = "none";
     }
@@ -621,7 +618,7 @@
 
   logoutBtn.addEventListener("click", async () => {
     await signOut(auth);
-    window.location.href = "login.html";
+    window.location.replace("login.html");
   });
 
   const starsContainer = document.getElementById("stars");
