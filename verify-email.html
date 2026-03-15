@@ -44,6 +44,7 @@
       backdrop-filter: blur(18px);
       box-shadow: var(--shadow);
       text-align: center;
+      visibility: hidden;
     }
 
     h1 {
@@ -114,7 +115,7 @@
   </style>
 </head>
 <body>
-  <div class="card">
+  <div class="card" id="verifyCard">
     <h1>Verify your email</h1>
     <p>
       We sent a verification email to your inbox. Please verify your email address before entering Aethra.
@@ -122,9 +123,9 @@
 
     <div id="messageBox" class="msg" aria-live="polite"></div>
 
-    <button id="resendBtn" class="btn">Resend Verification Email</button>
-    <button id="refreshBtn" class="btn secondary">I Have Verified My Email</button>
-    <button id="logoutBtn" class="btn secondary">Logout</button>
+    <button id="resendBtn" class="btn" type="button">Resend Verification Email</button>
+    <button id="refreshBtn" class="btn secondary" type="button">I Have Verified My Email</button>
+    <button id="logoutBtn" class="btn secondary" type="button">Logout</button>
   </div>
 
   <script type="module" src="js/app-check.js"></script>
@@ -143,6 +144,7 @@
 
     const auth = getAuth(app);
 
+    const verifyCard = document.getElementById("verifyCard");
     const resendBtn = document.getElementById("resendBtn");
     const refreshBtn = document.getElementById("refreshBtn");
     const logoutBtn = document.getElementById("logoutBtn");
@@ -150,17 +152,26 @@
 
     let resendCountdown = null;
     let resendRemaining = 0;
+    let authHandled = false;
 
     function goTo(page) {
       window.location.replace(page);
     }
 
+    function setPageVisible() {
+      if (verifyCard) {
+        verifyCard.style.visibility = "visible";
+      }
+    }
+
     function showMessage(text, type = "error") {
+      if (!messageBox) return;
       messageBox.textContent = text;
       messageBox.className = `msg show ${type}`;
     }
 
     function clearMessage() {
+      if (!messageBox) return;
       messageBox.textContent = "";
       messageBox.className = "msg";
     }
@@ -207,7 +218,10 @@
     }
 
     onAuthStateChanged(auth, async (user) => {
+      if (authHandled) return;
+
       if (!user) {
+        authHandled = true;
         goTo("login.html");
         return;
       }
@@ -216,14 +230,22 @@
         await reload(user);
 
         if (auth.currentUser?.emailVerified) {
+          authHandled = true;
           goTo("home.html");
+          return;
         }
+
+        authHandled = true;
+        setPageVisible();
       } catch (error) {
         console.error("Verification page auth refresh failed:", error);
+        authHandled = true;
+        setPageVisible();
+        showMessage("Could not refresh your account status. Please try again.", "error");
       }
     });
 
-    resendBtn.addEventListener("click", async () => {
+    resendBtn?.addEventListener("click", async () => {
       const user = auth.currentUser;
 
       if (!user) {
@@ -245,11 +267,11 @@
       } catch (error) {
         console.error("Resend verification failed:", error);
         clearLoading(resendBtn);
-        showMessage("Could not resend verification email right now. Please try again.");
+        showMessage("Could not resend verification email right now. Please try again.", "error");
       }
     });
 
-    refreshBtn.addEventListener("click", async () => {
+    refreshBtn?.addEventListener("click", async () => {
       const user = auth.currentUser;
 
       if (!user) {
@@ -267,17 +289,19 @@
           return;
         }
 
-        showMessage("Your email is still not verified yet. Please verify it first, then try again.");
+        showMessage("Your email is still not verified yet. Please verify it first, then try again.", "error");
       } catch (error) {
         console.error("Verification refresh failed:", error);
-        showMessage("Could not refresh your verification status. Please try again.");
+        showMessage("Could not refresh your verification status. Please try again.", "error");
       } finally {
         clearLoading(refreshBtn);
       }
     });
 
-    logoutBtn.addEventListener("click", async () => {
+    logoutBtn?.addEventListener("click", async () => {
       try {
+        logoutBtn.disabled = true;
+        logoutBtn.textContent = "Logging out...";
         await signOut(auth);
       } catch (error) {
         console.error("Logout failed:", error);
