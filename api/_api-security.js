@@ -20,7 +20,10 @@ const ACTOR_CLEANUP_INTERVAL_MS = 60 * 1000;
 let lastActorCleanupAt = 0;
 
 export function safeString(value, maxLength = 300) {
-  return String(value || "").slice(0, maxLength);
+  return String(value || "")
+    .replace(/[\u0000-\u001F\u007F]/g, "")
+    .trim()
+    .slice(0, maxLength);
 }
 
 export function safeNumber(value, fallback = 0) {
@@ -28,9 +31,10 @@ export function safeNumber(value, fallback = 0) {
   return Number.isFinite(num) ? num : fallback;
 }
 
-export function safePositiveInt(value, fallback = 0) {
+export function safePositiveInt(value, fallback = 0, max = 1_000_000) {
   const num = Math.floor(safeNumber(value, fallback));
-  return num >= 0 ? num : fallback;
+  if (!Number.isFinite(num) || num < 0) return fallback;
+  return Math.min(num, max);
 }
 
 export function safeBoolean(value) {
@@ -41,30 +45,57 @@ export function isPlainObject(value) {
   return Object.prototype.toString.call(value) === "[object Object]";
 }
 
+function normalizeIp(value = "") {
+  let ip = safeString(value || "unknown", 100);
+
+  if (!ip) return "unknown";
+
+  if (ip.startsWith("::ffff:")) {
+    ip = ip.slice(7);
+  }
+
+  ip = ip.replace(/[^a-fA-F0-9:.,]/g, "").slice(0, 100);
+
+  return ip || "unknown";
+}
+
 export function getClientIp(req) {
   const forwarded = req?.headers?.["x-forwarded-for"];
 
   if (typeof forwarded === "string" && forwarded.length > 0) {
-    const ip = forwarded.split(",")[0]?.trim();
-    if (ip && ip.length < 100) {
-      return ip;
-    }
+    return normalizeIp(forwarded.split(",")[0]?.trim());
+  }
+
+  if (Array.isArray(forwarded) && forwarded.length > 0) {
+    return normalizeIp(String(forwarded[0]).split(",")[0]?.trim());
   }
 
   const realIp = req?.headers?.["x-real-ip"];
-  if (typeof realIp === "string" && realIp.length > 0 && realIp.length < 100) {
-    return realIp.trim();
+  if (typeof realIp === "string" && realIp.length > 0) {
+    return normalizeIp(realIp.trim());
   }
 
-  return safeString(req?.socket?.remoteAddress || "unknown", 100);
+  return normalizeIp(req?.socket?.remoteAddress || "unknown");
 }
 
 export function normalizeOrigin(origin = "") {
-  return safeString(origin, 200).trim();
+  const raw = safeString(origin, 200);
+
+  if (!raw) return "";
+
+  try {
+    return new URL(raw).origin.toLowerCase();
+  } catch {
+    return "";
+  }
 }
 
 export function isAllowedOrigin(origin, allowedOrigins = []) {
   const normalizedOrigin = normalizeOrigin(origin);
+
+  if (!normalizedOrigin) {
+    return false;
+  }
 
   if (allowedOrigins instanceof Set) {
     return allowedOrigins.has(normalizedOrigin);
@@ -168,7 +199,19 @@ export function buildMethodNotAllowedResponse() {
 }
 
 function normalizeRoute(route = "") {
-  return safeString(route || "unknown-route", 150).toLowerCase();
+  const raw = safeString(route || "unknown-route", 300);
+
+  if (!raw) return "unknown-route";
+
+  const withoutQuery = raw.split("?")[0].split("#")[0];
+
+  const cleaned = withoutQuery
+    .replace(/\/{2,}/g, "/")
+    .replace(/[^a-zA-Z0-9/_-]/g, "")
+    .toLowerCase()
+    .slice(0, 150);
+
+  return cleaned || "unknown-route";
 }
 
 function getRouteSensitivity(route = "") {
@@ -220,7 +263,7 @@ function cleanupActorMemory(force = false) {
 }
 
 function getActorKey(ip, sessionId = "") {
-  return `${safeString(ip || "unknown", 100)}::${safeString(sessionId || "no-session", 120)}`;
+  return `${normalizeIp(ip || "unknown")}::${safeString(sessionId || "no-session", 120).replace(/[^a-zA-Z0-9._:@/-]/g, "") || "no-session"}`;
 }
 
 function recordSuspiciousEvent({
@@ -235,9 +278,9 @@ function recordSuspiciousEvent({
   securityStateStore.suspiciousEvents.push({
     at: now,
     route: normalizeRoute(route),
-    ip: safeString(ip, 100),
-    finalAction: safeString(finalAction, 30),
-    combinedRisk: safePositiveInt(combinedRisk, 0),
+    ip: normalizeIp(ip),
+    finalAction: safeString(finalAction, 30).toLowerCase(),
+    combinedRisk: safePositiveInt(combinedRisk, 0, 100),
     reason: safeString(reason, 120)
   });
 
@@ -262,11 +305,11 @@ function updateSecurityMode() {
   ).length;
 
   const recentHighRisk = securityStateStore.suspiciousEvents.filter(
-    (item) => safePositiveInt(item.combinedRisk, 0) >= 70
+    (item) => safePositiveInt(item.combinedRisk, 0, 100) >= 70
   ).length;
 
   let mode = "normal";
-  let reason = "";
+  let reason = "stable_activity";
 
   if (recentBlocks >= 10 || recentHighRisk >= 20) {
     mode = "lockdown";
@@ -283,7 +326,7 @@ function updateSecurityMode() {
     now - safeNumber(securityStateStore.updatedAt, 0) > SECURITY_MODE_TTL_MS &&
     mode !== "lockdown"
   ) {
-    // allow decay naturally
+    // natural decay through event expiry
   }
 
   securityStateStore.mode = mode;
@@ -364,11 +407,11 @@ function updateActorMemory({
 
   record.updatedAt = now;
   record.highestRisk = Math.max(
-    safePositiveInt(record.highestRisk, 0),
-    safePositiveInt(combinedRisk, 0)
+    safePositiveInt(record.highestRisk, 0, 100),
+    safePositiveInt(combinedRisk, 0, 100)
   );
   record.lastRoute = normalizeRoute(route);
-  record.lastAction = safeString(finalAction, 30);
+  record.lastAction = safeString(finalAction, 30).toLowerCase();
 
   if (finalAction === "block") {
     record.blockedCount = safePositiveInt(record.blockedCount, 0) + 1;
@@ -388,7 +431,7 @@ function updateActorMemory({
       suspiciousCount: safePositiveInt(record.suspiciousCount, 0),
       blockedCount: safePositiveInt(record.blockedCount, 0),
       challengedCount: safePositiveInt(record.challengedCount, 0),
-      highestRisk: safePositiveInt(record.highestRisk, 0),
+      highestRisk: safePositiveInt(record.highestRisk, 0, 100),
       lastRoute: safeString(record.lastRoute, 150),
       lastAction: safeString(record.lastAction, 30)
     }
@@ -412,7 +455,7 @@ function getActorRiskBonus(actorMemory) {
     bonus += 15;
   }
 
-  if (safePositiveInt(actorMemory.highestRisk, 0) >= 80) {
+  if (safePositiveInt(actorMemory.highestRisk, 0, 100) >= 80) {
     bonus += 10;
   }
 
@@ -422,11 +465,11 @@ function getActorRiskBonus(actorMemory) {
 export function getCombinedRisk(botAnalysis, abuseAnalysis, extra = {}) {
   let score = 0;
 
-  score += safePositiveInt(botAnalysis?.riskScore, 0);
-  score += safePositiveInt(abuseAnalysis?.abuseScore, 0);
-  score += safePositiveInt(extra.modeRiskBonus, 0);
-  score += safePositiveInt(extra.actorRiskBonus, 0);
-  score += safePositiveInt(extra.routeRiskBonus, 0);
+  score += safePositiveInt(botAnalysis?.riskScore, 0, 100);
+  score += safePositiveInt(abuseAnalysis?.abuseScore, 0, 100);
+  score += safePositiveInt(extra.modeRiskBonus, 0, 100);
+  score += safePositiveInt(extra.actorRiskBonus, 0, 100);
+  score += safePositiveInt(extra.routeRiskBonus, 0, 100);
 
   if (botAnalysis?.recommendedAction === "block") {
     score += 25;
@@ -559,7 +602,7 @@ export function buildRiskPayload({
     botRecommendedAction: botAnalysis?.recommendedAction || "allow",
     abuseLevel: abuseAnalysis?.level || "low",
     abuseRecommendedAction: abuseAnalysis?.recommendedAction || "allow",
-    combinedRisk: safePositiveInt(combinedRisk, 0),
+    combinedRisk: safePositiveInt(combinedRisk, 0, 100),
     finalAction: safeString(finalAction, 30),
     securityMode: safeString(securityMode, 30),
     routeSensitivity: getRouteSensitivity(route),
@@ -569,7 +612,7 @@ export function buildRiskPayload({
           suspiciousCount: safePositiveInt(actorMemory.suspiciousCount, 0),
           blockedCount: safePositiveInt(actorMemory.blockedCount, 0),
           challengedCount: safePositiveInt(actorMemory.challengedCount, 0),
-          highestRisk: safePositiveInt(actorMemory.highestRisk, 0)
+          highestRisk: safePositiveInt(actorMemory.highestRisk, 0, 100)
         }
       : null
   };
@@ -584,7 +627,7 @@ export function getSecurityModeSnapshot() {
   };
 }
 
-export function runRouteSecurity({
+export async function runRouteSecurity({
   req,
   route,
   rateLimit = null,
@@ -592,7 +635,8 @@ export function runRouteSecurity({
   body = {},
   behavior = {},
   sessionId = "",
-  abuseSuccess = true
+  abuseSuccess = true,
+  userId = ""
 } = {}) {
   const normalizedRoute = normalizeRoute(route);
   const ip = getClientIp(req);
@@ -619,9 +663,10 @@ export function runRouteSecurity({
       })
     : null;
 
-  const abuseAnalysis = trackApiAbuse({
+  const abuseAnalysis = await trackApiAbuse({
     ip,
     sessionId: safeString(sessionId || "", 120),
+    userId: safeString(userId || "", 120),
     route: normalizedRoute,
     success: Boolean(abuseSuccess)
   });
