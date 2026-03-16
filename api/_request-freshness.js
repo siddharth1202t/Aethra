@@ -6,12 +6,20 @@ const DEFAULT_FUTURE_TOLERANCE_MS = 15 * 1000;
 const MAX_NONCE_LENGTH = 200;
 const NONCE_TTL_MS = 10 * 60 * 1000;
 
+function sanitizeKeyPart(value = "", maxLength = 200, fallback = "") {
+  const cleaned = safeString(value || "", maxLength)
+    .trim()
+    .replace(/[\u0000-\u001F\u007F]/g, "")
+    .replace(/[^a-zA-Z0-9._:@/-]/g, "");
+  return cleaned || fallback;
+}
+
 function normalizeNonce(value) {
-  return safeString(value || "", MAX_NONCE_LENGTH).trim();
+  return sanitizeKeyPart(value || "", MAX_NONCE_LENGTH, "");
 }
 
 function normalizeScope(value) {
-  return safeString(value || "default", 100).trim().toLowerCase();
+  return sanitizeKeyPart(value || "default", 100, "default").toLowerCase();
 }
 
 function buildNonceKey(scope, nonce) {
@@ -31,10 +39,20 @@ export function validateRequestFreshness({
     safeNumber(futureToleranceMs, DEFAULT_FUTURE_TOLERANCE_MS)
   );
 
-  if (!safeRequestAt) {
+  if (!safeRequestAt || !Number.isFinite(safeRequestAt)) {
     return {
       ok: false,
       code: "missing_request_timestamp",
+      ageMs: null,
+      now
+    };
+  }
+
+  // reject absurd timestamps far in the past/future even before age evaluation
+  if (safeRequestAt < 1_500_000_000_000 || safeRequestAt > now + 24 * 60 * 60 * 1000) {
+    return {
+      ok: false,
+      code: "invalid_request_timestamp",
       ageMs: null,
       now
     };
@@ -84,6 +102,13 @@ export async function checkAndStoreNonce({
     };
   }
 
+  if (normalizedNonce.length < 8) {
+    return {
+      ok: false,
+      code: "weak_nonce"
+    };
+  }
+
   const key = buildNonceKey(normalizedScope, normalizedNonce);
   const ttlSeconds = Math.max(1, Math.ceil(safeTtlMs / 1000));
 
@@ -102,7 +127,8 @@ export async function checkAndStoreNonce({
 
     return {
       ok: true,
-      code: "stored"
+      code: "stored",
+      scope: normalizedScope
     };
   } catch (error) {
     console.error("Redis nonce store failed:", error);
@@ -166,6 +192,7 @@ export async function validateFreshRequest({
     ok: true,
     code: "fresh_with_nonce",
     ageMs: freshness.ageMs,
-    now: freshness.now
+    now: freshness.now,
+    scope: normalizeScope(scope)
   };
 }
