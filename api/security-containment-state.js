@@ -4,19 +4,32 @@ import {
   safeString
 } from "./_api-security.js";
 
-const ROUTE = "/api/security-containment-state";
-
 const ALLOWED_ORIGINS = new Set([
   "https://aethra-gules.vercel.app",
   "https://aethra-hb2h.vercel.app"
 ]);
 
 function normalizeOrigin(origin = "") {
-  return safeString(origin || "", 200).trim().toLowerCase();
+  const raw = safeString(origin || "", 200).trim();
+
+  if (!raw) {
+    return "";
+  }
+
+  try {
+    return new URL(raw).origin.toLowerCase();
+  } catch {
+    return "";
+  }
 }
 
 function isOriginAllowed(origin = "") {
   return ALLOWED_ORIGINS.has(normalizeOrigin(origin));
+}
+
+function safeTimestamp(value, fallback = 0) {
+  const num = Number(value);
+  return Number.isFinite(num) && num >= 0 ? Math.floor(num) : fallback;
 }
 
 export default async function handler(req, res) {
@@ -38,16 +51,17 @@ export default async function handler(req, res) {
 
     return res.status(200).json({
       success: true,
-      mode: safeString(state.mode || "normal", 30),
-      updatedAt: Number(state.updatedAt || 0),
-      expiresAt: Number(state.expiresAt || 0),
+      mode: safeString(state.mode || "normal", 30).toLowerCase(),
+      updatedAt: safeTimestamp(state.updatedAt, 0),
+      expiresAt: safeTimestamp(state.expiresAt, 0),
       flags: {
         freezeRegistrations: state?.flags?.freezeRegistrations === true,
         disableProfileEdits: state?.flags?.disableProfileEdits === true,
         lockAdminWrites: state?.flags?.lockAdminWrites === true,
         readOnlyMode: state?.flags?.readOnlyMode === true,
         disableUploads: state?.flags?.disableUploads === true,
-        forceCaptcha: state?.flags?.forceCaptcha === true
+        forceCaptcha: state?.flags?.forceCaptcha === true,
+        lockdown: state?.flags?.lockdown === true
       }
     });
   } catch (error) {
@@ -55,8 +69,7 @@ export default async function handler(req, res) {
 
     return res.status(500).json({
       success: false,
-      message: "Internal server error.",
-      route: ROUTE
+      message: "Internal server error."
     });
   }
 }
