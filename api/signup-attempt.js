@@ -1,3 +1,4 @@
+import { redis } from "./_redis.js";
 import { writeSecurityLog } from "./_security-log-writer.js";
 import {
   safeString,
@@ -9,9 +10,6 @@ import {
   buildMethodNotAllowedResponse,
   runRouteSecurity
 } from "./_api-security.js";
-
-const signupAttemptStore = new Map();
-const ipAttemptStore = new Map();
 
 const MAX_ATTEMPTS = 5;
 const MAX_IP_ATTEMPTS = 20;
@@ -42,27 +40,54 @@ function getKey(email, ip) {
   return `${email}::${ip}`;
 }
 
-function cleanupStaleRecords() {
-  const now = Date.now();
-
-  for (const [key, record] of signupAttemptStore.entries()) {
-    if (!record || now - safeNumber(record.lastAttempt) > STALE_RECORD_TTL_MS) {
-      signupAttemptStore.delete(key);
-    }
-  }
-
-  for (const [ip, record] of ipAttemptStore.entries()) {
-    if (!record || now - safeNumber(record.lastAttempt) > STALE_RECORD_TTL_MS) {
-      ipAttemptStore.delete(ip);
-    }
-  }
+function buildSignupAttemptKey(email, ip) {
+  return `signup-attempt:${safeString(getKey(email, ip), 260)}`;
 }
 
-function getRecord(store, key) {
-  const now = Date.now();
-  const record = store.get(key);
+function buildIpAttemptKey(ip) {
+  return `signup-attempt-ip:${safeString(ip, 120)}`;
+}
 
-  if (!record) {
+async function getStoredRecord(redisKey) {
+  const now = Date.now();
+
+  try {
+    const raw = await redis.get(redisKey);
+
+    if (!raw) {
+      return {
+        count: 0,
+        lockUntil: 0,
+        lastAttempt: now,
+        escalationCount: 0
+      };
+    }
+
+    const parsed =
+      typeof raw === "string"
+        ? JSON.parse(raw)
+        : raw;
+
+    const normalized = {
+      count: safePositiveInt(parsed?.count, 0),
+      lockUntil: safePositiveInt(parsed?.lockUntil, 0),
+      lastAttempt: safePositiveInt(parsed?.lastAttempt, now),
+      escalationCount: safePositiveInt(parsed?.escalationCount, 0)
+    };
+
+    if (normalized.lockUntil && now > normalized.lockUntil) {
+      return {
+        count: 0,
+        lockUntil: 0,
+        lastAttempt: now,
+        escalationCount: normalized.escalationCount
+      };
+    }
+
+    return normalized;
+  } catch (error) {
+    console.error("Redis signup-attempt read failed:", error);
+
     return {
       count: 0,
       lockUntil: 0,
@@ -70,33 +95,28 @@ function getRecord(store, key) {
       escalationCount: 0
     };
   }
-
-  const normalized = {
-    count: safePositiveInt(record.count, 0),
-    lockUntil: safePositiveInt(record.lockUntil, 0),
-    lastAttempt: safePositiveInt(record.lastAttempt, now),
-    escalationCount: safePositiveInt(record.escalationCount, 0)
-  };
-
-  if (normalized.lockUntil && now > normalized.lockUntil) {
-    return {
-      count: 0,
-      lockUntil: 0,
-      lastAttempt: now,
-      escalationCount: normalized.escalationCount
-    };
-  }
-
-  return normalized;
 }
 
-function saveRecord(store, key, record) {
-  store.set(key, {
-    count: safePositiveInt(record.count, 0),
-    lockUntil: safePositiveInt(record.lockUntil, 0),
-    lastAttempt: safePositiveInt(record.lastAttempt, Date.now()),
-    escalationCount: safePositiveInt(record.escalationCount, 0)
-  });
+async function saveStoredRecord(redisKey, record) {
+  try {
+    const ttlSeconds = Math.max(1, Math.ceil(STALE_RECORD_TTL_MS / 1000));
+
+    await redis.set(
+      redisKey,
+      JSON.stringify({
+        count: safePositiveInt(record.count, 0),
+        lockUntil: safePositiveInt(record.lockUntil, 0),
+        lastAttempt: safePositiveInt(record.lastAttempt, Date.now()),
+        escalationCount: safePositiveInt(record.escalationCount, 0)
+      }),
+      { ex: ttlSeconds }
+    );
+
+    return true;
+  } catch (error) {
+    console.error("Redis signup-attempt write failed:", error);
+    return false;
+  }
 }
 
 function isGooglePlaceholderEmail(email) {
@@ -123,8 +143,6 @@ export default async function handler(req, res) {
   }
 
   try {
-    cleanupStaleRecords();
-
     const body = sanitizeBody(req.body, 20);
 
     const rawEmail = normalizeEmail(body.email);
@@ -287,7 +305,8 @@ export default async function handler(req, res) {
       });
     }
 
-    const ipRecord = getRecord(ipAttemptStore, ip);
+    const ipRedisKey = buildIpAttemptKey(ip);
+    const ipRecord = await getStoredRecord(ipRedisKey);
 
     if (ipRecord.lockUntil > now) {
       return res.status(200).json(
@@ -297,8 +316,8 @@ export default async function handler(req, res) {
       );
     }
 
-    const key = getKey(rawEmail, ip);
-    const record = getRecord(signupAttemptStore, key);
+    const userRedisKey = buildSignupAttemptKey(rawEmail, ip);
+    const record = await getStoredRecord(userRedisKey);
 
     if (action === "check") {
       const isLocked = record.lockUntil > now;
@@ -367,8 +386,8 @@ export default async function handler(req, res) {
         });
       }
 
-      saveRecord(signupAttemptStore, key, record);
-      saveRecord(ipAttemptStore, ip, ipRecord);
+      await saveStoredRecord(userRedisKey, record);
+      await saveStoredRecord(ipRedisKey, ipRecord);
 
       const isLocked = record.lockUntil > now;
 
