@@ -1,8 +1,15 @@
 const MAX_REASON_LENGTH = 100;
 const MAX_REASONS = 50;
 
+const ALLOWED_LEVELS = new Set(["low", "medium", "high", "critical"]);
+const ALLOWED_ACTIONS = new Set(["allow", "throttle", "challenge", "block"]);
+const ALLOWED_ROUTE_SENSITIVITY = new Set(["normal", "high", "critical"]);
+
 function safeString(value, maxLength = 300) {
-  return String(value || "").slice(0, maxLength);
+  return String(value || "")
+    .replace(/[\u0000-\u001F\u007F]/g, "")
+    .trim()
+    .slice(0, maxLength);
 }
 
 function safeNumber(value, fallback = 0) {
@@ -14,6 +21,21 @@ function safeInt(value, fallback = 0, min = 0, max = 1_000_000) {
   const num = Math.floor(safeNumber(value, fallback));
   if (!Number.isFinite(num)) return fallback;
   return Math.min(max, Math.max(min, num));
+}
+
+function normalizeLevel(value = "low") {
+  const normalized = safeString(value || "low", 20).toLowerCase();
+  return ALLOWED_LEVELS.has(normalized) ? normalized : "low";
+}
+
+function normalizeAction(value = "allow") {
+  const normalized = safeString(value || "allow", 20).toLowerCase();
+  return ALLOWED_ACTIONS.has(normalized) ? normalized : "allow";
+}
+
+function normalizeRouteSensitivity(value = "normal") {
+  const normalized = safeString(value || "normal", 20).toLowerCase();
+  return ALLOWED_ROUTE_SENSITIVITY.has(normalized) ? normalized : "normal";
 }
 
 function pushReason(reasons, reason) {
@@ -51,18 +73,23 @@ function normalizeBotResult(botResult = null) {
 
   return {
     riskScore: safeInt(botResult.riskScore, 0, 0, 100),
-    level: safeString(botResult.level || "low", 20),
-    recommendedAction: safeString(botResult.recommendedAction || "allow", 20),
-    escalatedAction: safeString(botResult.escalatedAction || "allow", 20),
+    level: normalizeLevel(botResult.level || "low"),
+    recommendedAction: normalizeAction(botResult.recommendedAction || "allow"),
+    escalatedAction: normalizeAction(botResult.escalatedAction || "allow"),
     telemetryQualityScore: safeInt(botResult.telemetryQualityScore, 100, 0, 100),
     hardBlockSignals: safeInt(botResult.hardBlockSignals, 0, 0, 20),
     distributed: {
       suspicionScore: safeInt(botResult?.distributed?.suspicionScore, 0, 0, 1000),
       hardBlockCount: safeInt(botResult?.distributed?.hardBlockCount, 0, 0, 1000),
       suspiciousCount: safeInt(botResult?.distributed?.suspiciousCount, 0, 0, 100000),
+      sameRouteRecent: safeInt(botResult?.distributed?.sameRouteRecent, 0, 0, 100000),
+      recentChallenges: safeInt(botResult?.distributed?.recentChallenges, 0, 0, 100000),
+      recentHardBlocks: safeInt(botResult?.distributed?.recentHardBlocks, 0, 0, 100000),
       sensitiveRouteHits: safeInt(botResult?.distributed?.sensitiveRouteHits, 0, 0, 100000)
     },
-    reasons: Array.isArray(botResult.reasons) ? botResult.reasons.slice(0, 20) : []
+    reasons: Array.isArray(botResult.reasons)
+      ? botResult.reasons.slice(0, 20).map((r) => safeString(r, 80)).filter(Boolean)
+      : []
   };
 }
 
@@ -71,8 +98,8 @@ function normalizeAbuseResult(abuseResult = null) {
 
   return {
     abuseScore: safeInt(abuseResult.abuseScore, 0, 0, 100),
-    level: safeString(abuseResult.level || "low", 20),
-    recommendedAction: safeString(abuseResult.recommendedAction || "allow", 20),
+    level: normalizeLevel(abuseResult.level || "low"),
+    recommendedAction: normalizeAction(abuseResult.recommendedAction || "allow"),
     containmentAction: safeString(abuseResult.containmentAction || "none", 40),
     penaltyActive: Boolean(abuseResult.penaltyActive),
     snapshot: {
@@ -89,7 +116,9 @@ function normalizeAbuseResult(abuseResult = null) {
       suspiciousEvents: safeInt(abuseResult?.snapshot?.suspiciousEvents, 0, 0, 100000),
       penaltyCount: safeInt(abuseResult?.snapshot?.penaltyCount, 0, 0, 100000)
     },
-    reasons: Array.isArray(abuseResult.reasons) ? abuseResult.reasons.slice(0, 20) : []
+    reasons: Array.isArray(abuseResult.reasons)
+      ? abuseResult.reasons.slice(0, 20).map((r) => safeString(r, 80)).filter(Boolean)
+      : []
   };
 }
 
@@ -98,13 +127,13 @@ function normalizeRateLimitResult(rateLimitResult = null) {
 
   return {
     allowed: Boolean(rateLimitResult.allowed),
-    recommendedAction: safeString(rateLimitResult.recommendedAction || "allow", 20),
+    recommendedAction: normalizeAction(rateLimitResult.recommendedAction || "allow"),
     containmentAction: safeString(rateLimitResult.containmentAction || "none", 40),
     penaltyActive: Boolean(rateLimitResult.penaltyActive),
     overBy: safeInt(rateLimitResult.overBy, 0, 0, 100000),
     violations: safeInt(rateLimitResult.violations, 0, 0, 100000),
     burstCount: safeInt(rateLimitResult.burstCount, 0, 0, 100000),
-    routeSensitivity: safeString(rateLimitResult.routeSensitivity || "normal", 20),
+    routeSensitivity: normalizeRouteSensitivity(rateLimitResult.routeSensitivity || "normal"),
     highestCountSeen: safeInt(rateLimitResult.highestCountSeen, 0, 0, 100000)
   };
 }
@@ -124,13 +153,16 @@ function normalizeThreatResult(threatResult = null) {
 
   return {
     threatScore: safeInt(threatResult.threatScore, 0, 0, 100),
-    level: safeString(threatResult.level || "low", 20),
-    action: safeString(threatResult.action || "allow", 20),
+    level: normalizeLevel(threatResult.level || "low"),
+    action: normalizeAction(threatResult.action || "allow"),
     events: {
       botEvents: safeInt(threatResult?.events?.botEvents, 0, 0, 100000),
       abuseEvents: safeInt(threatResult?.events?.abuseEvents, 0, 0, 100000),
       rateLimitEvents: safeInt(threatResult?.events?.rateLimitEvents, 0, 0, 100000),
-      freshnessFailures: safeInt(threatResult?.events?.freshnessFailures, 0, 0, 100000)
+      freshnessFailures: safeInt(threatResult?.events?.freshnessFailures, 0, 0, 100000),
+      blockEvents: safeInt(threatResult?.events?.blockEvents, 0, 0, 100000),
+      hardBlockSignals: safeInt(threatResult?.events?.hardBlockSignals, 0, 0, 100000),
+      criticalRouteHits: safeInt(threatResult?.events?.criticalRouteHits, 0, 0, 100000)
     }
   };
 }
@@ -152,6 +184,12 @@ export function evaluateRisk(inputs = {}) {
     if (botResult.riskScore >= 70) addWeightedScore(state, 20, "bot_high_risk");
     else if (botResult.riskScore >= 40) addWeightedScore(state, 10, "bot_medium_risk");
 
+    if (botResult.escalatedAction === "block") {
+      addWeightedScore(state, 20, "bot_escalated_block");
+    } else if (botResult.escalatedAction === "challenge") {
+      addWeightedScore(state, 10, "bot_escalated_challenge");
+    }
+
     if (botResult.telemetryQualityScore <= 30) {
       addWeightedScore(state, 10, "bot_low_telemetry_quality");
     }
@@ -162,6 +200,14 @@ export function evaluateRisk(inputs = {}) {
       addWeightedScore(state, 12, "bot_distributed_suspicion_medium");
     }
 
+    if (botResult.distributed.recentHardBlocks >= 2) {
+      addWeightedScore(state, 15, "bot_recent_hard_blocks");
+    }
+
+    if (botResult.distributed.recentChallenges >= 3) {
+      addWeightedScore(state, 8, "bot_recent_challenges");
+    }
+
     if (botResult.distributed.sensitiveRouteHits >= 5) {
       addWeightedScore(state, 10, "bot_sensitive_route_targeting");
     }
@@ -169,6 +215,11 @@ export function evaluateRisk(inputs = {}) {
     if (botResult.hardBlockSignals > 0) {
       state.hardBlockSignals += botResult.hardBlockSignals;
       addWeightedScore(state, 35, "bot_hard_block_signal");
+    }
+
+    if (botResult.distributed.hardBlockCount >= 2) {
+      state.hardBlockSignals += 1;
+      addWeightedScore(state, 20, "bot_distributed_hard_block_history");
     }
 
     for (const reason of botResult.reasons) {
@@ -196,6 +247,10 @@ export function evaluateRisk(inputs = {}) {
 
     if (abuseResult.snapshot.criticalRouteTouchesRecent >= 2) {
       addWeightedScore(state, 20, "abuse_critical_route_targeting");
+    }
+
+    if (abuseResult.snapshot.penaltyCount >= 3) {
+      addWeightedScore(state, 10, "abuse_repeat_penalties");
     }
 
     for (const reason of abuseResult.reasons) {
@@ -244,6 +299,12 @@ export function evaluateRisk(inputs = {}) {
     if (threatResult.threatScore >= 80) addWeightedScore(state, 25, "threat_memory_high");
     else if (threatResult.threatScore >= 50) addWeightedScore(state, 12, "threat_memory_medium");
 
+    if (threatResult.action === "block") {
+      addWeightedScore(state, 20, "threat_memory_block_action");
+    } else if (threatResult.action === "challenge") {
+      addWeightedScore(state, 8, "threat_memory_challenge_action");
+    }
+
     if (threatResult.events.freshnessFailures >= 3) {
       addWeightedScore(state, 10, "threat_repeat_freshness_failures");
     }
@@ -254,6 +315,19 @@ export function evaluateRisk(inputs = {}) {
 
     if (threatResult.events.abuseEvents >= 5) {
       addWeightedScore(state, 10, "threat_repeat_abuse_events");
+    }
+
+    if (threatResult.events.blockEvents >= 3) {
+      addWeightedScore(state, 12, "threat_repeat_block_events");
+    }
+
+    if (threatResult.events.hardBlockSignals >= 2) {
+      state.hardBlockSignals += 1;
+      addWeightedScore(state, 15, "threat_hard_block_memory");
+    }
+
+    if (threatResult.events.criticalRouteHits >= 5) {
+      addWeightedScore(state, 15, "threat_critical_route_pressure");
     }
   }
 
@@ -268,6 +342,13 @@ export function evaluateRisk(inputs = {}) {
     ) {
       addWeightedScore(state, 20, "cross_signal_sensitive_route_attack");
     }
+
+    if (
+      botResult.escalatedAction === "block" &&
+      abuseResult.penaltyActive
+    ) {
+      addWeightedScore(state, 15, "cross_signal_bot_block_plus_abuse_penalty");
+    }
   }
 
   if (abuseResult && rateLimitResult) {
@@ -276,6 +357,13 @@ export function evaluateRisk(inputs = {}) {
       rateLimitResult.burstCount >= 8
     ) {
       addWeightedScore(state, 12, "cross_signal_burst_alignment");
+    }
+
+    if (
+      abuseResult.snapshot.criticalRouteTouchesRecent >= 2 &&
+      rateLimitResult.routeSensitivity === "critical"
+    ) {
+      addWeightedScore(state, 12, "cross_signal_critical_route_alignment");
     }
   }
 
@@ -289,8 +377,8 @@ export function evaluateRisk(inputs = {}) {
 
   if (action === "block") {
     containmentAction = level === "critical"
-      ? "temporary_containment"
-      : "freeze_sensitive_route";
+      ? "freeze_sensitive_route"
+      : "temporary_containment";
   } else if (action === "challenge") {
     containmentAction = "step_up_verification";
   } else if (action === "throttle") {
@@ -302,7 +390,7 @@ export function evaluateRisk(inputs = {}) {
     level,
     action,
     containmentAction,
-    hardBlockSignals: state.hardBlockSignals,
+    hardBlockSignals: safeInt(state.hardBlockSignals, 0, 0, 100),
     reasons: state.reasons
   };
 }
