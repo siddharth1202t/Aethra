@@ -2,6 +2,7 @@ import { initializeApp, cert, getApps } from "firebase-admin/app";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
 
 let adminDb = null;
+let adminInitFailed = false;
 
 const ALLOWED_LEVELS = new Set([
   "info",
@@ -16,30 +17,13 @@ const MAX_EMAIL_LENGTH = 200;
 const MAX_USER_ID_LENGTH = 128;
 const MAX_IP_LENGTH = 100;
 const MAX_ROUTE_LENGTH = 150;
+const MAX_SOURCE_LENGTH = 50;
+const MAX_EVENT_ID_LENGTH = 80;
 const MAX_METADATA_STRING_LENGTH = 1000;
 const MAX_METADATA_KEY_LENGTH = 100;
 const MAX_METADATA_ITEMS = 30;
 const MAX_METADATA_ARRAY_ITEMS = 25;
 const MAX_METADATA_DEPTH = 4;
-
-function getAdminDb() {
-  if (adminDb) {
-    return adminDb;
-  }
-
-  if (!getApps().length) {
-    initializeApp({
-      credential: cert({
-        projectId: process.env.FIREBASE_PROJECT_ID,
-        clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-        privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, "\n")
-      })
-    });
-  }
-
-  adminDb = getFirestore();
-  return adminDb;
-}
 
 function safeString(value, maxLength = 300) {
   return String(value || "").slice(0, maxLength);
@@ -100,9 +84,70 @@ function sanitizeMetadata(value, depth = 0) {
   return safeString(value, 500);
 }
 
+function hasFirebaseAdminEnv() {
+  return Boolean(
+    process.env.FIREBASE_PROJECT_ID &&
+    process.env.FIREBASE_CLIENT_EMAIL &&
+    process.env.FIREBASE_PRIVATE_KEY
+  );
+}
+
+function createEventId() {
+  return safeString(
+    `sec_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
+    MAX_EVENT_ID_LENGTH
+  );
+}
+
+function getSeverityScore(level) {
+  if (level === "critical") return 90;
+  if (level === "error") return 70;
+  if (level === "warning") return 40;
+  return 10;
+}
+
+function getAdminDb() {
+  if (adminDb) {
+    return adminDb;
+  }
+
+  if (adminInitFailed) {
+    return null;
+  }
+
+  try {
+    if (!hasFirebaseAdminEnv()) {
+      adminInitFailed = true;
+      console.error("Firebase Admin env vars are missing for security log writer.");
+      return null;
+    }
+
+    if (!getApps().length) {
+      initializeApp({
+        credential: cert({
+          projectId: process.env.FIREBASE_PROJECT_ID,
+          clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+          privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, "\n")
+        })
+      });
+    }
+
+    adminDb = getFirestore();
+    return adminDb;
+  } catch (error) {
+    adminInitFailed = true;
+    console.error("Firebase Admin initialization failed:", error);
+    return null;
+  }
+}
+
 export async function writeSecurityLog(data = {}) {
   try {
     const db = getAdminDb();
+
+    if (!db) {
+      return false;
+    }
 
     const type = safeString(data.type || "unknown", MAX_TYPE_LENGTH);
     const level = safeLevel(data.level);
@@ -111,16 +156,32 @@ export async function writeSecurityLog(data = {}) {
     const userId = safeString(data.userId || "", MAX_USER_ID_LENGTH);
     const ip = safeString(data.ip || "unknown", MAX_IP_LENGTH);
     const route = safeString(data.route || "unknown-route", MAX_ROUTE_LENGTH);
-    const metadata = sanitizeMetadata(data.metadata || {});
+
+    const metadataInput = isPlainObject(data.metadata) ? data.metadata : {};
+    const metadata = sanitizeMetadata(metadataInput);
+
+    const source = safeString(
+      metadataInput?.source || data.source || "unspecified",
+      MAX_SOURCE_LENGTH
+    );
+
+    const eventId = safeString(data.eventId || createEventId(), MAX_EVENT_ID_LENGTH);
+    const severityScore = safeNumber(
+      data.severityScore,
+      getSeverityScore(level)
+    );
 
     const log = {
+      eventId,
       type,
       level,
+      severityScore,
       message,
       email,
       userId,
       ip,
       route,
+      source,
       metadata,
       createdAt: FieldValue.serverTimestamp(),
       createdAtMs: Date.now()
