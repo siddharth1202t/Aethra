@@ -1,14 +1,14 @@
 import { redis } from "./_redis.js";
 import { writeSecurityLog } from "./_security-log-writer.js";
+import { createActorContext } from "./_actor-context.js";
+import { runSecurityOrchestrator } from "./_security-orchestrator.js";
 import {
   safeString,
-  safeNumber,
   safePositiveInt,
   sanitizeBody,
   sanitizeMetadata,
   buildBlockedResponse,
-  buildMethodNotAllowedResponse,
-  runRouteSecurity
+  buildMethodNotAllowedResponse
 } from "./_api-security.js";
 
 const MAX_ATTEMPTS = 5;
@@ -48,6 +48,10 @@ function buildIpAttemptKey(ip) {
   return `login-attempt-ip:${safeString(ip, 120)}`;
 }
 
+function isOriginAllowed(origin = "") {
+  return ALLOWED_ORIGINS.has(safeString(origin, 200).trim().toLowerCase());
+}
+
 async function getStoredRecord(redisKey) {
   const now = Date.now();
 
@@ -63,10 +67,7 @@ async function getStoredRecord(redisKey) {
       };
     }
 
-    const parsed =
-      typeof raw === "string"
-        ? JSON.parse(raw)
-        : raw;
+    const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
 
     const normalized = {
       count: safePositiveInt(parsed?.count, 0),
@@ -152,37 +153,28 @@ export default async function handler(req, res) {
       body.behavior && typeof body.behavior === "object" && !Array.isArray(body.behavior)
         ? body.behavior
         : {};
-    const sessionId = safeString(behavior.sessionId || body.sessionId || "", 120);
 
-    const security = runRouteSecurity({
+    const actor = createActorContext({
       req,
-      route: `${ROUTE}:${action || "unknown"}${actionLabel ? `:${actionLabel}` : ""}`,
-      allowedOrigins: ALLOWED_ORIGINS,
-      rateLimit: {
-        key: `login-attempt:${safeString(req?.headers?.["x-forwarded-for"] || req?.headers?.["x-real-ip"] || req?.socket?.remoteAddress || "unknown", 100)}`,
-        limit: 40,
-        windowMs: 10 * 60 * 1000
-      },
       body,
       behavior,
-      sessionId,
-      abuseSuccess: action !== "fail"
+      context: {
+        email: rawEmail
+      },
+      route: `${ROUTE}:${action || "unknown"}${actionLabel ? `:${actionLabel}` : ""}`
     });
 
-    const ip = security.ip;
-    const origin = security.origin;
-
-    if (!security.originAllowed) {
+    if (!isOriginAllowed(actor.origin)) {
       await writeSecurityLog({
         type: "forbidden_origin",
         level: "warning",
         message: "Blocked request from forbidden origin",
-        ip,
+        ip: actor.ip,
         route: ROUTE,
         metadata: {
           source: "server_enforced",
-          origin,
-          requestUserAgent: security.requestUserAgent
+          origin: actor.origin,
+          requestUserAgent: actor.userAgent
         }
       });
 
@@ -191,7 +183,28 @@ export default async function handler(req, res) {
       );
     }
 
-    if (security.rateLimitResult && !security.rateLimitResult.allowed) {
+    const security = await runSecurityOrchestrator({
+      req,
+      body,
+      behavior,
+      route: actor.route,
+      context: {
+        ip: actor.ip,
+        sessionId: actor.sessionId,
+        userId: actor.userId,
+        email: rawEmail
+      },
+      rateLimitConfig: {
+        key: `login-attempt:${actor.ip}`,
+        limit: 40,
+        windowMs: 10 * 60 * 1000
+      },
+      abuseSuccess: action !== "fail"
+    });
+
+    const ip = security.actor.ip;
+
+    if (security.signals.rateLimitResult && !security.signals.rateLimitResult.allowed) {
       await writeSecurityLog({
         type: "login_attempt_rate_limited",
         level: "warning",
@@ -200,17 +213,19 @@ export default async function handler(req, res) {
         route: ROUTE,
         metadata: {
           source: "server_enforced",
-          action: security.rateLimitResult.recommendedAction,
-          remainingMs: security.rateLimitResult.remainingMs || 0,
-          violations: security.rateLimitResult.violations || 0
+          action: security.signals.rateLimitResult.recommendedAction,
+          remainingMs: security.signals.rateLimitResult.remainingMs || 0,
+          violations: security.signals.rateLimitResult.violations || 0,
+          riskScore: security.risk.riskScore,
+          riskLevel: security.risk.level
         }
       });
 
       return res.status(429).json({
         success: false,
         message: "Too many requests. Please try again later.",
-        action: security.rateLimitResult.recommendedAction,
-        remainingMs: security.rateLimitResult.remainingMs || 0
+        action: security.signals.rateLimitResult.recommendedAction,
+        remainingMs: security.signals.rateLimitResult.remainingMs || 0
       });
     }
 
@@ -256,10 +271,8 @@ export default async function handler(req, res) {
     }
 
     const now = Date.now();
-    const combinedRisk = security.combinedRisk;
-    const finalAction = security.finalAction;
 
-    if (finalAction === "block") {
+    if (security.risk.action === "block") {
       await writeSecurityLog({
         type: "blocked_suspicious_request",
         level: "critical",
@@ -271,21 +284,21 @@ export default async function handler(req, res) {
           source: "server_enforced",
           action,
           actionLabel,
-          botAnalysis: security.botAnalysis,
-          abuseAnalysis: security.abuseAnalysis,
-          combinedRisk,
-          finalAction
+          risk: security.risk,
+          botResult: security.signals.botResult,
+          abuseResult: security.signals.abuseResult,
+          threatResult: security.signals.threatResult
         })
       });
 
       return res.status(429).json(
         buildBlockedResponse("Suspicious activity detected. Please try again later.", {
-          action: finalAction
+          action: security.risk.action
         })
       );
     }
 
-    if (finalAction === "challenge" || finalAction === "throttle") {
+    if (security.risk.action === "challenge" || security.risk.action === "throttle") {
       await writeSecurityLog({
         type: "temporary_security_challenge",
         level: "warning",
@@ -297,10 +310,10 @@ export default async function handler(req, res) {
           source: "server_enforced",
           action,
           actionLabel,
-          botAnalysis: security.botAnalysis,
-          abuseAnalysis: security.abuseAnalysis,
-          combinedRisk,
-          finalAction
+          risk: security.risk,
+          botResult: security.signals.botResult,
+          abuseResult: security.signals.abuseResult,
+          threatResult: security.signals.threatResult
         })
       });
     }
@@ -311,7 +324,7 @@ export default async function handler(req, res) {
     if (ipRecord.lockUntil > now) {
       return res.status(200).json(
         buildLockResponse(true, ipRecord.lockUntil - now, {
-          risk: security.riskPayload
+          risk: security.risk
         })
       );
     }
@@ -324,7 +337,7 @@ export default async function handler(req, res) {
 
       return res.status(200).json(
         buildLockResponse(isLocked, record.lockUntil - now, {
-          risk: security.riskPayload
+          risk: security.risk
         })
       );
     }
@@ -336,7 +349,7 @@ export default async function handler(req, res) {
       ipRecord.count += 1;
       ipRecord.lastAttempt = now;
 
-      if (finalAction === "challenge" || finalAction === "throttle") {
+      if (security.risk.action === "challenge" || security.risk.action === "throttle") {
         record.escalationCount += 1;
         ipRecord.escalationCount += 1;
       }
@@ -357,10 +370,8 @@ export default async function handler(req, res) {
             attempts: record.count,
             escalationCount: record.escalationCount,
             actionLabel,
-            botAnalysis: security.botAnalysis,
-            abuseAnalysis: security.abuseAnalysis,
-            combinedRisk,
-            finalAction
+            risk: security.risk,
+            threatResult: security.signals.threatResult
           })
         });
       }
@@ -380,8 +391,7 @@ export default async function handler(req, res) {
             attempts: ipRecord.count,
             escalationCount: ipRecord.escalationCount,
             actionLabel,
-            combinedRisk,
-            finalAction
+            risk: security.risk
           })
         });
       }
@@ -394,7 +404,7 @@ export default async function handler(req, res) {
       return res.status(200).json(
         buildLockResponse(isLocked, record.lockUntil - now, {
           attempts: record.count,
-          risk: security.riskPayload
+          risk: security.risk
         })
       );
     }
