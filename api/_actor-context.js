@@ -7,24 +7,67 @@ const MAX_ORIGIN_LENGTH = 200;
 const MAX_METHOD_LENGTH = 20;
 const MAX_EMAIL_LENGTH = 200;
 
+const ALLOWED_METHODS = new Set([
+  "GET",
+  "POST",
+  "PUT",
+  "PATCH",
+  "DELETE",
+  "OPTIONS",
+  "HEAD"
+]);
+
+function stripControlChars(value = "") {
+  return String(value).replace(/[\u0000-\u001F\u007F]/g, "");
+}
+
 function safeString(value, maxLength = 300) {
-  return String(value || "").trim().slice(0, maxLength);
+  return stripControlChars(value || "").trim().slice(0, maxLength);
+}
+
+function sanitizeKeyPart(value = "", maxLength = 120) {
+  return safeString(value, maxLength).replace(/[^a-zA-Z0-9._:@/-]/g, "");
 }
 
 function normalizeIp(value = "") {
-  return safeString(value || "unknown", MAX_IP_LENGTH);
+  let ip = safeString(value || "unknown", MAX_IP_LENGTH);
+
+  if (!ip) return "unknown";
+
+  // Remove IPv6 localhost prefix if present
+  if (ip.startsWith("::ffff:")) {
+    ip = ip.slice(7);
+  }
+
+  // Keep only characters that can appear in IPv4 / IPv6 / proxy values
+  ip = ip.replace(/[^a-fA-F0-9:.,]/g, "").slice(0, MAX_IP_LENGTH);
+
+  return ip || "unknown";
 }
 
 function normalizeSessionId(value = "") {
-  return safeString(value || "", MAX_SESSION_ID_LENGTH);
+  return sanitizeKeyPart(value || "", MAX_SESSION_ID_LENGTH);
 }
 
 function normalizeUserId(value = "") {
-  return safeString(value || "", MAX_USER_ID_LENGTH);
+  return sanitizeKeyPart(value || "", MAX_USER_ID_LENGTH);
 }
 
 function normalizeRoute(value = "") {
-  return safeString(value || "unknown-route", MAX_ROUTE_LENGTH).toLowerCase();
+  const raw = safeString(value || "unknown-route", MAX_ROUTE_LENGTH * 2);
+
+  if (!raw) return "unknown-route";
+
+  // Remove query strings and fragments so actor keys stay stable
+  const withoutQuery = raw.split("?")[0].split("#")[0];
+
+  const cleaned = withoutQuery
+    .replace(/\/{2,}/g, "/")
+    .replace(/[^a-zA-Z0-9/_-]/g, "")
+    .toLowerCase()
+    .slice(0, MAX_ROUTE_LENGTH);
+
+  return cleaned || "unknown-route";
 }
 
 function normalizeUserAgent(value = "") {
@@ -32,15 +75,34 @@ function normalizeUserAgent(value = "") {
 }
 
 function normalizeOrigin(value = "") {
-  return safeString(value || "", MAX_ORIGIN_LENGTH).toLowerCase();
+  const raw = safeString(value || "", MAX_ORIGIN_LENGTH);
+
+  if (!raw) return "";
+
+  try {
+    const parsed = new URL(raw);
+    return safeString(parsed.origin.toLowerCase(), MAX_ORIGIN_LENGTH);
+  } catch {
+    return "";
+  }
 }
 
 function normalizeMethod(value = "") {
-  return safeString(value || "GET", MAX_METHOD_LENGTH).toUpperCase();
+  const method = safeString(value || "GET", MAX_METHOD_LENGTH).toUpperCase();
+  return ALLOWED_METHODS.has(method) ? method : "GET";
 }
 
 function normalizeEmail(value = "") {
-  return safeString(value || "", MAX_EMAIL_LENGTH).toLowerCase();
+  const email = safeString(value || "", MAX_EMAIL_LENGTH).toLowerCase();
+
+  if (!email) return "";
+
+  // Very light sanity check, avoids storing obvious garbage
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return "";
+  }
+
+  return email;
 }
 
 function getHeaderValue(req, name) {
@@ -82,7 +144,9 @@ function extractOrigin(req = null) {
 }
 
 function extractUserAgent(req = null, fallback = "") {
-  return normalizeUserAgent(getHeaderValue(req, "user-agent") || fallback);
+  return normalizeUserAgent(
+    getHeaderValue(req, "user-agent") || fallback
+  );
 }
 
 function extractRoute(req = null, fallback = "") {
@@ -129,8 +193,8 @@ function buildActorKey({
 } = {}) {
   return [
     normalizeIp(ip || "unknown"),
-    normalizeSessionId(sessionId || "no-session"),
-    normalizeUserId(userId || "anon-user")
+    normalizeSessionId(sessionId || "no-session") || "no-session",
+    normalizeUserId(userId || "anon-user") || "anon-user"
   ].join("::");
 }
 
@@ -169,7 +233,10 @@ export function createActorContext({
   const resolvedRoute = extractRoute(req, route);
   const method = extractMethod(req, "GET");
   const origin = extractOrigin(req);
-  const userAgent = extractUserAgent(req, safeString(behavior.userAgent || "", MAX_USER_AGENT_LENGTH));
+  const userAgent = extractUserAgent(
+    req,
+    safeString(behavior.userAgent || "", MAX_USER_AGENT_LENGTH)
+  );
   const email = normalizeEmail(body.email || context.email || "");
 
   return {
