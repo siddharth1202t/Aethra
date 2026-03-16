@@ -7,6 +7,7 @@ const MAX_KEY_LENGTH = 200;
 
 const PENALTY_BASE_MS = 5 * 60 * 1000;
 const MAX_PENALTY_MS = 2 * 60 * 60 * 1000;
+const PENALTY_REAPPLY_GUARD_MS = 60 * 1000;
 
 const BURST_WINDOW_MS = 15 * 1000;
 const VIOLATION_DECAY_MS = 30 * 60 * 1000;
@@ -16,18 +17,51 @@ function safeNumber(value, fallback = 0) {
   return Number.isFinite(num) ? num : fallback;
 }
 
-function normalizePositiveInteger(value, fallback) {
+function normalizePositiveInteger(value, fallback = 0, max = 1_000_000) {
   const num = Math.floor(safeNumber(value, fallback));
-  return num >= 0 ? num : fallback;
+  if (!Number.isFinite(num) || num < 0) return fallback;
+  return Math.min(num, max);
+}
+
+function safeTimestamp(value, fallback = 0) {
+  return normalizePositiveInteger(value, fallback, Date.now() + 60_000);
+}
+
+function safeString(value, maxLength = 300) {
+  return String(value || "")
+    .replace(/[\u0000-\u001F\u007F]/g, "")
+    .trim()
+    .slice(0, maxLength);
+}
+
+function safeJsonParse(raw, fallback = null) {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return fallback;
+  }
 }
 
 function normalizeKey(input) {
-  const key = String(input || "").trim().slice(0, MAX_KEY_LENGTH);
+  const key = safeString(input || "", MAX_KEY_LENGTH).replace(/[^a-zA-Z0-9._:@/-]/g, "");
   return key || "unknown";
 }
 
 function normalizeRoute(route) {
-  return String(route || "unknown-route").trim().toLowerCase().slice(0, 150);
+  const raw = safeString(route || "unknown-route", 300);
+
+  if (!raw) return "unknown-route";
+
+  const cleaned = raw
+    .split("?")[0]
+    .split("#")[0]
+    .replace(/\/{2,}/g, "/")
+    .replace(/[^a-zA-Z0-9/_-]/g, "")
+    .trim()
+    .toLowerCase()
+    .slice(0, 150);
+
+  return cleaned || "unknown-route";
 }
 
 function buildRedisKey(key) {
@@ -42,9 +76,32 @@ function createEmptyRecord(now) {
     violations: 0,
     penaltyUntil: 0,
     lastViolationAt: 0,
+    lastPenaltyAppliedAt: 0,
     lastRoute: "unknown-route",
     highestCountSeen: 0,
     recentHits: []
+  };
+}
+
+function normalizeRecord(raw, now) {
+  const record = raw && typeof raw === "object" ? raw : {};
+
+  return {
+    count: normalizePositiveInteger(record.count, 0),
+    start: safeTimestamp(record.start, now),
+    updatedAt: safeTimestamp(record.updatedAt, now),
+    violations: normalizePositiveInteger(record.violations, 0),
+    penaltyUntil: safeTimestamp(record.penaltyUntil, 0),
+    lastViolationAt: safeTimestamp(record.lastViolationAt, 0),
+    lastPenaltyAppliedAt: safeTimestamp(record.lastPenaltyAppliedAt, 0),
+    lastRoute: normalizeRoute(record.lastRoute || "unknown-route"),
+    highestCountSeen: normalizePositiveInteger(record.highestCountSeen, 0),
+    recentHits: Array.isArray(record.recentHits)
+      ? record.recentHits
+          .map((ts) => safeTimestamp(ts, 0))
+          .filter((ts) => ts > 0 && now - ts <= BURST_WINDOW_MS)
+          .slice(-50)
+      : []
   };
 }
 
@@ -123,18 +180,29 @@ function getRecommendedAction({
 }
 
 function decayViolations(record, now) {
+  const lastViolationAt = safeTimestamp(record.lastViolationAt, 0);
+  const violations = normalizePositiveInteger(record.violations, 0);
+
   if (
-    safeNumber(record.lastViolationAt, 0) > 0 &&
-    now - safeNumber(record.lastViolationAt, 0) > VIOLATION_DECAY_MS &&
-    safeNumber(record.violations, 0) > 0
+    lastViolationAt > 0 &&
+    now - lastViolationAt > VIOLATION_DECAY_MS &&
+    violations > 0
   ) {
-    record.violations = Math.max(0, normalizePositiveInteger(record.violations, 0) - 1);
+    const decaySteps = Math.floor((now - lastViolationAt) / VIOLATION_DECAY_MS);
+    record.violations = Math.max(0, violations - Math.max(1, decaySteps));
     record.lastViolationAt = now;
   }
 }
 
+function shouldApplyPenalty(record, now) {
+  const lastPenaltyAppliedAt = safeTimestamp(record.lastPenaltyAppliedAt, 0);
+  return now - lastPenaltyAppliedAt >= PENALTY_REAPPLY_GUARD_MS;
+}
+
 function applyPenalty(record, now, routeSensitivity = "normal") {
   const violations = normalizePositiveInteger(record.violations, 0);
+  const existingPenaltyUntil = safeTimestamp(record.penaltyUntil, 0);
+  const activePenaltyRemaining = Math.max(0, existingPenaltyUntil - now);
 
   let multiplier = 1;
   if (routeSensitivity === "critical") multiplier = 2;
@@ -142,10 +210,16 @@ function applyPenalty(record, now, routeSensitivity = "normal") {
 
   const penaltyMs = Math.min(
     MAX_PENALTY_MS,
-    Math.floor((PENALTY_BASE_MS + violations * 7 * 60 * 1000) * multiplier)
+    Math.floor(
+      Math.max(
+        PENALTY_BASE_MS + violations * 7 * 60 * 1000,
+        activePenaltyRemaining > 0 ? activePenaltyRemaining * 1.35 : 0
+      ) * multiplier
+    )
   );
 
   record.penaltyUntil = now + penaltyMs;
+  record.lastPenaltyAppliedAt = now;
 }
 
 function updateBurstMemory(record, now) {
@@ -155,13 +229,13 @@ function updateBurstMemory(record, now) {
 
   record.recentHits.push(now);
   record.recentHits = record.recentHits
-    .filter((ts) => now - safeNumber(ts, 0) <= BURST_WINDOW_MS)
+    .filter((ts) => now - safeTimestamp(ts, 0) <= BURST_WINDOW_MS)
     .slice(-50);
 
   return record.recentHits.length;
 }
 
-async function getStoredRecord(redisKey) {
+async function getStoredRecord(redisKey, now) {
   try {
     const raw = await redis.get(redisKey);
 
@@ -170,11 +244,15 @@ async function getStoredRecord(redisKey) {
     }
 
     if (typeof raw === "string") {
-      return JSON.parse(raw);
+      const parsed = safeJsonParse(raw, null);
+      if (!parsed || typeof parsed !== "object") {
+        return null;
+      }
+      return normalizeRecord(parsed, now);
     }
 
     if (typeof raw === "object") {
-      return raw;
+      return normalizeRecord(raw, now);
     }
 
     return null;
@@ -187,7 +265,8 @@ async function getStoredRecord(redisKey) {
 async function storeRecord(redisKey, record) {
   try {
     const ttlSeconds = Math.max(1, Math.ceil(STALE_TTL_MS / 1000));
-    await redis.set(redisKey, JSON.stringify(record), { ex: ttlSeconds });
+    const normalized = normalizeRecord(record, Date.now());
+    await redis.set(redisKey, JSON.stringify(normalized), { ex: ttlSeconds });
     return true;
   } catch (error) {
     console.error("Redis rate-limit write failed:", error);
@@ -207,8 +286,8 @@ export async function checkApiRateLimit(options = {}) {
     key = normalizeKey(options);
   } else {
     key = normalizeKey(options.key);
-    limit = normalizePositiveInteger(options.limit, DEFAULT_LIMIT);
-    windowMs = normalizePositiveInteger(options.windowMs, DEFAULT_WINDOW_MS);
+    limit = Math.max(1, normalizePositiveInteger(options.limit, DEFAULT_LIMIT));
+    windowMs = Math.max(1_000, normalizePositiveInteger(options.windowMs, DEFAULT_WINDOW_MS));
     route = normalizeRoute(options.route);
   }
 
@@ -216,7 +295,7 @@ export async function checkApiRateLimit(options = {}) {
   const routeWeight = getRouteWeight(route);
   const redisKey = buildRedisKey(key);
 
-  let record = await getStoredRecord(redisKey);
+  let record = await getStoredRecord(redisKey, now);
 
   if (!record) {
     record = createEmptyRecord(now);
@@ -224,12 +303,12 @@ export async function checkApiRateLimit(options = {}) {
 
   decayViolations(record, now);
 
-  if (now - safeNumber(record.start, now) >= windowMs) {
+  if (now - safeTimestamp(record.start, now) >= windowMs) {
     record.count = 0;
     record.start = now;
   }
 
-  const penaltyActive = safeNumber(record.penaltyUntil) > now;
+  const penaltyActiveBefore = safeTimestamp(record.penaltyUntil, 0) > now;
 
   record.count = normalizePositiveInteger(record.count, 0);
   record.count += routeWeight;
@@ -242,16 +321,19 @@ export async function checkApiRateLimit(options = {}) {
 
   const burstCount = updateBurstMemory(record, now);
 
-  let allowed = record.count <= limit && !penaltyActive;
+  let allowed = record.count <= limit && !penaltyActiveBefore;
 
-  if (!allowed && !penaltyActive) {
+  if (!allowed && !penaltyActiveBefore) {
     record.violations = normalizePositiveInteger(record.violations, 0) + 1;
     record.lastViolationAt = now;
 
     if (
-      record.violations >= 3 ||
-      burstCount >= 10 ||
-      (routeSensitivity === "critical" && record.violations >= 2)
+      shouldApplyPenalty(record, now) &&
+      (
+        record.violations >= 3 ||
+        burstCount >= 10 ||
+        (routeSensitivity === "critical" && record.violations >= 2)
+      )
     ) {
       applyPenalty(record, now, routeSensitivity);
     }
@@ -259,17 +341,20 @@ export async function checkApiRateLimit(options = {}) {
 
   await storeRecord(redisKey, record);
 
+  const penaltyActive = safeTimestamp(record.penaltyUntil, 0) > now;
+  allowed = record.count <= limit && !penaltyActive;
+
   const overBy = Math.max(0, record.count - limit);
   const remaining = Math.max(0, limit - record.count);
   const penaltyRemainingMs = penaltyActive
-    ? Math.max(0, safeNumber(record.penaltyUntil) - now)
+    ? Math.max(0, safeTimestamp(record.penaltyUntil, 0) - now)
     : 0;
 
   const remainingMs = penaltyActive
     ? penaltyRemainingMs
     : allowed
       ? 0
-      : Math.max(0, windowMs - (now - record.start));
+      : Math.max(0, windowMs - (now - safeTimestamp(record.start, now)));
 
   const recommendedAction = getRecommendedAction({
     allowed,
@@ -298,12 +383,12 @@ export async function checkApiRateLimit(options = {}) {
     remaining,
     remainingMs,
     limit,
-    count: record.count,
+    count: normalizePositiveInteger(record.count, 0),
     overBy,
     windowMs,
-    resetAt: record.start + windowMs,
+    resetAt: safeTimestamp(record.start, now) + windowMs,
     penaltyActive,
-    penaltyUntil: safeNumber(record.penaltyUntil) || 0,
+    penaltyUntil: safeTimestamp(record.penaltyUntil, 0),
     violations: normalizePositiveInteger(record.violations, 0),
     routeWeight,
     routeSensitivity,
