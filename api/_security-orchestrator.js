@@ -6,9 +6,52 @@ import { trackApiAbuse } from "./_api-abuse-protection.js";
 import { checkApiRateLimit } from "./_rate-limit.js";
 import { validateFreshRequest } from "./_request-freshness.js";
 import { evaluateThreat } from "./_threat-intelligence.js";
+import { evaluateContainment } from "./_security-containment.js";
 
 function safeString(value, maxLength = 200) {
   return String(value || "").slice(0, maxLength);
+}
+
+function pickFinalAction({ containment, risk, rateLimitResult }) {
+  if (containment?.blocked) {
+    return "block";
+  }
+
+  if (risk?.action === "block") {
+    return "block";
+  }
+
+  if (rateLimitResult && !rateLimitResult.allowed) {
+    if (rateLimitResult.recommendedAction === "block") return "block";
+    if (rateLimitResult.recommendedAction === "challenge") return "challenge";
+    if (rateLimitResult.recommendedAction === "throttle") return "throttle";
+  }
+
+  if (containment?.action === "challenge" && risk?.action === "allow") {
+    return "challenge";
+  }
+
+  if (risk?.action === "challenge") {
+    return "challenge";
+  }
+
+  if (risk?.action === "throttle") {
+    return "throttle";
+  }
+
+  return "allow";
+}
+
+function pickFinalContainmentAction({ containment, risk }) {
+  if (containment?.blocked) {
+    return containment.reason || "containment_blocked";
+  }
+
+  if (containment?.action === "challenge") {
+    return containment.reason || "containment_challenge";
+  }
+
+  return risk?.containmentAction || "none";
 }
 
 export async function runSecurityOrchestrator({
@@ -19,7 +62,8 @@ export async function runSecurityOrchestrator({
   route = "",
   rateLimitConfig = null,
   freshnessConfig = null,
-  abuseSuccess = true
+  abuseSuccess = true,
+  containmentConfig = {}
 } = {}) {
   const actor = createActorContext({
     req,
@@ -113,15 +157,44 @@ export async function runSecurityOrchestrator({
     threatResult
   });
 
+  let containmentResult = null;
+
+  try {
+    containmentResult = await evaluateContainment({
+      route: actor.route,
+      isAdminRoute: Boolean(containmentConfig.isAdminRoute),
+      isWriteAction: Boolean(containmentConfig.isWriteAction),
+      actionType: safeString(containmentConfig.actionType || "", 50)
+    });
+  } catch (error) {
+    console.error("Containment evaluation failed:", error);
+  }
+
+  const finalAction = pickFinalAction({
+    containment: containmentResult,
+    risk,
+    rateLimitResult
+  });
+
+  const finalContainmentAction = pickFinalContainmentAction({
+    containment: containmentResult,
+    risk
+  });
+
   return {
     actor,
-    risk,
+    risk: {
+      ...risk,
+      finalAction,
+      finalContainmentAction
+    },
     signals: {
       botResult,
       abuseResult,
       rateLimitResult,
       freshnessResult,
-      threatResult
+      threatResult,
+      containmentResult
     }
   };
 }
