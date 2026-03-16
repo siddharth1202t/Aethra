@@ -10,6 +10,7 @@ import {
   buildMethodNotAllowedResponse,
   runRouteSecurity
 } from "./_api-security.js";
+import { validateFreshRequest } from "./_request-freshness.js";
 
 const ROUTE = "/api/security-log";
 
@@ -33,6 +34,7 @@ const ALLOWED_LEVELS = new Set([
 
 const MAX_BODY_KEYS = 12;
 const MAX_EVENT_AGE_MS = 2 * 60 * 1000;
+const EVENT_FUTURE_TOLERANCE_MS = 15 * 1000;
 
 function safeClientType(type) {
   const normalized = safeString(type || "client_security_event", 50).toLowerCase();
@@ -53,8 +55,16 @@ function sanitizeClient(client = {}) {
     platform: safeString(client.platform || "", 100),
     screenWidth: safeNumber(client.screenWidth, 0),
     screenHeight: safeNumber(client.screenHeight, 0),
+    viewportWidth: safeNumber(client.viewportWidth, 0),
+    viewportHeight: safeNumber(client.viewportHeight, 0),
+    pixelRatio: safeNumber(client.pixelRatio, 1),
+    hardwareConcurrency: safeNumber(client.hardwareConcurrency, 0),
+    deviceMemory: safeNumber(client.deviceMemory, 0),
     url: safeString(client.url || "", 500),
-    referrer: safeString(client.referrer || "", 500)
+    referrer: safeString(client.referrer || "", 500),
+    timezone: safeString(client.timezone || "", 100),
+    visibilityState: safeString(client.visibilityState || "", 30),
+    telemetryVersion: safeNumber(client.telemetryVersion, 0)
   };
 }
 
@@ -72,7 +82,7 @@ function getEventFreshness(eventAt) {
 
   const ageMs = now - safeEventAt;
 
-  if (ageMs < -15_000) {
+  if (ageMs < -EVENT_FUTURE_TOLERANCE_MS) {
     return {
       valid: false,
       ageMs,
@@ -95,6 +105,10 @@ function getEventFreshness(eventAt) {
   };
 }
 
+function buildTelemetryNonceScope(type = "") {
+  return `security-log:${safeClientType(type)}`;
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json(buildMethodNotAllowedResponse());
@@ -115,7 +129,13 @@ export default async function handler(req, res) {
       route: ROUTE,
       allowedOrigins: ALLOWED_ORIGINS,
       rateLimit: {
-        key: `security-log:${safeString(req?.headers?.["x-forwarded-for"] || req?.headers?.["x-real-ip"] || req?.socket?.remoteAddress || "unknown", 100)}`,
+        key: `security-log:${safeString(
+          req?.headers?.["x-forwarded-for"] ||
+          req?.headers?.["x-real-ip"] ||
+          req?.socket?.remoteAddress ||
+          "unknown",
+          100
+        )}`,
         limit: 20,
         windowMs: 5 * 60 * 1000
       },
@@ -171,10 +191,7 @@ export default async function handler(req, res) {
       });
     }
 
-    if (
-      security.finalAction === "block" ||
-      security.finalAction === "challenge"
-    ) {
+    if (security.finalAction === "block" || security.finalAction === "challenge") {
       await writeSecurityLog({
         type: "client_security_event",
         level: "warning",
@@ -195,6 +212,23 @@ export default async function handler(req, res) {
           action: security.finalAction
         })
       );
+    }
+
+    if (security.finalAction === "throttle") {
+      await writeSecurityLog({
+        type: "client_security_event",
+        level: "warning",
+        message: "Throttled suspicious client telemetry request",
+        ip,
+        route: ROUTE,
+        metadata: sanitizeMetadata({
+          source: "server_enforced",
+          abuseAnalysis: security.abuseAnalysis,
+          botAnalysis: security.botAnalysis,
+          combinedRisk: security.combinedRisk,
+          finalAction: security.finalAction
+        })
+      });
     }
 
     const type = safeClientType(body.type);
@@ -227,6 +261,36 @@ export default async function handler(req, res) {
       });
     }
 
+    const freshRequestResult = await validateFreshRequest({
+      requestAt: body.eventAt,
+      nonce: safeString(body.nonce || "", 200),
+      scope: buildTelemetryNonceScope(type),
+      requireNonce: Boolean(body.nonce),
+      maxAgeMs: MAX_EVENT_AGE_MS,
+      futureToleranceMs: EVENT_FUTURE_TOLERANCE_MS,
+      nonceTtlMs: 10 * 60 * 1000
+    });
+
+    if (!freshRequestResult.ok) {
+      await writeSecurityLog({
+        type: "client_security_event",
+        level: "warning",
+        message: "Rejected replayed or invalid client telemetry request",
+        ip,
+        route: ROUTE,
+        metadata: {
+          source: "server_enforced",
+          freshnessCode: safeString(freshRequestResult.code || "", 100),
+          requestUserAgent: security.requestUserAgent
+        }
+      });
+
+      return res.status(400).json({
+        success: false,
+        message: "Invalid telemetry request."
+      });
+    }
+
     await writeSecurityLog({
       type,
       level,
@@ -243,13 +307,15 @@ export default async function handler(req, res) {
         requestOrigin: origin,
         requestUserAgent: security.requestUserAgent,
         sessionIdPresent: safeBoolean(body.sessionId),
+        noncePresent: safeBoolean(body.nonce),
         metadata,
         client
       }
     });
 
     return res.status(200).json({
-      success: true
+      success: true,
+      action: security.finalAction === "allow" ? "allow" : security.finalAction
     });
   } catch (error) {
     console.error("Security log API error:", error);
