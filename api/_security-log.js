@@ -36,6 +36,19 @@ const MAX_BODY_KEYS = 12;
 const MAX_EVENT_AGE_MS = 2 * 60 * 1000;
 const EVENT_FUTURE_TOLERANCE_MS = 15 * 1000;
 
+function normalizeEmail(value = "") {
+  const email = safeString(value || "", 200).toLowerCase();
+  if (!email) return "";
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return "";
+  }
+  return email;
+}
+
+function normalizeUserId(value = "") {
+  return safeString(value || "", 128).replace(/[^a-zA-Z0-9._:@/-]/g, "");
+}
+
 function safeClientType(type) {
   const normalized = safeString(type || "client_security_event", 50).toLowerCase();
   return ALLOWED_CLIENT_TYPES.has(normalized)
@@ -53,55 +66,18 @@ function sanitizeClient(client = {}) {
     userAgent: safeString(client.userAgent || "", 300),
     language: safeString(client.language || "", 50),
     platform: safeString(client.platform || "", 100),
-    screenWidth: safeNumber(client.screenWidth, 0),
-    screenHeight: safeNumber(client.screenHeight, 0),
-    viewportWidth: safeNumber(client.viewportWidth, 0),
-    viewportHeight: safeNumber(client.viewportHeight, 0),
-    pixelRatio: safeNumber(client.pixelRatio, 1),
-    hardwareConcurrency: safeNumber(client.hardwareConcurrency, 0),
-    deviceMemory: safeNumber(client.deviceMemory, 0),
+    screenWidth: Math.max(0, safeNumber(client.screenWidth, 0)),
+    screenHeight: Math.max(0, safeNumber(client.screenHeight, 0)),
+    viewportWidth: Math.max(0, safeNumber(client.viewportWidth, 0)),
+    viewportHeight: Math.max(0, safeNumber(client.viewportHeight, 0)),
+    pixelRatio: Math.max(0, safeNumber(client.pixelRatio, 1)),
+    hardwareConcurrency: Math.max(0, safeNumber(client.hardwareConcurrency, 0)),
+    deviceMemory: Math.max(0, safeNumber(client.deviceMemory, 0)),
     url: safeString(client.url || "", 500),
     referrer: safeString(client.referrer || "", 500),
     timezone: safeString(client.timezone || "", 100),
     visibilityState: safeString(client.visibilityState || "", 30),
-    telemetryVersion: safeNumber(client.telemetryVersion, 0)
-  };
-}
-
-function getEventFreshness(eventAt) {
-  const now = Date.now();
-  const safeEventAt = safeNumber(eventAt, 0);
-
-  if (!safeEventAt) {
-    return {
-      valid: false,
-      ageMs: null,
-      reason: "missing_event_timestamp"
-    };
-  }
-
-  const ageMs = now - safeEventAt;
-
-  if (ageMs < -EVENT_FUTURE_TOLERANCE_MS) {
-    return {
-      valid: false,
-      ageMs,
-      reason: "future_event_timestamp"
-    };
-  }
-
-  if (ageMs > MAX_EVENT_AGE_MS) {
-    return {
-      valid: false,
-      ageMs,
-      reason: "stale_event_timestamp"
-    };
-  }
-
-  return {
-    valid: true,
-    ageMs,
-    reason: null
+    telemetryVersion: Math.max(0, safeNumber(client.telemetryVersion, 0))
   };
 }
 
@@ -124,7 +100,7 @@ export default async function handler(req, res) {
         : {};
     const sessionId = safeString(body.sessionId || "", 120);
 
-    const security = runRouteSecurity({
+    const security = await runRouteSecurity({
       req,
       route: ROUTE,
       allowedOrigins: ALLOWED_ORIGINS,
@@ -142,7 +118,8 @@ export default async function handler(req, res) {
       body,
       behavior,
       sessionId,
-      abuseSuccess: true
+      abuseSuccess: true,
+      userId: normalizeUserId(body.userId || "")
     });
 
     ip = security.ip;
@@ -191,7 +168,7 @@ export default async function handler(req, res) {
       });
     }
 
-    if (security.finalAction === "block" || security.finalAction === "challenge") {
+    if (security.finalAction === "block") {
       await writeSecurityLog({
         type: "client_security_event",
         level: "warning",
@@ -209,7 +186,30 @@ export default async function handler(req, res) {
 
       return res.status(403).json(
         buildBlockedResponse("Suspicious request blocked.", {
-          action: security.finalAction
+          action: "block"
+        })
+      );
+    }
+
+    if (security.finalAction === "challenge") {
+      await writeSecurityLog({
+        type: "client_security_event",
+        level: "warning",
+        message: "Challenge required for suspicious client telemetry request",
+        ip,
+        route: ROUTE,
+        metadata: sanitizeMetadata({
+          source: "server_enforced",
+          abuseAnalysis: security.abuseAnalysis,
+          botAnalysis: security.botAnalysis,
+          combinedRisk: security.combinedRisk,
+          finalAction: security.finalAction
+        })
+      });
+
+      return res.status(403).json(
+        buildBlockedResponse("Verification required.", {
+          action: "challenge"
         })
       );
     }
@@ -234,38 +234,20 @@ export default async function handler(req, res) {
     const type = safeClientType(body.type);
     const level = safeLevel(body.level);
     const message = safeString(body.message || "", 500);
-    const email = safeString(body.email || "", 200);
-    const userId = safeString(body.userId || "", 128);
-    const metadata = sanitizeMetadata(body.metadata || {});
-    const client = sanitizeClient(body.client || {});
-    const eventFreshness = getEventFreshness(body.eventAt);
-
-    if (!eventFreshness.valid) {
-      await writeSecurityLog({
-        type: "client_security_event",
-        level: "warning",
-        message: "Rejected stale or invalid client telemetry timestamp",
-        ip,
-        route: ROUTE,
-        metadata: {
-          source: "server_enforced",
-          freshnessReason: eventFreshness.reason,
-          ageMs: eventFreshness.ageMs,
-          requestUserAgent: security.requestUserAgent
-        }
-      });
-
-      return res.status(400).json({
-        success: false,
-        message: "Invalid event timestamp."
-      });
-    }
+    const email = normalizeEmail(body.email || "");
+    const userId = normalizeUserId(body.userId || "");
+    const metadata = sanitizeMetadata(
+      isPlainObject(body.metadata) ? body.metadata : {}
+    );
+    const client = sanitizeClient(
+      isPlainObject(body.client) ? body.client : {}
+    );
 
     const freshRequestResult = await validateFreshRequest({
       requestAt: body.eventAt,
       nonce: safeString(body.nonce || "", 200),
       scope: buildTelemetryNonceScope(type),
-      requireNonce: Boolean(body.nonce),
+      requireNonce: Boolean(safeString(body.nonce || "", 200)),
       maxAgeMs: MAX_EVENT_AGE_MS,
       futureToleranceMs: EVENT_FUTURE_TOLERANCE_MS,
       nonceTtlMs: 10 * 60 * 1000
@@ -281,6 +263,7 @@ export default async function handler(req, res) {
         metadata: {
           source: "server_enforced",
           freshnessCode: safeString(freshRequestResult.code || "", 100),
+          ageMs: safeNumber(freshRequestResult.ageMs, 0),
           requestUserAgent: security.requestUserAgent
         }
       });
@@ -303,11 +286,11 @@ export default async function handler(req, res) {
         source: "client_untrusted",
         eventAt: safeNumber(body.eventAt, 0),
         receivedAt: Date.now(),
-        ageMs: eventFreshness.ageMs,
+        ageMs: safeNumber(freshRequestResult.ageMs, 0),
         requestOrigin: origin,
         requestUserAgent: security.requestUserAgent,
-        sessionIdPresent: safeBoolean(body.sessionId),
-        noncePresent: safeBoolean(body.nonce),
+        sessionIdPresent: Boolean(sessionId),
+        noncePresent: Boolean(safeString(body.nonce || "", 200)),
         metadata,
         client
       }
