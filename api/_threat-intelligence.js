@@ -1,178 +1,413 @@
-const MAX_COUNTER = 5000;
-const SESSION_KEY = "aethra_session_id";
-const TELEMETRY_VERSION = 2;
+import { redis } from "./_redis.js";
 
-const securityState = {
-  pageLoadedAt: Date.now(),
-  firstInteractionAt: null,
-  mouseMoves: 0,
-  keyPresses: 0,
-  touches: 0,
-  clicks: 0,
-  scrolls: 0,
-  visibilityChanges: 0,
-  lastVisibilityState: document.visibilityState,
-  sessionId: getOrCreateSessionId()
-};
+const THREAT_STATE_TTL_MS = 24 * 60 * 60 * 1000;
+const THREAT_DECAY_MS = 30 * 60 * 1000;
+
+const MAX_IP_LENGTH = 100;
+const MAX_SESSION_ID_LENGTH = 120;
+const MAX_USER_ID_LENGTH = 128;
+const MAX_ROUTE_LENGTH = 150;
+const MAX_REASON_LENGTH = 100;
+const MAX_REASON_HISTORY = 50;
 
 function safeString(value, maxLength = 300) {
   return String(value || "").slice(0, maxLength);
 }
 
-function safeCounter(value) {
+function safeNumber(value, fallback = 0) {
   const num = Number(value);
-  if (!Number.isFinite(num) || num < 0) {
-    return 0;
-  }
-
-  return Math.min(MAX_COUNTER, Math.floor(num));
+  return Number.isFinite(num) ? num : fallback;
 }
 
-function safeStorageGet(key) {
+function safeInt(value, fallback = 0, min = 0, max = 1_000_000) {
+  const num = Math.floor(safeNumber(value, fallback));
+  if (!Number.isFinite(num)) return fallback;
+  return Math.min(max, Math.max(min, num));
+}
+
+function normalizeIp(value = "") {
+  return safeString(value || "unknown", MAX_IP_LENGTH);
+}
+
+function normalizeSessionId(value = "") {
+  return safeString(value || "no-session", MAX_SESSION_ID_LENGTH);
+}
+
+function normalizeUserId(value = "") {
+  return safeString(value || "anon-user", MAX_USER_ID_LENGTH);
+}
+
+function normalizeRoute(value = "") {
+  return safeString(value || "unknown-route", MAX_ROUTE_LENGTH).toLowerCase();
+}
+
+function buildThreatKey({ ip = "", sessionId = "", userId = "" } = {}) {
+  return `threat:${normalizeIp(ip)}::${normalizeSessionId(sessionId)}::${normalizeUserId(userId)}`;
+}
+
+function createEmptyThreatRecord(now) {
+  return {
+    createdAt: now,
+    updatedAt: now,
+    lastDecayAt: now,
+
+    threatScore: 0,
+    highestThreatScore: 0,
+
+    botEvents: 0,
+    abuseEvents: 0,
+    rateLimitEvents: 0,
+    freshnessFailures: 0,
+
+    hardBlockSignals: 0,
+    challengeEvents: 0,
+    blockEvents: 0,
+    criticalRouteHits: 0,
+
+    lastRoute: "unknown-route",
+    reasonHistory: []
+  };
+}
+
+function normalizeThreatRecord(raw, now) {
+  const record = raw && typeof raw === "object" ? raw : {};
+
+  return {
+    createdAt: safeInt(record.createdAt, now, 0, now + 60_000),
+    updatedAt: safeInt(record.updatedAt, now, 0, now + 60_000),
+    lastDecayAt: safeInt(record.lastDecayAt, now, 0, now + 60_000),
+
+    threatScore: safeInt(record.threatScore, 0, 0, 100),
+    highestThreatScore: safeInt(record.highestThreatScore, 0, 0, 100),
+
+    botEvents: safeInt(record.botEvents, 0, 0, 100000),
+    abuseEvents: safeInt(record.abuseEvents, 0, 0, 100000),
+    rateLimitEvents: safeInt(record.rateLimitEvents, 0, 0, 100000),
+    freshnessFailures: safeInt(record.freshnessFailures, 0, 0, 100000),
+
+    hardBlockSignals: safeInt(record.hardBlockSignals, 0, 0, 100000),
+    challengeEvents: safeInt(record.challengeEvents, 0, 0, 100000),
+    blockEvents: safeInt(record.blockEvents, 0, 0, 100000),
+    criticalRouteHits: safeInt(record.criticalRouteHits, 0, 0, 100000),
+
+    lastRoute: normalizeRoute(record.lastRoute || "unknown-route"),
+    reasonHistory: Array.isArray(record.reasonHistory)
+      ? record.reasonHistory
+          .map((item) => safeString(item, MAX_REASON_LENGTH))
+          .filter(Boolean)
+          .slice(-MAX_REASON_HISTORY)
+      : []
+  };
+}
+
+async function getStoredThreatRecord(redisKey, now) {
   try {
-    return sessionStorage.getItem(key);
+    const raw = await redis.get(redisKey);
+
+    if (!raw) {
+      return null;
+    }
+
+    if (typeof raw === "string") {
+      return normalizeThreatRecord(JSON.parse(raw), now);
+    }
+
+    if (typeof raw === "object") {
+      return normalizeThreatRecord(raw, now);
+    }
+
+    return null;
   } catch (error) {
+    console.error("Threat intelligence read failed:", error);
     return null;
   }
 }
 
-function safeStorageSet(key, value) {
+async function storeThreatRecord(redisKey, record) {
   try {
-    sessionStorage.setItem(key, value);
+    const ttlSeconds = Math.max(1, Math.ceil(THREAT_STATE_TTL_MS / 1000));
+    await redis.set(redisKey, JSON.stringify(record), { ex: ttlSeconds });
     return true;
   } catch (error) {
+    console.error("Threat intelligence write failed:", error);
     return false;
   }
 }
 
-function createFallbackSessionId() {
-  return `sess_${Date.now()}_${Math.random().toString(36).slice(2, 12)}`;
+function pushReason(record, reason) {
+  const safeReason = safeString(reason, MAX_REASON_LENGTH);
+  if (!safeReason) return;
+
+  if (!Array.isArray(record.reasonHistory)) {
+    record.reasonHistory = [];
+  }
+
+  record.reasonHistory.push(safeReason);
+  record.reasonHistory = record.reasonHistory.slice(-MAX_REASON_HISTORY);
 }
 
-function generateSessionId() {
-  try {
-    if (globalThis.crypto?.randomUUID) {
-      return `sess_${crypto.randomUUID()}`;
+function decayThreatScore(record, now) {
+  const lastDecayAt = safeInt(record.lastDecayAt, now, 0, now);
+  const elapsed = now - lastDecayAt;
+
+  if (elapsed < THREAT_DECAY_MS) {
+    return;
+  }
+
+  const steps = Math.floor(elapsed / THREAT_DECAY_MS);
+  if (steps <= 0) {
+    return;
+  }
+
+  record.threatScore = Math.max(0, safeInt(record.threatScore, 0, 0, 100) - steps * 6);
+  record.lastDecayAt = now;
+}
+
+function getThreatLevel(score) {
+  if (score >= 85) return "critical";
+  if (score >= 65) return "high";
+  if (score >= 40) return "medium";
+  return "low";
+}
+
+function getThreatAction(score, hardBlockSignals = 0) {
+  if (hardBlockSignals > 0 || score >= 95) return "block";
+  if (score >= 75) return "challenge";
+  if (score >= 45) return "throttle";
+  return "allow";
+}
+
+export async function evaluateThreat({
+  ip = "",
+  sessionId = "",
+  userId = "",
+  route = "",
+  botResult = null,
+  abuseResult = null,
+  rateLimitResult = null,
+  freshnessResult = null,
+  riskResult = null
+} = {}) {
+  const now = Date.now();
+  const redisKey = buildThreatKey({ ip, sessionId, userId });
+
+  let record = await getStoredThreatRecord(redisKey, now);
+  if (!record) {
+    record = createEmptyThreatRecord(now);
+  }
+
+  decayThreatScore(record, now);
+
+  let scoreIncrease = 0;
+  const safeRoute = normalizeRoute(route);
+
+  if (botResult && typeof botResult === "object") {
+    record.botEvents += 1;
+
+    if (safeInt(botResult.riskScore, 0, 0, 100) >= 70) {
+      scoreIncrease += 20;
+      pushReason(record, "bot_high_risk");
+    } else if (safeInt(botResult.riskScore, 0, 0, 100) >= 40) {
+      scoreIncrease += 10;
+      pushReason(record, "bot_medium_risk");
     }
+
+    if (safeInt(botResult.hardBlockSignals, 0, 0, 20) > 0) {
+      record.hardBlockSignals += safeInt(botResult.hardBlockSignals, 0, 0, 20);
+      scoreIncrease += 25;
+      pushReason(record, "bot_hard_block_signal");
+    }
+
+    if (safeInt(botResult?.distributed?.sensitiveRouteHits, 0, 0, 100000) >= 5) {
+      scoreIncrease += 10;
+      pushReason(record, "bot_sensitive_route_targeting");
+    }
+  }
+
+  if (abuseResult && typeof abuseResult === "object") {
+    record.abuseEvents += 1;
+
+    if (safeInt(abuseResult.abuseScore, 0, 0, 100) >= 70) {
+      scoreIncrease += 18;
+      pushReason(record, "abuse_high_score");
+    } else if (safeInt(abuseResult.abuseScore, 0, 0, 100) >= 40) {
+      scoreIncrease += 8;
+      pushReason(record, "abuse_medium_score");
+    }
+
+    if (abuseResult.penaltyActive) {
+      scoreIncrease += 15;
+      pushReason(record, "abuse_penalty_active");
+    }
+
+    if (safeInt(abuseResult?.snapshot?.criticalRouteTouchesRecent, 0, 0, 100000) >= 2) {
+      record.criticalRouteHits += 1;
+      scoreIncrease += 15;
+      pushReason(record, "abuse_critical_route_targeting");
+    }
+  }
+
+  if (rateLimitResult && typeof rateLimitResult === "object") {
+    record.rateLimitEvents += 1;
+
+    if (!rateLimitResult.allowed) {
+      scoreIncrease += 12;
+      pushReason(record, "rate_limit_exceeded");
+    }
+
+    if (rateLimitResult.penaltyActive) {
+      scoreIncrease += 12;
+      pushReason(record, "rate_limit_penalty_active");
+    }
+
+    if (safeInt(rateLimitResult.violations, 0, 0, 100000) >= 4) {
+      scoreIncrease += 10;
+      pushReason(record, "rate_limit_repeat_violations");
+    }
+  }
+
+  if (freshnessResult && typeof freshnessResult === "object" && !freshnessResult.ok) {
+    record.freshnessFailures += 1;
+    scoreIncrease += 20;
+    pushReason(record, `freshness_${safeString(freshnessResult.code || "failed", 60)}`);
+
+    if (
+      freshnessResult.code === "replayed_nonce" ||
+      freshnessResult.code === "future_request_timestamp"
+    ) {
+      record.hardBlockSignals += 1;
+    }
+  }
+
+  if (riskResult && typeof riskResult === "object") {
+    if (safeString(riskResult.action || "", 20) === "challenge") {
+      record.challengeEvents += 1;
+    }
+
+    if (safeString(riskResult.action || "", 20) === "block") {
+      record.blockEvents += 1;
+      scoreIncrease += 20;
+      pushReason(record, "risk_engine_block");
+    }
+
+    if (safeInt(riskResult.riskScore, 0, 0, 100) >= 80) {
+      scoreIncrease += 10;
+      pushReason(record, "risk_engine_high_score");
+    }
+  }
+
+  if (
+    botResult &&
+    abuseResult &&
+    safeInt(botResult.riskScore, 0, 0, 100) >= 40 &&
+    safeInt(abuseResult.abuseScore, 0, 0, 100) >= 40
+  ) {
+    scoreIncrease += 12;
+    pushReason(record, "cross_signal_bot_plus_abuse");
+  }
+
+  if (safeRoute.includes("admin") || safeRoute.includes("developer")) {
+    record.criticalRouteHits += 1;
+  }
+
+  if (record.criticalRouteHits >= 5) {
+    scoreIncrease += 10;
+    pushReason(record, "repeat_critical_route_pressure");
+  }
+
+  if (record.freshnessFailures >= 3) {
+    scoreIncrease += 10;
+    pushReason(record, "repeat_freshness_failures");
+  }
+
+  if (record.blockEvents >= 2) {
+    scoreIncrease += 15;
+    pushReason(record, "repeat_block_events");
+  }
+
+  record.threatScore = Math.min(100, safeInt(record.threatScore, 0, 0, 100) + scoreIncrease);
+  record.highestThreatScore = Math.max(
+    safeInt(record.highestThreatScore, 0, 0, 100),
+    record.threatScore
+  );
+
+  record.updatedAt = now;
+  record.lastRoute = safeRoute;
+
+  await storeThreatRecord(redisKey, record);
+
+  const level = getThreatLevel(record.threatScore);
+  const action = getThreatAction(record.threatScore, record.hardBlockSignals);
+
+  return {
+    threatScore: record.threatScore,
+    level,
+    action,
+    events: {
+      botEvents: safeInt(record.botEvents, 0, 0, 100000),
+      abuseEvents: safeInt(record.abuseEvents, 0, 0, 100000),
+      rateLimitEvents: safeInt(record.rateLimitEvents, 0, 0, 100000),
+      freshnessFailures: safeInt(record.freshnessFailures, 0, 0, 100000),
+      hardBlockSignals: safeInt(record.hardBlockSignals, 0, 0, 100000),
+      challengeEvents: safeInt(record.challengeEvents, 0, 0, 100000),
+      blockEvents: safeInt(record.blockEvents, 0, 0, 100000),
+      criticalRouteHits: safeInt(record.criticalRouteHits, 0, 0, 100000)
+    },
+    clientKeyPreview: safeString(redisKey.replace(/^threat:/, ""), 24),
+    lastRoute: record.lastRoute,
+    highestThreatScore: safeInt(record.highestThreatScore, 0, 0, 100),
+    recentReasons: Array.isArray(record.reasonHistory)
+      ? record.reasonHistory.slice(-10)
+      : []
+  };
+}
+
+export async function getThreatSnapshot({
+  ip = "",
+  sessionId = "",
+  userId = ""
+} = {}) {
+  const now = Date.now();
+  const redisKey = buildThreatKey({ ip, sessionId, userId });
+  const record = await getStoredThreatRecord(redisKey, now);
+
+  if (!record) {
+    return {
+      found: false,
+      clientKeyPreview: safeString(redisKey.replace(/^threat:/, ""), 24)
+    };
+  }
+
+  return {
+    found: true,
+    clientKeyPreview: safeString(redisKey.replace(/^threat:/, ""), 24),
+    threatScore: safeInt(record.threatScore, 0, 0, 100),
+    highestThreatScore: safeInt(record.highestThreatScore, 0, 0, 100),
+    updatedAt: safeInt(record.updatedAt, 0, 0, now + 60_000),
+    lastRoute: normalizeRoute(record.lastRoute || "unknown-route"),
+    events: {
+      botEvents: safeInt(record.botEvents, 0, 0, 100000),
+      abuseEvents: safeInt(record.abuseEvents, 0, 0, 100000),
+      rateLimitEvents: safeInt(record.rateLimitEvents, 0, 0, 100000),
+      freshnessFailures: safeInt(record.freshnessFailures, 0, 0, 100000),
+      hardBlockSignals: safeInt(record.hardBlockSignals, 0, 0, 100000),
+      blockEvents: safeInt(record.blockEvents, 0, 0, 100000)
+    }
+  };
+}
+
+export async function clearThreatSnapshot({
+  ip = "",
+  sessionId = "",
+  userId = ""
+} = {}) {
+  const redisKey = buildThreatKey({ ip, sessionId, userId });
+
+  try {
+    await redis.del(redisKey);
+    return { ok: true };
   } catch (error) {
-    // ignore and fall back below
+    console.error("Threat intelligence delete failed:", error);
+    return { ok: false };
   }
-
-  return createFallbackSessionId();
-}
-
-function getOrCreateSessionId() {
-  let value = safeStorageGet(SESSION_KEY);
-
-  if (!value) {
-    value = generateSessionId();
-    safeStorageSet(SESSION_KEY, value);
-  }
-
-  return safeString(value, 120);
-}
-
-function incrementCounter(key) {
-  securityState[key] = safeCounter(securityState[key] + 1);
-}
-
-function markInteraction() {
-  if (!securityState.firstInteractionAt) {
-    securityState.firstInteractionAt = Date.now();
-  }
-}
-
-document.addEventListener("mousemove", () => {
-  incrementCounter("mouseMoves");
-  markInteraction();
-}, { passive: true });
-
-document.addEventListener("keydown", () => {
-  incrementCounter("keyPresses");
-  markInteraction();
-}, { passive: true });
-
-document.addEventListener("touchstart", () => {
-  incrementCounter("touches");
-  markInteraction();
-}, { passive: true });
-
-document.addEventListener("click", () => {
-  incrementCounter("clicks");
-  markInteraction();
-}, { passive: true });
-
-document.addEventListener("scroll", () => {
-  incrementCounter("scrolls");
-  markInteraction();
-}, { passive: true });
-
-document.addEventListener("visibilitychange", () => {
-  incrementCounter("visibilityChanges");
-  securityState.lastVisibilityState = safeString(document.visibilityState, 30);
-});
-
-function getScreenInfo() {
-  return {
-    screenWidth: Number.isFinite(window.screen?.width) ? window.screen.width : 0,
-    screenHeight: Number.isFinite(window.screen?.height) ? window.screen.height : 0,
-    viewportWidth: Number.isFinite(window.innerWidth) ? window.innerWidth : 0,
-    viewportHeight: Number.isFinite(window.innerHeight) ? window.innerHeight : 0,
-    pixelRatio: Number.isFinite(window.devicePixelRatio) ? window.devicePixelRatio : 1
-  };
-}
-
-function getDeviceInfo() {
-  return {
-    timezone: safeString(Intl.DateTimeFormat().resolvedOptions().timeZone || "", 100),
-    language: safeString(navigator.language || "", 40),
-    platform: safeString(navigator.platform || "", 100),
-    userAgent: safeString(navigator.userAgent || "", 500),
-    hardwareConcurrency: Number.isFinite(navigator.hardwareConcurrency)
-      ? navigator.hardwareConcurrency
-      : 0,
-    deviceMemory: Number.isFinite(navigator.deviceMemory)
-      ? navigator.deviceMemory
-      : 0,
-    isTouchDevice: (
-      "ontouchstart" in window ||
-      navigator.maxTouchPoints > 0 ||
-      navigator.msMaxTouchPoints > 0
-    )
-  };
-}
-
-export function getSecurityBehaviorPayload() {
-  return {
-    telemetryVersion: TELEMETRY_VERSION,
-    pageLoadedAt: securityState.pageLoadedAt,
-    firstInteractionAt: securityState.firstInteractionAt,
-    submitAt: Date.now(),
-    mouseMoves: safeCounter(securityState.mouseMoves),
-    keyPresses: safeCounter(securityState.keyPresses),
-    touches: safeCounter(securityState.touches),
-    clicks: safeCounter(securityState.clicks),
-    scrolls: safeCounter(securityState.scrolls),
-    visibilityChanges: safeCounter(securityState.visibilityChanges),
-    visibilityState: safeString(securityState.lastVisibilityState, 30),
-    sessionId: safeString(securityState.sessionId, 120),
-    ...getScreenInfo(),
-    ...getDeviceInfo()
-  };
-}
-
-export function resetSecurityBehaviorCounters() {
-  securityState.firstInteractionAt = null;
-  securityState.mouseMoves = 0;
-  securityState.keyPresses = 0;
-  securityState.touches = 0;
-  securityState.clicks = 0;
-  securityState.scrolls = 0;
-  securityState.visibilityChanges = 0;
-  securityState.lastVisibilityState = safeString(document.visibilityState, 30);
-  securityState.pageLoadedAt = Date.now();
-}
-
-export function getSecuritySessionId() {
-  return safeString(securityState.sessionId, 120);
 }
