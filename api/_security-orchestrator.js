@@ -10,49 +10,139 @@ import { evaluateContainment } from "./_security-containment.js";
 import { evaluateAdaptiveThreatMode } from "./_adaptive-threat-mode.js";
 
 function safeString(value, maxLength = 200) {
-  return String(value || "").slice(0, maxLength);
+  return String(value || "")
+    .replace(/[\u0000-\u001F\u007F]/g, "")
+    .trim()
+    .slice(0, maxLength);
 }
 
-function pickFinalAction({ containment, risk, rateLimitResult }) {
+function safeBoolean(value) {
+  return value === true;
+}
+
+function normalizeAction(value = "allow") {
+  const normalized = safeString(value || "allow", 20).toLowerCase();
+  if (normalized === "block" || normalized === "challenge" || normalized === "throttle") {
+    return normalized;
+  }
+  return "allow";
+}
+
+function getRequestTimestamp(body = {}) {
+  const candidates = [
+    body?.requestAt,
+    body?.eventAt,
+    body?.timestamp
+  ];
+
+  for (const value of candidates) {
+    const num = Number(value);
+    if (Number.isFinite(num) && num > 0) {
+      return num;
+    }
+  }
+
+  return 0;
+}
+
+function pickFinalAction({
+  containment,
+  risk,
+  rateLimitResult,
+  adaptiveModeResult
+}) {
+  const riskAction = normalizeAction(risk?.action || "allow");
+  const containmentAction = normalizeAction(containment?.action || "allow");
+  const rateLimitAction = normalizeAction(rateLimitResult?.recommendedAction || "allow");
+  const adaptiveMode = safeString(adaptiveModeResult?.mode || "normal", 20).toLowerCase();
+
   if (containment?.blocked) {
     return "block";
   }
 
-  if (risk?.action === "block") {
+  if (adaptiveMode === "lockdown") {
+    return "block";
+  }
+
+  if (riskAction === "block") {
     return "block";
   }
 
   if (rateLimitResult && !rateLimitResult.allowed) {
-    if (rateLimitResult.recommendedAction === "block") return "block";
-    if (rateLimitResult.recommendedAction === "challenge") return "challenge";
-    if (rateLimitResult.recommendedAction === "throttle") return "throttle";
+    if (rateLimitAction === "block") return "block";
+    if (rateLimitAction === "challenge") return "challenge";
+    if (rateLimitAction === "throttle") return "throttle";
   }
 
-  if (containment?.action === "challenge" && risk?.action === "allow") {
+  if (containmentAction === "challenge" && riskAction === "allow") {
     return "challenge";
   }
 
-  if (risk?.action === "challenge") {
+  if (adaptiveMode === "defense" && riskAction === "allow") {
     return "challenge";
   }
 
-  if (risk?.action === "throttle") {
+  if (adaptiveMode === "elevated" && riskAction === "allow") {
+    return "throttle";
+  }
+
+  if (riskAction === "challenge") {
+    return "challenge";
+  }
+
+  if (riskAction === "throttle") {
     return "throttle";
   }
 
   return "allow";
 }
 
-function pickFinalContainmentAction({ containment, risk }) {
+function pickFinalContainmentAction({
+  containment,
+  risk,
+  adaptiveModeResult
+}) {
   if (containment?.blocked) {
-    return containment.reason || "containment_blocked";
+    return "temporary_containment";
   }
 
   if (containment?.action === "challenge") {
-    return containment.reason || "containment_challenge";
+    return "step_up_verification";
   }
 
-  return risk?.containmentAction || "none";
+  if (adaptiveModeResult?.mode === "lockdown") {
+    return "temporary_containment";
+  }
+
+  if (adaptiveModeResult?.mode === "defense") {
+    return "step_up_verification";
+  }
+
+  if (adaptiveModeResult?.mode === "elevated" && risk?.containmentAction === "none") {
+    return "slow_down_actor";
+  }
+
+  return safeString(risk?.containmentAction || "none", 50);
+}
+
+function buildSafeSignalBundle({
+  botResult = null,
+  abuseResult = null,
+  rateLimitResult = null,
+  freshnessResult = null,
+  threatResult = null,
+  containmentResult = null,
+  adaptiveModeResult = null
+} = {}) {
+  return {
+    botResult: botResult || null,
+    abuseResult: abuseResult || null,
+    rateLimitResult: rateLimitResult || null,
+    freshnessResult: freshnessResult || null,
+    threatResult: threatResult || null,
+    containmentResult: containmentResult || null,
+    adaptiveModeResult: adaptiveModeResult || null
+  };
 }
 
 export async function runSecurityOrchestrator({
@@ -94,7 +184,7 @@ export async function runSecurityOrchestrator({
       sessionId: actor.sessionId,
       userId: actor.userId,
       route: actor.route,
-      success: abuseSuccess
+      success: safeBoolean(abuseSuccess) ? true : false
     });
   } catch (error) {
     console.error("Abuse analysis failed:", error);
@@ -105,10 +195,10 @@ export async function runSecurityOrchestrator({
   if (rateLimitConfig) {
     try {
       rateLimitResult = await checkApiRateLimit({
-        key: rateLimitConfig.key || actor.actorKey,
+        key: safeString(rateLimitConfig.key || actor.actorKey, 200),
         route: actor.route,
-        limit: rateLimitConfig.limit,
-        windowMs: rateLimitConfig.windowMs
+        limit: Number(rateLimitConfig.limit),
+        windowMs: Number(rateLimitConfig.windowMs)
       });
     } catch (error) {
       console.error("Rate limit failed:", error);
@@ -120,13 +210,13 @@ export async function runSecurityOrchestrator({
   if (freshnessConfig) {
     try {
       freshnessResult = await validateFreshRequest({
-        requestAt: body.requestAt,
+        requestAt: getRequestTimestamp(body),
         nonce: safeString(body.nonce || "", 200),
-        scope: freshnessConfig.scope || actor.route,
-        requireNonce: Boolean(freshnessConfig.requireNonce),
-        maxAgeMs: freshnessConfig.maxAgeMs,
-        futureToleranceMs: freshnessConfig.futureToleranceMs,
-        nonceTtlMs: freshnessConfig.nonceTtlMs
+        scope: safeString(freshnessConfig.scope || actor.route, 100),
+        requireNonce: safeBoolean(freshnessConfig.requireNonce),
+        maxAgeMs: Number(freshnessConfig.maxAgeMs),
+        futureToleranceMs: Number(freshnessConfig.futureToleranceMs),
+        nonceTtlMs: Number(freshnessConfig.nonceTtlMs)
       });
     } catch (error) {
       console.error("Freshness check failed:", error);
@@ -163,8 +253,8 @@ export async function runSecurityOrchestrator({
   try {
     containmentResult = await evaluateContainment({
       route: actor.route,
-      isAdminRoute: Boolean(containmentConfig.isAdminRoute),
-      isWriteAction: Boolean(containmentConfig.isWriteAction),
+      isAdminRoute: safeBoolean(containmentConfig.isAdminRoute),
+      isWriteAction: safeBoolean(containmentConfig.isWriteAction),
       actionType: safeString(containmentConfig.actionType || "", 50)
     });
   } catch (error) {
@@ -187,12 +277,14 @@ export async function runSecurityOrchestrator({
   const finalAction = pickFinalAction({
     containment: containmentResult,
     risk,
-    rateLimitResult
+    rateLimitResult,
+    adaptiveModeResult
   });
 
   const finalContainmentAction = pickFinalContainmentAction({
     containment: containmentResult,
-    risk
+    risk,
+    adaptiveModeResult
   });
 
   return {
@@ -202,7 +294,7 @@ export async function runSecurityOrchestrator({
       finalAction,
       finalContainmentAction
     },
-    signals: {
+    signals: buildSafeSignalBundle({
       botResult,
       abuseResult,
       rateLimitResult,
@@ -210,6 +302,6 @@ export async function runSecurityOrchestrator({
       threatResult,
       containmentResult,
       adaptiveModeResult
-    }
+    })
   };
 }
