@@ -1,11 +1,11 @@
 import { createActorContext } from "./_actor-context.js";
 import { evaluateRisk } from "./_risk-engine.js";
 
-import { analyzeBotBehavior } from "./_bot-detection.js";
-import { analyzeApiAbuse } from "./_api-abuse-protection.js";
-import { checkRateLimit } from "./_rate-limit.js";
+import { trackBotBehavior } from "./_bot-detection.js";
+import { trackApiAbuse } from "./_api-abuse-protection.js";
+import { checkApiRateLimit } from "./_rate-limit.js";
 import { validateFreshRequest } from "./_request-freshness.js";
-import { analyzeThreatIntelligence } from "./_threat-intelligence.js";
+import { evaluateThreat } from "./_threat-intelligence.js";
 
 function safeString(value, maxLength = 200) {
   return String(value || "").slice(0, maxLength);
@@ -18,9 +18,9 @@ export async function runSecurityOrchestrator({
   context = {},
   route = "",
   rateLimitConfig = null,
-  freshnessConfig = null
+  freshnessConfig = null,
+  abuseSuccess = true
 } = {}) {
-
   const actor = createActorContext({
     req,
     body,
@@ -29,41 +29,39 @@ export async function runSecurityOrchestrator({
     route
   });
 
-  /* ---------------- BOT ANALYSIS ---------------- */
-
   let botResult = null;
 
   try {
-    botResult = analyzeBotBehavior(behavior, req);
+    botResult = await trackBotBehavior(behavior, req, {
+      ip: actor.ip,
+      sessionId: actor.sessionId,
+      userId: actor.userId
+    });
   } catch (error) {
     console.error("Bot detection failed:", error);
   }
 
-  /* ---------------- ABUSE ANALYSIS ---------------- */
-
   let abuseResult = null;
 
   try {
-    abuseResult = await analyzeApiAbuse({
+    abuseResult = await trackApiAbuse({
       ip: actor.ip,
       sessionId: actor.sessionId,
       userId: actor.userId,
-      route: actor.route
+      route: actor.route,
+      success: abuseSuccess
     });
   } catch (error) {
     console.error("Abuse analysis failed:", error);
   }
 
-  /* ---------------- RATE LIMIT ---------------- */
-
   let rateLimitResult = null;
 
   if (rateLimitConfig) {
     try {
-      rateLimitResult = await checkRateLimit({
+      rateLimitResult = await checkApiRateLimit({
         key: rateLimitConfig.key || actor.actorKey,
         route: actor.route,
-        ip: actor.ip,
         limit: rateLimitConfig.limit,
         windowMs: rateLimitConfig.windowMs
       });
@@ -71,8 +69,6 @@ export async function runSecurityOrchestrator({
       console.error("Rate limit failed:", error);
     }
   }
-
-  /* ---------------- FRESHNESS ---------------- */
 
   let freshnessResult = null;
 
@@ -82,29 +78,32 @@ export async function runSecurityOrchestrator({
         requestAt: body.requestAt,
         nonce: safeString(body.nonce || "", 200),
         scope: freshnessConfig.scope || actor.route,
-        requireNonce: freshnessConfig.requireNonce || false
+        requireNonce: Boolean(freshnessConfig.requireNonce),
+        maxAgeMs: freshnessConfig.maxAgeMs,
+        futureToleranceMs: freshnessConfig.futureToleranceMs,
+        nonceTtlMs: freshnessConfig.nonceTtlMs
       });
     } catch (error) {
       console.error("Freshness check failed:", error);
     }
   }
 
-  /* ---------------- THREAT MEMORY ---------------- */
-
   let threatResult = null;
 
   try {
-    threatResult = await analyzeThreatIntelligence({
+    threatResult = await evaluateThreat({
       ip: actor.ip,
       sessionId: actor.sessionId,
       userId: actor.userId,
-      route: actor.route
+      route: actor.route,
+      botResult,
+      abuseResult,
+      rateLimitResult,
+      freshnessResult
     });
   } catch (error) {
     console.error("Threat intelligence failed:", error);
   }
-
-  /* ---------------- RISK ENGINE ---------------- */
 
   const risk = evaluateRisk({
     botResult,
@@ -114,13 +113,9 @@ export async function runSecurityOrchestrator({
     threatResult
   });
 
-  /* ---------------- FINAL RESPONSE ---------------- */
-
   return {
     actor,
-
     risk,
-
     signals: {
       botResult,
       abuseResult,
