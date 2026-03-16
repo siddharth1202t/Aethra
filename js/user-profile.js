@@ -11,10 +11,14 @@ const DEFAULT_DISPLAY_NAME = "Explorer";
 const MAX_DISPLAY_NAME_LENGTH = 30;
 const MAX_PHOTO_URL_LENGTH = 500;
 const MAX_EMAIL_LENGTH = 120;
+const MAX_UID_LENGTH = 128;
+
+function safeString(value, maxLength = 300) {
+  return String(value || "").trim().slice(0, maxLength);
+}
 
 function sanitizeDisplayName(value) {
-  return String(value || "")
-    .trim()
+  return safeString(value, MAX_DISPLAY_NAME_LENGTH)
     .replace(/[^a-zA-Z0-9._ ]/g, "")
     .replace(/\s+/g, " ")
     .trim()
@@ -22,10 +26,7 @@ function sanitizeDisplayName(value) {
 }
 
 function normalizeEmail(value) {
-  return String(value || "")
-    .trim()
-    .toLowerCase()
-    .slice(0, MAX_EMAIL_LENGTH);
+  return safeString(value, MAX_EMAIL_LENGTH).toLowerCase();
 }
 
 function isValidEmailLike(value) {
@@ -33,25 +34,69 @@ function isValidEmailLike(value) {
 }
 
 function sanitizePhotoURL(value) {
-  return String(value || "").trim().slice(0, MAX_PHOTO_URL_LENGTH);
+  const url = safeString(value, MAX_PHOTO_URL_LENGTH);
+
+  if (!url) {
+    return "";
+  }
+
+  try {
+    const parsed = new URL(url);
+    return /^https?:$/i.test(parsed.protocol) ? parsed.toString().slice(0, MAX_PHOTO_URL_LENGTH) : "";
+  } catch (error) {
+    return "";
+  }
 }
 
 function safeExistingString(value) {
   return typeof value === "string" ? value : "";
 }
 
+async function fetchContainmentState() {
+  try {
+    const response = await fetch("/api/security-containment-state", {
+      method: "GET",
+      headers: {
+        "Content-Type": "application/json"
+      }
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const data = await response.json().catch(() => null);
+    return data && typeof data === "object" ? data : null;
+  } catch (error) {
+    console.warn("Containment state fetch failed:", error);
+    return null;
+  }
+}
+
+function isProfileEditBlocked(containmentState) {
+  if (!containmentState || typeof containmentState !== "object") {
+    return false;
+  }
+
+  const flags = containmentState.flags || {};
+
+  return flags.readOnlyMode === true || flags.disableProfileEdits === true;
+}
+
 function buildCreatePayload(user) {
+  const safeUid = safeString(user?.uid || "", MAX_UID_LENGTH);
   const safeDisplayName = sanitizeDisplayName(user?.displayName) || DEFAULT_DISPLAY_NAME;
   const safeEmail = normalizeEmail(user?.email);
   const safePhotoURL = sanitizePhotoURL(user?.photoURL);
 
   return {
-    uid: String(user.uid),
+    uid: safeUid,
     displayName: safeDisplayName,
     email: isValidEmailLike(safeEmail) ? safeEmail : "",
     photoURL: safePhotoURL,
     role: "user",
     isProfileComplete: false,
+    profileLocked: false,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp()
   };
@@ -72,11 +117,7 @@ function buildSafeUpdatePayload(existingData, user) {
     updates.photoURL = safePhotoURL;
   }
 
-  // Only repair email if it is missing/blank in Firestore and user auth has a valid-looking email.
-  if (
-    !safeExistingString(existingData.email) &&
-    isValidEmailLike(safeEmail)
-  ) {
+  if (!safeExistingString(existingData.email) && isValidEmailLike(safeEmail)) {
     updates.email = safeEmail;
   }
 
@@ -85,17 +126,22 @@ function buildSafeUpdatePayload(existingData, user) {
 
 export async function ensureUserProfile(user) {
   if (!user?.uid) {
-    return;
+    return { ok: false, reason: "missing_user_uid" };
   }
 
-  const userRef = doc(db, "users", user.uid);
+  const safeUid = safeString(user.uid, MAX_UID_LENGTH);
+  if (!safeUid) {
+    return { ok: false, reason: "invalid_user_uid" };
+  }
+
+  const userRef = doc(db, "users", safeUid);
 
   let userSnap;
   try {
     userSnap = await getDoc(userRef);
   } catch (error) {
     console.error("Failed to read user profile:", error);
-    return;
+    return { ok: false, reason: "read_failed" };
   }
 
   if (!userSnap.exists()) {
@@ -103,25 +149,38 @@ export async function ensureUserProfile(user) {
 
     try {
       await setDoc(userRef, createPayload);
+      return { ok: true, action: "created" };
     } catch (error) {
       console.error("Failed to create user profile:", error);
+      return { ok: false, reason: "create_failed" };
     }
-
-    return;
   }
 
   const existingData = userSnap.data() || {};
+
+  if (existingData.profileLocked === true) {
+    return { ok: true, action: "skipped_locked_profile" };
+  }
+
+  const containmentState = await fetchContainmentState();
+
+  if (isProfileEditBlocked(containmentState)) {
+    return { ok: true, action: "skipped_containment_block" };
+  }
+
   const updates = buildSafeUpdatePayload(existingData, user);
 
   if (Object.keys(updates).length === 0) {
-    return;
+    return { ok: true, action: "no_changes" };
   }
 
   updates.updatedAt = serverTimestamp();
 
   try {
     await updateDoc(userRef, updates);
+    return { ok: true, action: "updated" };
   } catch (error) {
     console.error("Failed to update user profile:", error);
+    return { ok: false, reason: "update_failed" };
   }
 }
