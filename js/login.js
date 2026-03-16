@@ -11,7 +11,7 @@ import {
 import { app } from "./firestore-config.js";
 import { ensureUserProfile } from "./user-profile.js";
 import { writeSecurityLog } from "./security-logger.js";
-import { detectBotBehavior } from "./bot-detection.js";
+import { getSecurityBehaviorPayload } from "./security-client.js";
 
 const auth = getAuth(app);
 const provider = new GoogleAuthProvider();
@@ -31,6 +31,11 @@ const formError = document.getElementById("formError");
 
 let widgetId = null;
 let isSubmitting = false;
+let containmentState = null;
+
+function safeString(value, maxLength = 500) {
+  return String(value || "").trim().slice(0, maxLength);
+}
 
 function goTo(page) {
   window.location.replace(page);
@@ -62,13 +67,50 @@ async function safeSecurityLog(payload) {
   }
 }
 
-async function verifyTurnstileToken(token) {
+async function fetchContainmentState() {
+  try {
+    const response = await fetch("/api/security-containment-state", {
+      method: "GET",
+      headers: {
+        "Content-Type": "application/json"
+      }
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const data = await response.json().catch(() => null);
+    return data && typeof data === "object" ? data : null;
+  } catch (error) {
+    console.warn("Containment state fetch failed:", error);
+    return null;
+  }
+}
+
+function isForceCaptchaEnabled(state) {
+  return state?.flags?.forceCaptcha === true;
+}
+
+function areRegistrationsFrozen(state) {
+  return state?.flags?.freezeRegistrations === true;
+}
+
+function isReadOnlyMode(state) {
+  return state?.flags?.readOnlyMode === true;
+}
+
+async function verifyTurnstileToken(token, behavior = {}) {
   const res = await fetch("/api/verify-turnstile", {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
     },
-    body: JSON.stringify({ token })
+    body: JSON.stringify({
+      token,
+      behavior,
+      sessionId: behavior?.sessionId || ""
+    })
   });
 
   const data = await res.json().catch(() => ({}));
@@ -76,6 +118,8 @@ async function verifyTurnstileToken(token) {
   if (!res.ok || !data.success) {
     throw new Error(data?.message || "Captcha verification failed. Please try again.");
   }
+
+  return data;
 }
 
 async function callLoginAttemptApi(email, action, extra = {}) {
@@ -157,6 +201,12 @@ function clearLoading(button) {
 
   button.disabled = false;
   button.textContent = button.dataset.originalText || button.textContent;
+}
+
+function setButtonsDisabled(disabled) {
+  if (loginBtn) loginBtn.disabled = disabled;
+  if (googleBtn) googleBtn.disabled = disabled;
+  if (forgotPasswordBtn) forgotPasswordBtn.disabled = disabled;
 }
 
 function formatRemainingMinutes(ms) {
@@ -302,9 +352,11 @@ function getClientSecurityContext() {
   let behavior = {};
 
   try {
-    behavior = typeof detectBotBehavior === "function" ? detectBotBehavior() : {};
+    behavior = typeof getSecurityBehaviorPayload === "function"
+      ? getSecurityBehaviorPayload()
+      : {};
   } catch (error) {
-    console.warn("Bot behavior detection failed:", error);
+    console.warn("Security behavior payload failed:", error);
     behavior = {};
   }
 
@@ -321,17 +373,6 @@ function getClientSecurityContext() {
 }
 
 async function precheckSensitiveAction(email, token, actionLabel = "login_check") {
-  if (!token) {
-    await safeSecurityLog({
-      type: "captcha_missing",
-      message: `User attempted ${actionLabel} without captcha`,
-      email
-    });
-
-    showCaptchaError("Please complete the captcha first.");
-    throw new Error("Captcha missing");
-  }
-
   const securityContext = getClientSecurityContext();
 
   const checkResult = await callLoginAttemptApi(email, "check", {
@@ -345,7 +386,25 @@ async function precheckSensitiveAction(email, token, actionLabel = "login_check"
     );
   }
 
-  await verifyTurnstileToken(token);
+  const mustUseCaptcha = isForceCaptchaEnabled(containmentState) || true;
+
+  if (mustUseCaptcha && !token) {
+    await safeSecurityLog({
+      type: "captcha_missing",
+      message: `User attempted ${actionLabel} without captcha`,
+      email,
+      metadata: {
+        behavior: securityContext.behavior || {}
+      }
+    });
+
+    showCaptchaError("Please complete the captcha first.");
+    throw new Error("Captcha missing");
+  }
+
+  if (mustUseCaptcha) {
+    await verifyTurnstileToken(token, securityContext.behavior || {});
+  }
 
   return securityContext;
 }
@@ -578,6 +637,12 @@ async function handleForgotPassword() {
 
   clearAllErrors();
 
+  if (isReadOnlyMode(containmentState)) {
+    showFormError("This action is temporarily unavailable. Please try again later.");
+    isSubmitting = false;
+    return;
+  }
+
   const email = normalizeEmail(emailInput?.value || "");
   if (emailInput) {
     emailInput.value = email;
@@ -706,6 +771,12 @@ forgotPasswordBtn?.addEventListener("click", async () => {
 
 window.addEventListener("load", async () => {
   try {
+    containmentState = await fetchContainmentState();
+
+    if (areRegistrationsFrozen(containmentState)) {
+      // informative only for login page context; no action needed
+    }
+
     const redirected = await handleRedirectResult();
 
     if (!redirected) {
@@ -714,5 +785,6 @@ window.addEventListener("load", async () => {
   } catch (error) {
     console.error("Page init failed:", error);
     showFormError("Page failed to load properly. Please refresh and try again.");
+    setButtonsDisabled(false);
   }
 });
