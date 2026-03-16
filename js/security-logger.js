@@ -14,8 +14,16 @@ const ALLOWED_LEVELS = new Set([
 const MAX_METADATA_DEPTH = 4;
 const MAX_METADATA_KEYS = 20;
 const MAX_ARRAY_ITEMS = 20;
+const MAX_MESSAGE_LENGTH = 500;
+
+const CLIENT_LOG_RATE_LIMIT = 20; // logs per minute
+const CLIENT_LOG_WINDOW = 60000;
 
 let cachedSessionId = "";
+let logCounter = 0;
+let logWindowStart = Date.now();
+
+/* ---------------- BASIC SAFE HELPERS ---------------- */
 
 function safeString(value, maxLength = 300) {
   return String(value || "").slice(0, maxLength);
@@ -43,6 +51,8 @@ function safeLevel(level) {
     ? normalized
     : "warning";
 }
+
+/* ---------------- METADATA SANITIZATION ---------------- */
 
 function sanitizeMetadata(value, depth = 0) {
   if (depth > MAX_METADATA_DEPTH) {
@@ -85,17 +95,25 @@ function sanitizeMetadata(value, depth = 0) {
   return safeString(value, 500);
 }
 
+/* ---------------- CLIENT SNAPSHOT ---------------- */
+
 function buildClientSnapshot() {
-  return {
-    userAgent: safeString(navigator.userAgent || "", 300),
-    language: safeString(navigator.language || "", 40),
-    platform: safeString(navigator.platform || "", 100),
-    screenWidth: safeNumber(window.screen?.width),
-    screenHeight: safeNumber(window.screen?.height),
-    url: safeString(window.location.href || "", 500),
-    referrer: safeString(document.referrer || "", 500)
-  };
+  try {
+    return {
+      userAgent: safeString(navigator?.userAgent || "", 300),
+      language: safeString(navigator?.language || "", 40),
+      platform: safeString(navigator?.platform || "", 100),
+      screenWidth: safeNumber(window?.screen?.width),
+      screenHeight: safeNumber(window?.screen?.height),
+      url: safeString(window?.location?.href || "", 500),
+      referrer: safeString(document?.referrer || "", 500)
+    };
+  } catch {
+    return {};
+  }
 }
+
+/* ---------------- SESSION MANAGEMENT ---------------- */
 
 function createSessionId() {
   try {
@@ -114,6 +132,7 @@ function getSessionId() {
 
   try {
     const existing = sessionStorage.getItem("aethra_security_session");
+
     if (existing) {
       cachedSessionId = safeString(existing, 120);
       return cachedSessionId;
@@ -121,6 +140,7 @@ function getSessionId() {
 
     const created = createSessionId();
     sessionStorage.setItem("aethra_security_session", created);
+
     cachedSessionId = safeString(created, 120);
     return cachedSessionId;
   } catch {
@@ -129,12 +149,34 @@ function getSessionId() {
   }
 }
 
+/* ---------------- RATE LIMIT ---------------- */
+
+function allowClientLog() {
+  const now = Date.now();
+
+  if (now - logWindowStart > CLIENT_LOG_WINDOW) {
+    logWindowStart = now;
+    logCounter = 0;
+  }
+
+  logCounter++;
+
+  if (logCounter > CLIENT_LOG_RATE_LIMIT) {
+    return false;
+  }
+
+  return true;
+}
+
+/* ---------------- ABORT SIGNAL ---------------- */
+
 function createAbortSignal(timeoutMs = 4000) {
   if (typeof AbortController === "undefined") {
     return { signal: undefined, cleanup: () => {} };
   }
 
   const controller = new AbortController();
+
   const timeoutId = setTimeout(() => {
     controller.abort();
   }, timeoutMs);
@@ -145,12 +187,19 @@ function createAbortSignal(timeoutMs = 4000) {
   };
 }
 
+/* ---------------- MAIN LOGGER ---------------- */
+
 export async function logSecurityEvent(data = {}) {
   try {
+
+    if (!allowClientLog()) {
+      return;
+    }
+
     const payload = {
       type: safeType(data.type),
       level: safeLevel(data.level),
-      message: safeString(data.message || "", 500),
+      message: safeString(data.message || "", MAX_MESSAGE_LENGTH),
       email: safeString(data.email || "", 200),
       userId: safeString(data.userId || "", 200),
       eventAt: Date.now(),
@@ -174,10 +223,12 @@ export async function logSecurityEvent(data = {}) {
     } finally {
       cleanup();
     }
+
   } catch (error) {
     console.warn("Security log failed:", error);
   }
 }
 
-// Optional backward compatibility if older files still import writeSecurityLog
+/* ---------------- BACKWARD COMPATIBILITY ---------------- */
+
 export const writeSecurityLog = logSecurityEvent;
