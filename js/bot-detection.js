@@ -1,176 +1,656 @@
-function getOrCreateSessionId() {
-  const key = "aethra_session_id";
+import { redis } from "./_redis.js";
 
-  try {
-    let value = sessionStorage.getItem(key);
+const BOT_STATE_TTL_MS = 24 * 60 * 60 * 1000;
+const BOT_SIGNAL_WINDOW_MS = 30 * 60 * 1000;
+const BOT_DECAY_MS = 30 * 60 * 1000;
 
-    if (!value) {
-      value =
-        typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-          ? `sess_${crypto.randomUUID()}`
-          : `sess_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+const MAX_ROUTE_LENGTH = 150;
+const MAX_SESSION_ID_LENGTH = 120;
+const MAX_IP_LENGTH = 100;
+const MAX_USER_ID_LENGTH = 120;
+const MAX_USER_AGENT_LENGTH = 500;
+const MAX_REASON_LENGTH = 80;
+const MAX_REASON_HISTORY = 30;
+const MAX_SIGNAL_HISTORY = 40;
 
-      sessionStorage.setItem(key, value);
-    }
-
-    return String(value).slice(0, 120);
-  } catch {
-    return `sess_fallback_${Date.now()}_${Math.random().toString(16).slice(2)}`.slice(0, 120);
-  }
-}
-
-const MAX_COUNTER = 5000;
-
-const botDetectionState = {
-  pageLoadedAt: Date.now(),
-  firstInteractionAt: null,
-  mouseMoves: 0,
-  keyPresses: 0,
-  clicks: 0,
-  touches: 0,
-  scrolls: 0,
-  visibilityChanges: 0,
-  lastVisibilityState: document.visibilityState || "visible",
-  sessionId: getOrCreateSessionId()
-};
-
-function incrementCounter(key) {
-  if (typeof botDetectionState[key] !== "number") {
-    botDetectionState[key] = 0;
-  }
-
-  botDetectionState[key] = Math.min(MAX_COUNTER, botDetectionState[key] + 1);
-}
-
-function markFirstInteraction() {
-  if (!botDetectionState.firstInteractionAt) {
-    botDetectionState.firstInteractionAt = Date.now();
-  }
-}
-
-let lastMouseMoveAt = 0;
-let lastScrollAt = 0;
-
-document.addEventListener(
-  "mousemove",
-  () => {
-    const now = Date.now();
-
-    if (now - lastMouseMoveAt > 50) {
-      incrementCounter("mouseMoves");
-      markFirstInteraction();
-      lastMouseMoveAt = now;
-    }
-  },
-  { passive: true }
-);
-
-document.addEventListener(
-  "keydown",
-  () => {
-    incrementCounter("keyPresses");
-    markFirstInteraction();
-  },
-  { passive: true }
-);
-
-document.addEventListener(
-  "click",
-  () => {
-    incrementCounter("clicks");
-    markFirstInteraction();
-  },
-  { passive: true }
-);
-
-document.addEventListener(
-  "touchstart",
-  () => {
-    incrementCounter("touches");
-    markFirstInteraction();
-  },
-  { passive: true }
-);
-
-document.addEventListener(
-  "scroll",
-  () => {
-    const now = Date.now();
-
-    if (now - lastScrollAt > 100) {
-      incrementCounter("scrolls");
-      markFirstInteraction();
-      lastScrollAt = now;
-    }
-  },
-  { passive: true }
-);
-
-document.addEventListener("visibilitychange", () => {
-  incrementCounter("visibilityChanges");
-  botDetectionState.lastVisibilityState = document.visibilityState || "unknown";
-});
-
-function safeNavigatorValue(value, maxLength = 300) {
-  return String(value || "").slice(0, maxLength);
-}
-
-function safeNumber(value, fallback = 0) {
+function toNumber(value, fallback = 0) {
   const num = Number(value);
   return Number.isFinite(num) ? num : fallback;
 }
 
-function safeTimezone() {
+function toSafeInt(value, fallback = 0, min = 0, max = 1_000_000_000) {
+  const num = Math.floor(toNumber(value, fallback));
+  if (!Number.isFinite(num)) return fallback;
+  return Math.min(max, Math.max(min, num));
+}
+
+function safeString(value, maxLength = 300) {
+  return String(value || "").slice(0, maxLength);
+}
+
+function normalizeRoute(route) {
+  return safeString(route || "unknown-route", MAX_ROUTE_LENGTH).trim().toLowerCase();
+}
+
+function normalizeSessionId(value = "") {
+  return safeString(value || "no-session", MAX_SESSION_ID_LENGTH).trim();
+}
+
+function normalizeIp(value = "") {
+  return safeString(value || "unknown", MAX_IP_LENGTH).trim();
+}
+
+function normalizeUserId(value = "") {
+  return safeString(value || "anon-user", MAX_USER_ID_LENGTH).trim();
+}
+
+function normalizeUserAgent(value = "") {
+  return safeString(value || "", MAX_USER_AGENT_LENGTH).trim();
+}
+
+function buildBotKey({ ip = "", sessionId = "", userId = "" } = {}) {
+  const safeIp = normalizeIp(ip);
+  const safeSessionId = normalizeSessionId(sessionId);
+  const safeUserId = normalizeUserId(userId);
+  return `bot:${safeIp}::${safeSessionId}::${safeUserId}`;
+}
+
+function extractClientIp(req = null, fallback = "") {
+  const forwarded = req?.headers?.["x-forwarded-for"];
+
+  if (typeof forwarded === "string" && forwarded.trim()) {
+    return normalizeIp(forwarded.split(",")[0].trim());
+  }
+
+  if (Array.isArray(forwarded) && forwarded.length > 0) {
+    return normalizeIp(String(forwarded[0]).split(",")[0].trim());
+  }
+
+  const realIp = req?.headers?.["x-real-ip"];
+  if (typeof realIp === "string" && realIp.trim()) {
+    return normalizeIp(realIp.trim());
+  }
+
+  return normalizeIp(fallback);
+}
+
+function isSuspiciousUserAgent(userAgent) {
+  return /headless|phantom|selenium|playwright|puppeteer|crawler|spider|bot|curl|wget|python|axios|node-fetch/i.test(
+    userAgent
+  );
+}
+
+function getRouteSensitivity(route) {
+  const normalized = normalizeRoute(route);
+
+  if (
+    normalized.includes("login") ||
+    normalized.includes("signup") ||
+    normalized.includes("verify") ||
+    normalized.includes("developer") ||
+    normalized.includes("admin")
+  ) {
+    return 2;
+  }
+
+  return 1;
+}
+
+function getRecommendedAction({ riskScore, telemetryQualityScore, hardBlockSignals }) {
+  if (hardBlockSignals > 0 || riskScore >= 90) {
+    return "block";
+  }
+
+  if (riskScore >= 65) {
+    return "challenge";
+  }
+
+  if (riskScore >= 40 || telemetryQualityScore <= 30) {
+    return "throttle";
+  }
+
+  return "allow";
+}
+
+function createEmptyBotRecord(now) {
+  return {
+    createdAt: now,
+    updatedAt: now,
+    suspicionScore: 0,
+    highestRiskScore: 0,
+    hardBlockCount: 0,
+    suspiciousCount: 0,
+    sensitiveRouteHits: 0,
+    lastSeenAt: now,
+    lastRoute: "unknown-route",
+    lastUserAgent: "",
+    lastReason: "",
+    reasonHistory: [],
+    recentSignals: [],
+    lastDecayAt: now
+  };
+}
+
+function normalizeBotRecord(raw, now) {
+  const record = raw && typeof raw === "object" ? raw : {};
+
+  return {
+    createdAt: toSafeInt(record.createdAt, now, 0, now + 60_000),
+    updatedAt: toSafeInt(record.updatedAt, now, 0, now + 60_000),
+    suspicionScore: toSafeInt(record.suspicionScore, 0, 0, 1000),
+    highestRiskScore: toSafeInt(record.highestRiskScore, 0, 0, 100),
+    hardBlockCount: toSafeInt(record.hardBlockCount, 0, 0, 1000),
+    suspiciousCount: toSafeInt(record.suspiciousCount, 0, 0, 100000),
+    sensitiveRouteHits: toSafeInt(record.sensitiveRouteHits, 0, 0, 100000),
+    lastSeenAt: toSafeInt(record.lastSeenAt, now, 0, now + 60_000),
+    lastRoute: normalizeRoute(record.lastRoute || "unknown-route"),
+    lastUserAgent: normalizeUserAgent(record.lastUserAgent || ""),
+    lastReason: safeString(record.lastReason || "", MAX_REASON_LENGTH),
+    reasonHistory: Array.isArray(record.reasonHistory)
+      ? record.reasonHistory
+          .map((item) => safeString(item, MAX_REASON_LENGTH))
+          .filter(Boolean)
+          .slice(-MAX_REASON_HISTORY)
+      : [],
+    recentSignals: Array.isArray(record.recentSignals)
+      ? record.recentSignals
+          .map((item) => ({
+            at: toSafeInt(item?.at, 0, 0, now + 60_000),
+            route: normalizeRoute(item?.route || "unknown-route"),
+            riskScore: toSafeInt(item?.riskScore, 0, 0, 100),
+            hardBlockSignals: toSafeInt(item?.hardBlockSignals, 0, 0, 10),
+            recommendedAction: safeString(item?.recommendedAction || "allow", 20)
+          }))
+          .filter((item) => item.at > 0)
+          .slice(-MAX_SIGNAL_HISTORY)
+      : [],
+    lastDecayAt: toSafeInt(record.lastDecayAt, now, 0, now + 60_000)
+  };
+}
+
+async function getStoredBotRecord(redisKey, now) {
   try {
-    return safeNavigatorValue(
-      Intl.DateTimeFormat().resolvedOptions().timeZone || "",
-      100
-    );
-  } catch {
-    return "";
+    const raw = await redis.get(redisKey);
+
+    if (!raw) {
+      return null;
+    }
+
+    if (typeof raw === "string") {
+      return normalizeBotRecord(JSON.parse(raw), now);
+    }
+
+    if (typeof raw === "object") {
+      return normalizeBotRecord(raw, now);
+    }
+
+    return null;
+  } catch (error) {
+    console.error("Redis bot-detection read failed:", error);
+    return null;
   }
 }
 
-export function detectBotBehavior() {
-  const submitAt = Date.now();
-  const pageLoadedAt = safeNumber(botDetectionState.pageLoadedAt, submitAt);
-  const firstInteractionAt = safeNumber(botDetectionState.firstInteractionAt, 0) || null;
+async function storeBotRecord(redisKey, record) {
+  try {
+    const ttlSeconds = Math.max(1, Math.ceil(BOT_STATE_TTL_MS / 1000));
+    await redis.set(redisKey, JSON.stringify(record), { ex: ttlSeconds });
+    return true;
+  } catch (error) {
+    console.error("Redis bot-detection write failed:", error);
+    return false;
+  }
+}
 
-  const timeOnPageMs = Math.max(0, submitAt - pageLoadedAt);
-  const timeToFirstInteractionMs =
-    firstInteractionAt && firstInteractionAt >= pageLoadedAt
-      ? firstInteractionAt - pageLoadedAt
-      : null;
+function decayBotScore(record, now) {
+  const lastDecayAt = toSafeInt(record.lastDecayAt, now, 0, now);
+  const elapsed = now - lastDecayAt;
 
-  const mouseMoves = safeNumber(botDetectionState.mouseMoves);
-  const keyPresses = safeNumber(botDetectionState.keyPresses);
-  const clicks = safeNumber(botDetectionState.clicks);
-  const touches = safeNumber(botDetectionState.touches);
-  const scrolls = safeNumber(botDetectionState.scrolls);
+  if (elapsed < BOT_DECAY_MS) {
+    return;
+  }
+
+  const decaySteps = Math.floor(elapsed / BOT_DECAY_MS);
+  if (decaySteps <= 0) {
+    return;
+  }
+
+  record.suspicionScore = Math.max(0, toSafeInt(record.suspicionScore, 0) - decaySteps * 8);
+  record.lastDecayAt = now;
+}
+
+function pushReasonHistory(record, reasons = []) {
+  if (!Array.isArray(record.reasonHistory)) {
+    record.reasonHistory = [];
+  }
+
+  for (const reason of reasons) {
+    const safeReason = safeString(reason, MAX_REASON_LENGTH);
+    if (safeReason) {
+      record.reasonHistory.push(safeReason);
+    }
+  }
+
+  record.reasonHistory = record.reasonHistory.slice(-MAX_REASON_HISTORY);
+}
+
+function pushRecentSignal(record, signal, now) {
+  if (!Array.isArray(record.recentSignals)) {
+    record.recentSignals = [];
+  }
+
+  record.recentSignals.push({
+    at: now,
+    route: normalizeRoute(signal.route),
+    riskScore: toSafeInt(signal.riskScore, 0, 0, 100),
+    hardBlockSignals: toSafeInt(signal.hardBlockSignals, 0, 0, 10),
+    recommendedAction: safeString(signal.recommendedAction, 20)
+  });
+
+  record.recentSignals = record.recentSignals
+    .filter((item) => now - toSafeInt(item.at, 0, 0, now) <= BOT_SIGNAL_WINDOW_MS)
+    .slice(-MAX_SIGNAL_HISTORY);
+}
+
+function summarizeRecentSignals(record, route) {
+  const recentSignals = Array.isArray(record.recentSignals) ? record.recentSignals : [];
+  const sameRouteRecent = recentSignals.filter((item) => item.route === route).length;
+  const recentChallenges = recentSignals.filter(
+    (item) => item.recommendedAction === "challenge" || item.recommendedAction === "block"
+  ).length;
+  const recentHardBlocks = recentSignals.reduce(
+    (sum, item) => sum + toSafeInt(item.hardBlockSignals, 0, 0, 10),
+    0
+  );
+
+  return {
+    sameRouteRecent,
+    recentChallenges,
+    recentHardBlocks
+  };
+}
+
+export function analyzeBotBehavior(behavior = {}, req = null) {
+  const now = Date.now();
+
+  const pageLoadedAt = toSafeInt(behavior.pageLoadedAt, 0, 0, now + 60_000);
+  const firstInteractionAt = toSafeInt(behavior.firstInteractionAt, 0, 0, now + 60_000);
+  const submitAt = toSafeInt(behavior.submitAt, now, 0, now + 60_000);
+
+  const mouseMoves = toSafeInt(behavior.mouseMoves, 0, 0, 5000);
+  const keyPresses = toSafeInt(behavior.keyPresses, 0, 0, 5000);
+  const clicks = toSafeInt(behavior.clicks, 0, 0, 5000);
+  const touches = toSafeInt(behavior.touches, 0, 0, 5000);
+  const scrolls = toSafeInt(behavior.scrolls, 0, 0, 5000);
+  const visibilityChanges = toSafeInt(behavior.visibilityChanges, 0, 0, 5000);
+
+  const sessionId = safeString(behavior.sessionId || "", MAX_SESSION_ID_LENGTH);
+  const route = normalizeRoute(behavior.route || req?.url || "unknown-route");
+
+  const requestUserAgent = normalizeUserAgent(req?.headers?.["user-agent"] || "");
+  const behaviorUserAgent = normalizeUserAgent(behavior.userAgent || "");
+  const userAgent = requestUserAgent || behaviorUserAgent;
 
   const totalInteractions =
     mouseMoves + keyPresses + clicks + touches + scrolls;
 
+  const directInputs = mouseMoves + keyPresses + clicks + touches;
+
+  const timeOnPageMs =
+    pageLoadedAt > 0 && submitAt >= pageLoadedAt
+      ? submitAt - pageLoadedAt
+      : 0;
+
+  const timeToFirstInteractionMs =
+    firstInteractionAt > 0 &&
+    pageLoadedAt > 0 &&
+    firstInteractionAt >= pageLoadedAt
+      ? firstInteractionAt - pageLoadedAt
+      : null;
+
+  let riskScore = 0;
+  let telemetryQualityScore = 100;
+  let hardBlockSignals = 0;
+  const reasons = [];
+  const telemetryWarnings = [];
+
+  const routeSensitivity = getRouteSensitivity(route);
+
+  if (!sessionId) {
+    riskScore += 10;
+    telemetryQualityScore -= 20;
+    reasons.push("missing_session_id");
+    telemetryWarnings.push("missing_session_id");
+  }
+
+  if (pageLoadedAt > 0 && submitAt > 0 && submitAt < pageLoadedAt) {
+    riskScore += 30;
+    hardBlockSignals += 1;
+    reasons.push("invalid_submit_timeline");
+  }
+
+  if (
+    firstInteractionAt > 0 &&
+    pageLoadedAt > 0 &&
+    firstInteractionAt < pageLoadedAt
+  ) {
+    riskScore += 20;
+    reasons.push("invalid_interaction_timeline");
+  }
+
+  if (submitAt > now + 10_000 || pageLoadedAt > now + 10_000) {
+    riskScore += 20;
+    reasons.push("future_timestamp_pattern");
+  }
+
+  if (timeOnPageMs > 0 && timeOnPageMs < 1200) {
+    riskScore += 25 * routeSensitivity;
+    reasons.push("submitted_too_fast");
+  }
+
+  if (timeOnPageMs > 0 && timeOnPageMs < 2500 && totalInteractions === 0) {
+    riskScore += 30 * routeSensitivity;
+    reasons.push("no_interaction_before_submit");
+  }
+
+  if (timeToFirstInteractionMs !== null && timeToFirstInteractionMs < 100) {
+    riskScore += 15;
+    reasons.push("interaction_too_fast");
+  }
+
+  if (totalInteractions === 0) {
+    riskScore += 15;
+    reasons.push("zero_interactions");
+  }
+
+  if (directInputs === 0) {
+    riskScore += 10;
+    reasons.push("no_direct_input_signals");
+  }
+
+  if (visibilityChanges > 10) {
+    riskScore += 10;
+    reasons.push("excessive_visibility_changes");
+  }
+
+  if (requestUserAgent && behaviorUserAgent && requestUserAgent !== behaviorUserAgent) {
+    riskScore += 15;
+    reasons.push("user_agent_mismatch");
+  }
+
+  if (!requestUserAgent && !behaviorUserAgent) {
+    telemetryQualityScore -= 20;
+    telemetryWarnings.push("missing_user_agent");
+  }
+
+  if (isSuspiciousUserAgent(userAgent)) {
+    riskScore += 50;
+    hardBlockSignals += 1;
+    reasons.push("suspicious_user_agent");
+  }
+
+  if (
+    totalInteractions > 0 &&
+    timeOnPageMs > 0 &&
+    totalInteractions >= 100 &&
+    timeOnPageMs < 1500
+  ) {
+    riskScore += 25;
+    reasons.push("interaction_density_too_high");
+  }
+
+  if (
+    keyPresses > 0 &&
+    clicks === 0 &&
+    mouseMoves === 0 &&
+    touches === 0 &&
+    timeOnPageMs > 0 &&
+    timeOnPageMs < 1500
+  ) {
+    riskScore += 15;
+    reasons.push("unnatural_input_pattern");
+  }
+
+  if (pageLoadedAt === 0) {
+    telemetryQualityScore -= 20;
+    telemetryWarnings.push("missing_page_loaded_at");
+  }
+
+  if (submitAt === 0) {
+    telemetryQualityScore -= 20;
+    telemetryWarnings.push("missing_submit_at");
+  }
+
+  if (firstInteractionAt === 0 && totalInteractions > 0) {
+    telemetryQualityScore -= 10;
+    telemetryWarnings.push("missing_first_interaction_at");
+  }
+
+  telemetryQualityScore = Math.max(0, Math.min(100, telemetryQualityScore));
+  riskScore = Math.min(100, riskScore);
+
+  let level = "low";
+  if (riskScore >= 70) {
+    level = "high";
+  } else if (riskScore >= 40) {
+    level = "medium";
+  }
+
+  const recommendedAction = getRecommendedAction({
+    riskScore,
+    telemetryQualityScore,
+    hardBlockSignals
+  });
+
   return {
-    pageLoadedAt,
-    firstInteractionAt,
-    submitAt,
-    timeOnPageMs,
-    timeToFirstInteractionMs,
-    totalInteractions,
-    mouseMoves,
-    keyPresses,
-    clicks,
-    touches,
-    scrolls,
-    visibilityChanges: safeNumber(botDetectionState.visibilityChanges),
-    visibilityState: safeNavigatorValue(botDetectionState.lastVisibilityState, 40),
-    sessionId: safeNavigatorValue(botDetectionState.sessionId, 120),
-    timezone: safeTimezone(),
-    language: safeNavigatorValue(navigator.language || "", 50),
-    platform: safeNavigatorValue(navigator.platform || "", 100),
-    userAgent: safeNavigatorValue(navigator.userAgent || "", 300),
-    screenWidth: safeNumber(window.screen?.width),
-    screenHeight: safeNumber(window.screen?.height)
+    riskScore,
+    level,
+    recommendedAction,
+    telemetryQualityScore,
+    hardBlockSignals,
+    reasons,
+    telemetryWarnings,
+    signals: {
+      route,
+      routeSensitivity,
+      timeOnPageMs,
+      timeToFirstInteractionMs,
+      totalInteractions,
+      directInputs,
+      mouseMoves,
+      keyPresses,
+      clicks,
+      touches,
+      scrolls,
+      visibilityChanges,
+      sessionIdPresent: Boolean(sessionId),
+      requestUserAgentPresent: Boolean(requestUserAgent),
+      behaviorUserAgentPresent: Boolean(behaviorUserAgent)
+    }
   };
+}
+
+export async function trackBotBehavior(behavior = {}, req = null, context = {}) {
+  const now = Date.now();
+  const analysis = analyzeBotBehavior(behavior, req);
+
+  const route = normalizeRoute(behavior.route || req?.url || "unknown-route");
+  const requestUserAgent = normalizeUserAgent(req?.headers?.["user-agent"] || "");
+  const behaviorUserAgent = normalizeUserAgent(behavior.userAgent || "");
+  const userAgent = requestUserAgent || behaviorUserAgent;
+
+  const sessionId = normalizeSessionId(context.sessionId || behavior.sessionId || "");
+  const ip = extractClientIp(req, context.ip || "");
+  const userId = normalizeUserId(context.userId || "");
+
+  const redisKey = buildBotKey({ ip, sessionId, userId });
+
+  let record = await getStoredBotRecord(redisKey, now);
+  if (!record) {
+    record = createEmptyBotRecord(now);
+  }
+
+  decayBotScore(record, now);
+
+  let scoreIncrease = 0;
+
+  if (analysis.riskScore >= 70) {
+    scoreIncrease += 20;
+  } else if (analysis.riskScore >= 40) {
+    scoreIncrease += 10;
+  } else if (analysis.riskScore >= 20) {
+    scoreIncrease += 4;
+  }
+
+  if (analysis.hardBlockSignals > 0) {
+    scoreIncrease += analysis.hardBlockSignals * 20;
+  }
+
+  if (analysis.telemetryQualityScore <= 30) {
+    scoreIncrease += 10;
+  } else if (analysis.telemetryQualityScore <= 50) {
+    scoreIncrease += 5;
+  }
+
+  const recentSummary = summarizeRecentSignals(record, route);
+
+  if (recentSummary.sameRouteRecent >= 5) {
+    scoreIncrease += 8;
+  }
+
+  if (recentSummary.recentChallenges >= 3) {
+    scoreIncrease += 10;
+  }
+
+  if (recentSummary.recentHardBlocks >= 2) {
+    scoreIncrease += 15;
+  }
+
+  if (getRouteSensitivity(route) >= 2) {
+    record.sensitiveRouteHits = toSafeInt(record.sensitiveRouteHits, 0, 0, 100000) + 1;
+  }
+
+  if (toSafeInt(record.sensitiveRouteHits, 0, 0, 100000) >= 5) {
+    scoreIncrease += 10;
+  }
+
+  if (
+    analysis.recommendedAction === "block" &&
+    analysis.riskScore >= 90
+  ) {
+    scoreIncrease += 20;
+  }
+
+  record.suspicionScore = Math.min(
+    1000,
+    toSafeInt(record.suspicionScore, 0, 0, 1000) + scoreIncrease
+  );
+
+  record.highestRiskScore = Math.max(
+    toSafeInt(record.highestRiskScore, 0, 0, 100),
+    toSafeInt(analysis.riskScore, 0, 0, 100)
+  );
+
+  if (analysis.hardBlockSignals > 0) {
+    record.hardBlockCount = toSafeInt(record.hardBlockCount, 0, 0, 1000) + analysis.hardBlockSignals;
+  }
+
+  if (analysis.riskScore >= 40) {
+    record.suspiciousCount = toSafeInt(record.suspiciousCount, 0, 0, 100000) + 1;
+  }
+
+  record.updatedAt = now;
+  record.lastSeenAt = now;
+  record.lastRoute = route;
+  record.lastUserAgent = userAgent;
+  record.lastReason = analysis.reasons[0] || "";
+  record.lastDecayAt = record.lastDecayAt || now;
+
+  pushReasonHistory(record, analysis.reasons);
+  pushRecentSignal(record, {
+    route,
+    riskScore: analysis.riskScore,
+    hardBlockSignals: analysis.hardBlockSignals,
+    recommendedAction: analysis.recommendedAction
+  }, now);
+
+  await storeBotRecord(redisKey, record);
+
+  let escalatedAction = analysis.recommendedAction;
+
+  if (record.hardBlockCount >= 2 || record.suspicionScore >= 120) {
+    escalatedAction = "block";
+  } else if (
+    record.suspicionScore >= 90 || record.suspiciousCount >= 5
+  ) {
+    escalatedAction = "challenge";
+  } else if (
+    escalatedAction === "allow" &&
+    (record.suspicionScore >= 60 || record.suspiciousCount >= 3)
+  ) {
+    escalatedAction = "throttle";
+  }
+
+  return {
+    ...analysis,
+    escalatedAction,
+    distributed: {
+      suspicionScore: toSafeInt(record.suspicionScore, 0, 0, 1000),
+      highestRiskScore: toSafeInt(record.highestRiskScore, 0, 0, 100),
+      hardBlockCount: toSafeInt(record.hardBlockCount, 0, 0, 1000),
+      suspiciousCount: toSafeInt(record.suspiciousCount, 0, 0, 100000),
+      sensitiveRouteHits: toSafeInt(record.sensitiveRouteHits, 0, 0, 100000),
+      sameRouteRecent: recentSummary.sameRouteRecent,
+      recentChallenges: recentSummary.recentChallenges,
+      recentHardBlocks: recentSummary.recentHardBlocks,
+      clientKeyPreview: safeString(redisKey.replace(/^bot:/, ""), 24)
+    }
+  };
+}
+
+export async function getBotBehaviorSnapshot(context = {}) {
+  const now = Date.now();
+  const redisKey = buildBotKey({
+    ip: context.ip || "",
+    sessionId: context.sessionId || "",
+    userId: context.userId || ""
+  });
+
+  const record = await getStoredBotRecord(redisKey, now);
+
+  if (!record) {
+    return {
+      found: false,
+      clientKeyPreview: safeString(redisKey.replace(/^bot:/, ""), 24)
+    };
+  }
+
+  return {
+    found: true,
+    clientKeyPreview: safeString(redisKey.replace(/^bot:/, ""), 24),
+    suspicionScore: toSafeInt(record.suspicionScore, 0, 0, 1000),
+    highestRiskScore: toSafeInt(record.highestRiskScore, 0, 0, 100),
+    hardBlockCount: toSafeInt(record.hardBlockCount, 0, 0, 1000),
+    suspiciousCount: toSafeInt(record.suspiciousCount, 0, 0, 100000),
+    sensitiveRouteHits: toSafeInt(record.sensitiveRouteHits, 0, 0, 100000),
+    lastSeenAt: toSafeInt(record.lastSeenAt, 0, 0, now + 60_000),
+    lastRoute: normalizeRoute(record.lastRoute || "unknown-route"),
+    updatedAt: toSafeInt(record.updatedAt, 0, 0, now + 60_000)
+  };
+}
+
+export async function clearBotBehaviorSnapshot(context = {}) {
+  const redisKey = buildBotKey({
+    ip: context.ip || "",
+    sessionId: context.sessionId || "",
+    userId: context.userId || ""
+  });
+
+  try {
+    await redis.del(redisKey);
+    return { ok: true };
+  } catch (error) {
+    console.error("Redis bot-detection delete failed:", error);
+    return { ok: false };
+  }
 }
