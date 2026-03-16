@@ -1,23 +1,33 @@
 {
   "name": "aethra",
   "version": "1.0.0",
-  "description": "AI character life simulator",
-  "main": "index.js",
+  "description": "Aethra AI character life simulator backend",
+  "private": true,
+  "type": "commonjs",
+
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node index.js",
+    "lint": "echo \"Add linting later\"",
+    "test": "echo \"No tests configured\""
   },
+
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/siddharth1202t/Aethra.git"
+    "url": "https://github.com/siddharth1202t/Aethra.git"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
+
   "bugs": {
     "url": "https://github.com/siddharth1202t/Aethra/issues"
   },
-  "homepage": "https://github.com/siddharth1202t/Aethra#readme",
+
+  "homepage": "https://github.com/siddharth1202t/Aethra",
+
+  "license": "ISC",
+
+  "engines": {
+    "node": ">=18"
+  },
+
   "dependencies": {
     "@upstash/redis": "^1.37.0",
     "firebase-admin": "^10.3.0"
