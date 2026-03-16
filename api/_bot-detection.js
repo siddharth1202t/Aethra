@@ -1,3 +1,18 @@
+import { redis } from "./_redis.js";
+
+const BOT_STATE_TTL_MS = 24 * 60 * 60 * 1000;
+const BOT_SIGNAL_WINDOW_MS = 30 * 60 * 1000;
+const BOT_DECAY_MS = 30 * 60 * 1000;
+
+const MAX_ROUTE_LENGTH = 150;
+const MAX_SESSION_ID_LENGTH = 120;
+const MAX_IP_LENGTH = 100;
+const MAX_USER_ID_LENGTH = 120;
+const MAX_USER_AGENT_LENGTH = 500;
+const MAX_REASON_LENGTH = 80;
+const MAX_REASON_HISTORY = 30;
+const MAX_SIGNAL_HISTORY = 40;
+
 function toNumber(value, fallback = 0) {
   const num = Number(value);
   return Number.isFinite(num) ? num : fallback;
@@ -14,7 +29,30 @@ function safeString(value, maxLength = 300) {
 }
 
 function normalizeRoute(route) {
-  return safeString(route || "unknown-route", 150).toLowerCase();
+  return safeString(route || "unknown-route", MAX_ROUTE_LENGTH).trim().toLowerCase();
+}
+
+function normalizeSessionId(value = "") {
+  return safeString(value || "no-session", MAX_SESSION_ID_LENGTH).trim();
+}
+
+function normalizeIp(value = "") {
+  return safeString(value || "unknown", MAX_IP_LENGTH).trim();
+}
+
+function normalizeUserId(value = "") {
+  return safeString(value || "anon-user", MAX_USER_ID_LENGTH).trim();
+}
+
+function normalizeUserAgent(value = "") {
+  return safeString(value || "", MAX_USER_AGENT_LENGTH).trim();
+}
+
+function buildBotKey({ ip = "", sessionId = "", userId = "" } = {}) {
+  const safeIp = normalizeIp(ip);
+  const safeSessionId = normalizeSessionId(sessionId);
+  const safeUserId = normalizeUserId(userId);
+  return `bot:${safeIp}::${safeSessionId}::${safeUserId}`;
 }
 
 function isSuspiciousUserAgent(userAgent) {
@@ -55,6 +93,162 @@ function getRecommendedAction({ riskScore, telemetryQualityScore, hardBlockSigna
   return "allow";
 }
 
+function createEmptyBotRecord(now) {
+  return {
+    createdAt: now,
+    updatedAt: now,
+    suspicionScore: 0,
+    highestRiskScore: 0,
+    hardBlockCount: 0,
+    suspiciousCount: 0,
+    lastSeenAt: now,
+    lastRoute: "unknown-route",
+    lastUserAgent: "",
+    lastReason: "",
+    reasonHistory: [],
+    recentSignals: [],
+    lastDecayAt: now
+  };
+}
+
+function normalizeBotRecord(raw, now) {
+  const record = raw && typeof raw === "object" ? raw : {};
+
+  return {
+    createdAt: toSafeInt(record.createdAt, now, 0, now + 60_000),
+    updatedAt: toSafeInt(record.updatedAt, now, 0, now + 60_000),
+    suspicionScore: toSafeInt(record.suspicionScore, 0, 0, 1000),
+    highestRiskScore: toSafeInt(record.highestRiskScore, 0, 0, 100),
+    hardBlockCount: toSafeInt(record.hardBlockCount, 0, 0, 1000),
+    suspiciousCount: toSafeInt(record.suspiciousCount, 0, 0, 100000),
+    lastSeenAt: toSafeInt(record.lastSeenAt, now, 0, now + 60_000),
+    lastRoute: normalizeRoute(record.lastRoute || "unknown-route"),
+    lastUserAgent: normalizeUserAgent(record.lastUserAgent || ""),
+    lastReason: safeString(record.lastReason || "", MAX_REASON_LENGTH),
+    reasonHistory: Array.isArray(record.reasonHistory)
+      ? record.reasonHistory
+          .map((item) => safeString(item, MAX_REASON_LENGTH))
+          .filter(Boolean)
+          .slice(-MAX_REASON_HISTORY)
+      : [],
+    recentSignals: Array.isArray(record.recentSignals)
+      ? record.recentSignals
+          .map((item) => ({
+            at: toSafeInt(item?.at, 0, 0, now + 60_000),
+            route: normalizeRoute(item?.route || "unknown-route"),
+            riskScore: toSafeInt(item?.riskScore, 0, 0, 100),
+            hardBlockSignals: toSafeInt(item?.hardBlockSignals, 0, 0, 10),
+            recommendedAction: safeString(item?.recommendedAction || "allow", 20)
+          }))
+          .filter((item) => item.at > 0)
+          .slice(-MAX_SIGNAL_HISTORY)
+      : [],
+    lastDecayAt: toSafeInt(record.lastDecayAt, now, 0, now + 60_000)
+  };
+}
+
+async function getStoredBotRecord(redisKey, now) {
+  try {
+    const raw = await redis.get(redisKey);
+
+    if (!raw) {
+      return null;
+    }
+
+    if (typeof raw === "string") {
+      return normalizeBotRecord(JSON.parse(raw), now);
+    }
+
+    if (typeof raw === "object") {
+      return normalizeBotRecord(raw, now);
+    }
+
+    return null;
+  } catch (error) {
+    console.error("Redis bot-detection read failed:", error);
+    return null;
+  }
+}
+
+async function storeBotRecord(redisKey, record) {
+  try {
+    const ttlSeconds = Math.max(1, Math.ceil(BOT_STATE_TTL_MS / 1000));
+    await redis.set(redisKey, JSON.stringify(record), { ex: ttlSeconds });
+    return true;
+  } catch (error) {
+    console.error("Redis bot-detection write failed:", error);
+    return false;
+  }
+}
+
+function decayBotScore(record, now) {
+  const lastDecayAt = toSafeInt(record.lastDecayAt, now, 0, now);
+  const elapsed = now - lastDecayAt;
+
+  if (elapsed < BOT_DECAY_MS) {
+    return;
+  }
+
+  const decaySteps = Math.floor(elapsed / BOT_DECAY_MS);
+  if (decaySteps <= 0) {
+    return;
+  }
+
+  record.suspicionScore = Math.max(0, toSafeInt(record.suspicionScore, 0) - decaySteps * 8);
+  record.lastDecayAt = now;
+}
+
+function pushReasonHistory(record, reasons = []) {
+  if (!Array.isArray(record.reasonHistory)) {
+    record.reasonHistory = [];
+  }
+
+  for (const reason of reasons) {
+    const safeReason = safeString(reason, MAX_REASON_LENGTH);
+    if (safeReason) {
+      record.reasonHistory.push(safeReason);
+    }
+  }
+
+  record.reasonHistory = record.reasonHistory.slice(-MAX_REASON_HISTORY);
+}
+
+function pushRecentSignal(record, signal, now) {
+  if (!Array.isArray(record.recentSignals)) {
+    record.recentSignals = [];
+  }
+
+  record.recentSignals.push({
+    at: now,
+    route: normalizeRoute(signal.route),
+    riskScore: toSafeInt(signal.riskScore, 0, 0, 100),
+    hardBlockSignals: toSafeInt(signal.hardBlockSignals, 0, 0, 10),
+    recommendedAction: safeString(signal.recommendedAction, 20)
+  });
+
+  record.recentSignals = record.recentSignals
+    .filter((item) => now - toSafeInt(item.at, 0, 0, now) <= BOT_SIGNAL_WINDOW_MS)
+    .slice(-MAX_SIGNAL_HISTORY);
+}
+
+function summarizeRecentSignals(record, route) {
+  const recentSignals = Array.isArray(record.recentSignals) ? record.recentSignals : [];
+  const sameRouteRecent = recentSignals.filter((item) => item.route === route).length;
+  const recentChallenges = recentSignals.filter(
+    (item) => item.recommendedAction === "challenge" || item.recommendedAction === "block"
+  ).length;
+  const recentHardBlocks = recentSignals.reduce(
+    (sum, item) => sum + toSafeInt(item.hardBlockSignals, 0, 0, 10),
+    0
+  );
+
+  return {
+    sameRouteRecent,
+    recentChallenges,
+    recentHardBlocks
+  };
+}
+
 export function analyzeBotBehavior(behavior = {}, req = null) {
   const now = Date.now();
 
@@ -69,11 +263,11 @@ export function analyzeBotBehavior(behavior = {}, req = null) {
   const scrolls = toSafeInt(behavior.scrolls, 0, 0, 5000);
   const visibilityChanges = toSafeInt(behavior.visibilityChanges, 0, 0, 5000);
 
-  const sessionId = safeString(behavior.sessionId || "", 120);
+  const sessionId = safeString(behavior.sessionId || "", MAX_SESSION_ID_LENGTH);
   const route = normalizeRoute(behavior.route || req?.url || "unknown-route");
 
-  const requestUserAgent = safeString(req?.headers?.["user-agent"] || "", 500);
-  const behaviorUserAgent = safeString(behavior.userAgent || "", 500);
+  const requestUserAgent = normalizeUserAgent(req?.headers?.["user-agent"] || "");
+  const behaviorUserAgent = normalizeUserAgent(behavior.userAgent || "");
   const userAgent = requestUserAgent || behaviorUserAgent;
 
   const totalInteractions =
@@ -253,4 +447,181 @@ export function analyzeBotBehavior(behavior = {}, req = null) {
       behaviorUserAgentPresent: Boolean(behaviorUserAgent)
     }
   };
+}
+
+export async function trackBotBehavior(behavior = {}, req = null, context = {}) {
+  const now = Date.now();
+  const analysis = analyzeBotBehavior(behavior, req);
+
+  const route = normalizeRoute(behavior.route || req?.url || "unknown-route");
+  const requestUserAgent = normalizeUserAgent(req?.headers?.["user-agent"] || "");
+  const behaviorUserAgent = normalizeUserAgent(behavior.userAgent || "");
+  const userAgent = requestUserAgent || behaviorUserAgent;
+
+  const sessionId =
+    normalizeSessionId(context.sessionId || behavior.sessionId || "");
+  const ip = normalizeIp(context.ip || req?.headers?.["x-forwarded-for"]?.split(",")[0]?.trim() || "");
+  const userId = normalizeUserId(context.userId || "");
+
+  const redisKey = buildBotKey({ ip, sessionId, userId });
+
+  let record = await getStoredBotRecord(redisKey, now);
+  if (!record) {
+    record = createEmptyBotRecord(now);
+  }
+
+  decayBotScore(record, now);
+
+  let scoreIncrease = 0;
+
+  if (analysis.riskScore >= 70) {
+    scoreIncrease += 20;
+  } else if (analysis.riskScore >= 40) {
+    scoreIncrease += 10;
+  } else if (analysis.riskScore >= 20) {
+    scoreIncrease += 4;
+  }
+
+  if (analysis.hardBlockSignals > 0) {
+    scoreIncrease += analysis.hardBlockSignals * 20;
+  }
+
+  if (analysis.telemetryQualityScore <= 30) {
+    scoreIncrease += 10;
+  } else if (analysis.telemetryQualityScore <= 50) {
+    scoreIncrease += 5;
+  }
+
+  const recentSummary = summarizeRecentSignals(record, route);
+
+  if (recentSummary.sameRouteRecent >= 5) {
+    scoreIncrease += 8;
+  }
+
+  if (recentSummary.recentChallenges >= 3) {
+    scoreIncrease += 10;
+  }
+
+  if (recentSummary.recentHardBlocks >= 2) {
+    scoreIncrease += 15;
+  }
+
+  if (
+    analysis.recommendedAction === "block" &&
+    analysis.riskScore >= 90
+  ) {
+    scoreIncrease += 20;
+  }
+
+  record.suspicionScore = Math.min(
+    1000,
+    toSafeInt(record.suspicionScore, 0, 0, 1000) + scoreIncrease
+  );
+
+  record.highestRiskScore = Math.max(
+    toSafeInt(record.highestRiskScore, 0, 0, 100),
+    toSafeInt(analysis.riskScore, 0, 0, 100)
+  );
+
+  if (analysis.hardBlockSignals > 0) {
+    record.hardBlockCount = toSafeInt(record.hardBlockCount, 0, 0, 1000) + analysis.hardBlockSignals;
+  }
+
+  if (analysis.riskScore >= 40) {
+    record.suspiciousCount = toSafeInt(record.suspiciousCount, 0, 0, 100000) + 1;
+  }
+
+  record.updatedAt = now;
+  record.lastSeenAt = now;
+  record.lastRoute = route;
+  record.lastUserAgent = userAgent;
+  record.lastReason = analysis.reasons[0] || "";
+  record.lastDecayAt = record.lastDecayAt || now;
+
+  pushReasonHistory(record, analysis.reasons);
+  pushRecentSignal(record, {
+    route,
+    riskScore: analysis.riskScore,
+    hardBlockSignals: analysis.hardBlockSignals,
+    recommendedAction: analysis.recommendedAction
+  }, now);
+
+  await storeBotRecord(redisKey, record);
+
+  let escalatedAction = analysis.recommendedAction;
+
+  if (record.hardBlockCount >= 2 || record.suspicionScore >= 120) {
+    escalatedAction = "block";
+  } else if (
+    escalatedAction === "allow" &&
+    (record.suspicionScore >= 60 || record.suspiciousCount >= 3)
+  ) {
+    escalatedAction = "throttle";
+  } else if (
+    escalatedAction !== "block" &&
+    (record.suspicionScore >= 90 || record.suspiciousCount >= 5)
+  ) {
+    escalatedAction = "challenge";
+  }
+
+  return {
+    ...analysis,
+    escalatedAction,
+    distributed: {
+      suspicionScore: toSafeInt(record.suspicionScore, 0, 0, 1000),
+      highestRiskScore: toSafeInt(record.highestRiskScore, 0, 0, 100),
+      hardBlockCount: toSafeInt(record.hardBlockCount, 0, 0, 1000),
+      suspiciousCount: toSafeInt(record.suspiciousCount, 0, 0, 100000),
+      sameRouteRecent: recentSummary.sameRouteRecent,
+      recentChallenges: recentSummary.recentChallenges,
+      recentHardBlocks: recentSummary.recentHardBlocks,
+      clientKeyPreview: safeString(redisKey.replace(/^bot:/, ""), 24)
+    }
+  };
+}
+
+export async function getBotBehaviorSnapshot(context = {}) {
+  const now = Date.now();
+  const redisKey = buildBotKey({
+    ip: context.ip || "",
+    sessionId: context.sessionId || "",
+    userId: context.userId || ""
+  });
+
+  const record = await getStoredBotRecord(redisKey, now);
+
+  if (!record) {
+    return {
+      found: false,
+      clientKeyPreview: safeString(redisKey.replace(/^bot:/, ""), 24)
+    };
+  }
+
+  return {
+    found: true,
+    clientKeyPreview: safeString(redisKey.replace(/^bot:/, ""), 24),
+    suspicionScore: toSafeInt(record.suspicionScore, 0, 0, 1000),
+    highestRiskScore: toSafeInt(record.highestRiskScore, 0, 0, 100),
+    hardBlockCount: toSafeInt(record.hardBlockCount, 0, 0, 1000),
+    suspiciousCount: toSafeInt(record.suspiciousCount, 0, 0, 100000),
+    lastSeenAt: toSafeInt(record.lastSeenAt, 0, 0, now + 60_000),
+    lastRoute: normalizeRoute(record.lastRoute || "unknown-route"),
+    updatedAt: toSafeInt(record.updatedAt, 0, 0, now + 60_000)
+  };
+}
+
+export async function clearBotBehaviorSnapshot(context = {}) {
+  const redisKey = buildBotKey({
+    ip: context.ip || "",
+    sessionId: context.sessionId || "",
+    userId: context.userId || ""
+  });
+
+  try {
+    await redis.del(redisKey);
+    return { ok: true };
+  } catch (error) {
+    console.error("Redis bot-detection delete failed:", error);
+    return { ok: false };
+  }
 }
