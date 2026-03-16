@@ -28,8 +28,34 @@ const ALLOWED_ORIGINS = new Set([
 const ALLOWED_ACTIONS = new Set(["check", "fail"]);
 const GOOGLE_PLACEHOLDER_EMAIL = "google-signup";
 
+function safeJsonParse(raw, fallback = null) {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return fallback;
+  }
+}
+
 function normalizeEmail(email) {
-  return String(email || "").trim().toLowerCase();
+  return safeString(email || "", 200).trim().toLowerCase();
+}
+
+function normalizeIp(ip) {
+  let value = safeString(ip || "unknown", 100);
+
+  if (!value) return "unknown";
+
+  if (value.startsWith("::ffff:")) {
+    value = value.slice(7);
+  }
+
+  value = value.replace(/[^a-fA-F0-9:.,]/g, "").slice(0, 100);
+  return value || "unknown";
+}
+
+function normalizeKeyPart(value, fallback = "", maxLength = 160) {
+  const cleaned = safeString(value || "", maxLength).replace(/[^a-zA-Z0-9._:@/-]/g, "");
+  return cleaned || fallback;
 }
 
 function isValidEmail(email) {
@@ -37,7 +63,7 @@ function isValidEmail(email) {
 }
 
 function getKey(email, ip) {
-  return `${email}::${ip}`;
+  return `${normalizeKeyPart(email, "unknown-email", 220)}::${normalizeKeyPart(ip, "unknown-ip", 120)}`;
 }
 
 function buildSignupAttemptKey(email, ip) {
@@ -45,11 +71,40 @@ function buildSignupAttemptKey(email, ip) {
 }
 
 function buildIpAttemptKey(ip) {
-  return `signup-attempt-ip:${safeString(ip, 120)}`;
+  return `signup-attempt-ip:${normalizeKeyPart(ip, "unknown-ip", 120)}`;
 }
 
 function isOriginAllowed(origin = "") {
   return ALLOWED_ORIGINS.has(safeString(origin, 200).trim().toLowerCase());
+}
+
+function createDefaultRecord(now = Date.now()) {
+  return {
+    count: 0,
+    lockUntil: 0,
+    lastAttempt: now,
+    escalationCount: 0
+  };
+}
+
+function normalizeRecord(record, now = Date.now()) {
+  const normalized = {
+    count: safePositiveInt(record?.count, 0),
+    lockUntil: safePositiveInt(record?.lockUntil, 0),
+    lastAttempt: safePositiveInt(record?.lastAttempt, now),
+    escalationCount: safePositiveInt(record?.escalationCount, 0)
+  };
+
+  if (normalized.lockUntil && now > normalized.lockUntil) {
+    return {
+      count: 0,
+      lockUntil: 0,
+      lastAttempt: now,
+      escalationCount: normalized.escalationCount
+    };
+  }
+
+  return normalized;
 }
 
 async function getStoredRecord(redisKey) {
@@ -59,59 +114,33 @@ async function getStoredRecord(redisKey) {
     const raw = await redis.get(redisKey);
 
     if (!raw) {
-      return {
-        count: 0,
-        lockUntil: 0,
-        lastAttempt: now,
-        escalationCount: 0
-      };
+      return createDefaultRecord(now);
     }
 
-    const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+    const parsed =
+      typeof raw === "string"
+        ? safeJsonParse(raw, null)
+        : typeof raw === "object"
+          ? raw
+          : null;
 
-    const normalized = {
-      count: safePositiveInt(parsed?.count, 0),
-      lockUntil: safePositiveInt(parsed?.lockUntil, 0),
-      lastAttempt: safePositiveInt(parsed?.lastAttempt, now),
-      escalationCount: safePositiveInt(parsed?.escalationCount, 0)
-    };
-
-    if (normalized.lockUntil && now > normalized.lockUntil) {
-      return {
-        count: 0,
-        lockUntil: 0,
-        lastAttempt: now,
-        escalationCount: normalized.escalationCount
-      };
+    if (!parsed || typeof parsed !== "object") {
+      return createDefaultRecord(now);
     }
 
-    return normalized;
+    return normalizeRecord(parsed, now);
   } catch (error) {
     console.error("Redis signup-attempt read failed:", error);
-
-    return {
-      count: 0,
-      lockUntil: 0,
-      lastAttempt: now,
-      escalationCount: 0
-    };
+    return createDefaultRecord(now);
   }
 }
 
 async function saveStoredRecord(redisKey, record) {
   try {
     const ttlSeconds = Math.max(1, Math.ceil(STALE_RECORD_TTL_MS / 1000));
+    const normalized = normalizeRecord(record, Date.now());
 
-    await redis.set(
-      redisKey,
-      JSON.stringify({
-        count: safePositiveInt(record.count, 0),
-        lockUntil: safePositiveInt(record.lockUntil, 0),
-        lastAttempt: safePositiveInt(record.lastAttempt, Date.now()),
-        escalationCount: safePositiveInt(record.escalationCount, 0)
-      }),
-      { ex: ttlSeconds }
-    );
+    await redis.set(redisKey, JSON.stringify(normalized), { ex: ttlSeconds });
 
     return true;
   } catch (error) {
@@ -136,6 +165,13 @@ function buildLockResponse(isLocked, remainingMs = 0, extra = {}) {
 function getEscalatedLockMs(baseMs, escalationCount) {
   const multiplier = Math.min(4, 1 + safePositiveInt(escalationCount, 0) * 0.5);
   return Math.floor(baseMs * multiplier);
+}
+
+function pickSecurityAction(security) {
+  return safeString(
+    security?.risk?.finalAction || security?.risk?.action || "allow",
+    20
+  ).toLowerCase();
 }
 
 export default async function handler(req, res) {
@@ -195,14 +231,15 @@ export default async function handler(req, res) {
         email: rawEmail
       },
       rateLimitConfig: {
-        key: `signup-attempt:${actor.ip}`,
+        key: `signup-attempt:${normalizeIp(actor.ip)}`,
         limit: 35,
         windowMs: 10 * 60 * 1000
       },
       abuseSuccess: action !== "fail"
     });
 
-    const ip = security.actor.ip;
+    const ip = normalizeIp(security.actor.ip);
+    const securityAction = pickSecurityAction(security);
 
     if (security.signals.rateLimitResult && !security.signals.rateLimitResult.allowed) {
       await writeSecurityLog({
@@ -272,7 +309,7 @@ export default async function handler(req, res) {
 
     const now = Date.now();
 
-    if (security.risk.action === "block") {
+    if (securityAction === "block") {
       await writeSecurityLog({
         type: "blocked_suspicious_signup_request",
         level: "critical",
@@ -293,12 +330,12 @@ export default async function handler(req, res) {
 
       return res.status(429).json(
         buildBlockedResponse("Suspicious activity detected. Please try again later.", {
-          action: security.risk.action
+          action: "block"
         })
       );
     }
 
-    if (security.risk.action === "challenge" || security.risk.action === "throttle") {
+    if (securityAction === "challenge" || securityAction === "throttle") {
       await writeSecurityLog({
         type: "temporary_signup_security_challenge",
         level: "warning",
@@ -324,6 +361,7 @@ export default async function handler(req, res) {
     if (ipRecord.lockUntil > now) {
       return res.status(200).json(
         buildLockResponse(true, ipRecord.lockUntil - now, {
+          lockType: "ip",
           risk: security.risk
         })
       );
@@ -337,6 +375,7 @@ export default async function handler(req, res) {
 
       return res.status(200).json(
         buildLockResponse(isLocked, record.lockUntil - now, {
+          lockType: isLocked ? "user" : "none",
           risk: security.risk
         })
       );
@@ -349,7 +388,7 @@ export default async function handler(req, res) {
       ipRecord.count += 1;
       ipRecord.lastAttempt = now;
 
-      if (security.risk.action === "challenge" || security.risk.action === "throttle") {
+      if (securityAction === "challenge" || securityAction === "throttle") {
         record.escalationCount += 1;
         ipRecord.escalationCount += 1;
       }
@@ -403,6 +442,7 @@ export default async function handler(req, res) {
 
       return res.status(200).json(
         buildLockResponse(isLocked, record.lockUntil - now, {
+          lockType: isLocked ? "user" : (ipRecord.lockUntil > now ? "ip" : "none"),
           attempts: record.count,
           risk: security.risk
         })
