@@ -12,8 +12,18 @@ const ALLOWED_MODES = new Set([
   "lockdown"
 ]);
 
+const ALLOWED_ACTIONS = new Set([
+  "allow",
+  "challenge",
+  "throttle",
+  "block"
+]);
+
 function safeString(value, maxLength = 200) {
-  return String(value || "").slice(0, maxLength);
+  return String(value || "")
+    .replace(/[\u0000-\u001F\u007F]/g, "")
+    .trim()
+    .slice(0, maxLength);
 }
 
 function safeNumber(value, fallback = 0) {
@@ -27,38 +37,58 @@ function safeInt(value, fallback = 0, min = 0, max = 1_000_000) {
   return Math.min(max, Math.max(min, num));
 }
 
+function safeJsonParse(raw, fallback = null) {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return fallback;
+  }
+}
+
 function normalizeMode(mode = "") {
   const normalized = safeString(mode || "normal", 30).toLowerCase();
   return ALLOWED_MODES.has(normalized) ? normalized : "normal";
 }
 
+function normalizeAction(action = "") {
+  const normalized = safeString(action || "allow", 20).toLowerCase();
+  return ALLOWED_ACTIONS.has(normalized) ? normalized : "allow";
+}
+
+function normalizeReason(value = "") {
+  return safeString(value || "", 300).replace(/[^a-z0-9_:-]/gi, "_");
+}
+
 function createDefaultAdaptiveState() {
+  const now = Date.now();
+
   return {
     mode: "normal",
-    updatedAt: Date.now(),
-    windowStartedAt: Date.now(),
+    updatedAt: now,
+    windowStartedAt: now,
     totalSignals: 0,
     criticalSignals: 0,
     blockSignals: 0,
     challengeSignals: 0,
     repeatedOffenderSignals: 0,
     lockdownTriggers: 0,
-    lastReason: ""
+    lastReason: "stable_activity"
   };
 }
 
 function normalizeAdaptiveState(raw) {
   const base = createDefaultAdaptiveState();
+  const nowMax = Date.now() + 60_000;
   const state = raw && typeof raw === "object" ? raw : {};
 
   return {
     mode: normalizeMode(state.mode || base.mode),
-    updatedAt: safeInt(state.updatedAt, base.updatedAt, 0, Date.now() + 60_000),
+    updatedAt: safeInt(state.updatedAt, base.updatedAt, 0, nowMax),
     windowStartedAt: safeInt(
       state.windowStartedAt,
       base.windowStartedAt,
       0,
-      Date.now() + 60_000
+      nowMax
     ),
     totalSignals: safeInt(state.totalSignals, 0, 0, 1_000_000),
     criticalSignals: safeInt(state.criticalSignals, 0, 0, 1_000_000),
@@ -66,7 +96,7 @@ function normalizeAdaptiveState(raw) {
     challengeSignals: safeInt(state.challengeSignals, 0, 0, 1_000_000),
     repeatedOffenderSignals: safeInt(state.repeatedOffenderSignals, 0, 0, 1_000_000),
     lockdownTriggers: safeInt(state.lockdownTriggers, 0, 0, 1_000_000),
-    lastReason: safeString(state.lastReason || "", 300)
+    lastReason: normalizeReason(state.lastReason || base.lastReason)
   };
 }
 
@@ -79,7 +109,11 @@ async function getStoredAdaptiveState() {
     }
 
     if (typeof raw === "string") {
-      return normalizeAdaptiveState(JSON.parse(raw));
+      const parsed = safeJsonParse(raw, null);
+      if (!parsed || typeof parsed !== "object") {
+        return createDefaultAdaptiveState();
+      }
+      return normalizeAdaptiveState(parsed);
     }
 
     if (typeof raw === "object") {
@@ -95,8 +129,9 @@ async function getStoredAdaptiveState() {
 
 async function storeAdaptiveState(state) {
   try {
+    const normalized = normalizeAdaptiveState(state);
     const ttlSeconds = Math.max(1, Math.ceil(ADAPTIVE_MODE_TTL_MS / 1000));
-    await redis.set(ADAPTIVE_MODE_KEY, JSON.stringify(state), { ex: ttlSeconds });
+    await redis.set(ADAPTIVE_MODE_KEY, JSON.stringify(normalized), { ex: ttlSeconds });
     return true;
   } catch (error) {
     console.error("Adaptive mode write failed:", error);
@@ -111,7 +146,8 @@ function resetWindow(state, now) {
   state.blockSignals = 0;
   state.challengeSignals = 0;
   state.repeatedOffenderSignals = 0;
-  state.lastReason = "";
+  state.lockdownTriggers = 0;
+  state.lastReason = "stable_activity";
 }
 
 function decideAdaptiveMode(state) {
@@ -153,19 +189,23 @@ function decideAdaptiveMode(state) {
   };
 }
 
-async function applyContainmentForMode(mode, reason) {
-  if (mode === "lockdown") {
+async function syncContainmentToMode(mode, reason) {
+  const normalizedMode = normalizeMode(mode);
+  const normalizedReason = normalizeReason(reason || "adaptive_sync");
+  const currentContainment = await getContainmentState();
+
+  if (normalizedMode === "lockdown") {
     return setContainmentState({
       mode: "lockdown",
-      reason,
+      reason: normalizedReason,
       durationMs: 30 * 60 * 1000
     });
   }
 
-  if (mode === "defense") {
+  if (normalizedMode === "defense") {
     return setContainmentState({
       mode: "elevated",
-      reason,
+      reason: normalizedReason,
       durationMs: 20 * 60 * 1000,
       flags: {
         freezeRegistrations: true,
@@ -175,21 +215,51 @@ async function applyContainmentForMode(mode, reason) {
     });
   }
 
-  if (mode === "elevated") {
+  if (normalizedMode === "elevated") {
     return setContainmentState({
       mode: "elevated",
-      reason,
+      reason: normalizedReason,
       durationMs: 15 * 60 * 1000,
       flags: {
+        freezeRegistrations: false,
+        disableUploads: false,
         forceCaptcha: true
+      }
+    });
+  }
+
+  // Return to normal-safe containment defaults
+  if (
+    currentContainment?.mode !== "normal" ||
+    currentContainment?.flags?.freezeRegistrations ||
+    currentContainment?.flags?.disableUploads ||
+    currentContainment?.flags?.forceCaptcha ||
+    currentContainment?.flags?.readOnlyMode ||
+    currentContainment?.flags?.lockdown
+  ) {
+    return setContainmentState({
+      mode: "normal",
+      reason: normalizedReason,
+      durationMs: 5 * 60 * 1000,
+      flags: {
+        freezeRegistrations: false,
+        disableUploads: false,
+        forceCaptcha: false,
+        readOnlyMode: false,
+        lockdown: false
       }
     });
   }
 
   return {
     ok: true,
-    state: await getContainmentState()
+    state: currentContainment
   };
+}
+
+function hasWindowExpired(windowStartedAt, now) {
+  const safeWindowStartedAt = safeInt(windowStartedAt, now, 0, now);
+  return now - safeWindowStartedAt > ADAPTIVE_MODE_WINDOW_MS;
 }
 
 export async function evaluateAdaptiveThreatMode({
@@ -201,7 +271,7 @@ export async function evaluateAdaptiveThreatMode({
   const now = Date.now();
   const state = await getStoredAdaptiveState();
 
-  if (now - safeInt(state.windowStartedAt, now, 0, now) > ADAPTIVE_MODE_WINDOW_MS) {
+  if (hasWindowExpired(state.windowStartedAt, now)) {
     resetWindow(state, now);
   }
 
@@ -209,16 +279,20 @@ export async function evaluateAdaptiveThreatMode({
   state.totalSignals += 1;
 
   const riskScore = safeInt(risk?.riskScore, 0, 0, 100);
-  const riskAction = safeString(risk?.finalAction || risk?.action || "allow", 20);
+  const riskAction = normalizeAction(risk?.finalAction || risk?.action || "allow");
   const threatScore = safeInt(threatResult?.threatScore, 0, 0, 100);
   const abuseScore = safeInt(abuseResult?.abuseScore, 0, 0, 100);
   const botScore = safeInt(botResult?.riskScore, 0, 0, 100);
+
+  const blockEvents = safeInt(threatResult?.events?.blockEvents, 0, 0, 1_000_000);
+  const hardBlockSignals = safeInt(threatResult?.events?.hardBlockSignals, 0, 0, 1_000_000);
+  const criticalRouteHits = safeInt(threatResult?.events?.criticalRouteHits, 0, 0, 1_000_000);
 
   if (riskAction === "block") {
     state.blockSignals += 1;
   }
 
-  if (riskAction === "challenge") {
+  if (riskAction === "challenge" || riskAction === "throttle") {
     state.challengeSignals += 1;
   }
 
@@ -232,9 +306,9 @@ export async function evaluateAdaptiveThreatMode({
   }
 
   if (
-    safeInt(threatResult?.events?.blockEvents, 0, 0, 1_000_000) >= 2 ||
-    safeInt(threatResult?.events?.hardBlockSignals, 0, 0, 1_000_000) >= 2 ||
-    safeInt(threatResult?.events?.criticalRouteHits, 0, 0, 1_000_000) >= 5
+    blockEvents >= 2 ||
+    hardBlockSignals >= 2 ||
+    criticalRouteHits >= 5
   ) {
     state.repeatedOffenderSignals += 1;
   }
@@ -242,7 +316,7 @@ export async function evaluateAdaptiveThreatMode({
   if (
     riskScore >= 95 ||
     threatScore >= 95 ||
-    safeInt(threatResult?.events?.hardBlockSignals, 0, 0, 1_000_000) >= 3
+    hardBlockSignals >= 3
   ) {
     state.lockdownTriggers += 1;
   }
@@ -250,14 +324,11 @@ export async function evaluateAdaptiveThreatMode({
   const decision = decideAdaptiveMode(state);
   const previousMode = state.mode;
   state.mode = decision.mode;
-  state.lastReason = decision.reason;
+  state.lastReason = normalizeReason(decision.reason);
 
   await storeAdaptiveState(state);
 
-  let containment = null;
-  if (decision.mode !== "normal") {
-    containment = await applyContainmentForMode(decision.mode, decision.reason);
-  }
+  const containment = await syncContainmentToMode(state.mode, state.lastReason);
 
   return {
     mode: state.mode,
@@ -287,12 +358,12 @@ export async function getAdaptiveThreatMode() {
     windowStartedAt: state.windowStartedAt,
     lastReason: state.lastReason,
     counters: {
-      totalSignals: state.totalSignals,
-      criticalSignals: state.criticalSignals,
-      blockSignals: state.blockSignals,
-      challengeSignals: state.challengeSignals,
-      repeatedOffenderSignals: state.repeatedOffenderSignals,
-      lockdownTriggers: state.lockdownTriggers
+      totalSignals: safeInt(state.totalSignals, 0, 0, 1_000_000),
+      criticalSignals: safeInt(state.criticalSignals, 0, 0, 1_000_000),
+      blockSignals: safeInt(state.blockSignals, 0, 0, 1_000_000),
+      challengeSignals: safeInt(state.challengeSignals, 0, 0, 1_000_000),
+      repeatedOffenderSignals: safeInt(state.repeatedOffenderSignals, 0, 0, 1_000_000),
+      lockdownTriggers: safeInt(state.lockdownTriggers, 0, 0, 1_000_000)
     }
   };
 }
@@ -300,6 +371,8 @@ export async function getAdaptiveThreatMode() {
 export async function resetAdaptiveThreatMode() {
   const state = createDefaultAdaptiveState();
   const ok = await storeAdaptiveState(state);
+
+  await syncContainmentToMode("normal", "manual_reset");
 
   return {
     ok,
