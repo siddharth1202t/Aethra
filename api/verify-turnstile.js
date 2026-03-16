@@ -9,6 +9,8 @@ import {
 } from "./_api-security.js";
 
 const ROUTE = "/api/verify-turnstile";
+const TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
+const TURNSTILE_TIMEOUT_MS = 8000;
 
 const ALLOWED_ORIGINS = new Set([
   "https://aethra-gules.vercel.app",
@@ -36,6 +38,12 @@ function safeErrorCodes(value) {
   return value.slice(0, 10).map((item) => safeString(item, 100));
 }
 
+function createTimeoutSignal(timeoutMs = TURNSTILE_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  return { controller, timeout };
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json(buildMethodNotAllowedResponse());
@@ -56,7 +64,13 @@ export default async function handler(req, res) {
       route: ROUTE,
       allowedOrigins: ALLOWED_ORIGINS,
       rateLimit: {
-        key: `verify-turnstile:${safeString(req?.headers?.["x-forwarded-for"] || req?.headers?.["x-real-ip"] || req?.socket?.remoteAddress || "unknown", 100)}`,
+        key: `verify-turnstile:${safeString(
+          req?.headers?.["x-forwarded-for"] ||
+          req?.headers?.["x-real-ip"] ||
+          req?.socket?.remoteAddress ||
+          "unknown",
+          100
+        )}`,
         limit: 10,
         windowMs: 60 * 1000
       },
@@ -172,9 +186,13 @@ export default async function handler(req, res) {
       });
     }
 
-    const response = await fetch(
-      "https://challenges.cloudflare.com/turnstile/v0/siteverify",
-      {
+    const { controller, timeout } = createTimeoutSignal();
+
+    let response;
+    let data = {};
+
+    try {
+      response = await fetch(TURNSTILE_VERIFY_URL, {
         method: "POST",
         headers: {
           "Content-Type": "application/x-www-form-urlencoded"
@@ -183,22 +201,66 @@ export default async function handler(req, res) {
           secret,
           response: token,
           remoteip: ip
-        })
-      }
-    );
+        }),
+        signal: controller.signal
+      });
 
-    const data = await response.json().catch(() => ({}));
+      data = await response.json().catch(() => ({}));
+    } catch (error) {
+      clearTimeout(timeout);
+
+      const isAbort = error?.name === "AbortError";
+
+      await writeSecurityLog({
+        type: isAbort ? "turnstile_timeout" : "turnstile_upstream_error",
+        level: "error",
+        message: isAbort
+          ? "Turnstile verification request timed out"
+          : "Turnstile verification request failed",
+        ip,
+        route: ROUTE,
+        metadata: {
+          source: "server_enforced",
+          error: safeString(error?.message || "Unknown upstream error", 300)
+        }
+      });
+
+      return res.status(502).json({
+        success: false,
+        message: "Captcha verification service failed."
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
 
     if (!response.ok) {
       await writeSecurityLog({
-        type: "turnstile_upstream_error",
+        type: "turnstile_upstream_bad_status",
         level: "error",
-        message: "Turnstile upstream verification request failed",
+        message: "Turnstile upstream verification returned bad status",
         ip,
         route: ROUTE,
         metadata: {
           source: "server_enforced",
           status: response.status
+        }
+      });
+
+      return res.status(502).json({
+        success: false,
+        message: "Captcha verification service failed."
+      });
+    }
+
+    if (!data || typeof data !== "object") {
+      await writeSecurityLog({
+        type: "turnstile_invalid_upstream_payload",
+        level: "error",
+        message: "Turnstile returned invalid payload",
+        ip,
+        route: ROUTE,
+        metadata: {
+          source: "server_enforced"
         }
       });
 
@@ -218,6 +280,7 @@ export default async function handler(req, res) {
         metadata: {
           source: "server_enforced",
           errorCodes: safeErrorCodes(data["error-codes"]),
+          hostname: normalizeHostname(data.hostname || ""),
           abuseLevel: security.abuseAnalysis?.level || "low",
           botLevel: security.botAnalysis?.level || "low"
         }
