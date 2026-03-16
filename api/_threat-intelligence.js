@@ -11,7 +11,10 @@ const MAX_REASON_LENGTH = 100;
 const MAX_REASON_HISTORY = 50;
 
 function safeString(value, maxLength = 300) {
-  return String(value || "").slice(0, maxLength);
+  return String(value || "")
+    .replace(/[\u0000-\u001F\u007F]/g, "")
+    .trim()
+    .slice(0, maxLength);
 }
 
 function safeNumber(value, fallback = 0) {
@@ -25,20 +28,67 @@ function safeInt(value, fallback = 0, min = 0, max = 1_000_000) {
   return Math.min(max, Math.max(min, num));
 }
 
+function safeTimestamp(value, fallback = 0) {
+  return safeInt(value, fallback, 0, Date.now() + 60_000);
+}
+
+function safeJsonParse(raw, fallback = null) {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return fallback;
+  }
+}
+
+function sanitizeKeyPart(value = "", maxLength = 120, fallback = "") {
+  const cleaned = safeString(value, maxLength).replace(/[^a-zA-Z0-9._:@/-]/g, "");
+  return cleaned || fallback;
+}
+
 function normalizeIp(value = "") {
-  return safeString(value || "unknown", MAX_IP_LENGTH);
+  let ip = safeString(value || "unknown", MAX_IP_LENGTH);
+
+  if (!ip) return "unknown";
+
+  if (ip.startsWith("::ffff:")) {
+    ip = ip.slice(7);
+  }
+
+  ip = ip.replace(/[^a-fA-F0-9:.,]/g, "").slice(0, MAX_IP_LENGTH);
+
+  return ip || "unknown";
 }
 
 function normalizeSessionId(value = "") {
-  return safeString(value || "no-session", MAX_SESSION_ID_LENGTH);
+  return sanitizeKeyPart(value || "no-session", MAX_SESSION_ID_LENGTH, "no-session");
 }
 
 function normalizeUserId(value = "") {
-  return safeString(value || "anon-user", MAX_USER_ID_LENGTH);
+  return sanitizeKeyPart(value || "anon-user", MAX_USER_ID_LENGTH, "anon-user");
 }
 
 function normalizeRoute(value = "") {
-  return safeString(value || "unknown-route", MAX_ROUTE_LENGTH).toLowerCase();
+  const raw = safeString(value || "unknown-route", MAX_ROUTE_LENGTH * 2);
+
+  if (!raw) return "unknown-route";
+
+  const cleaned = raw
+    .split("?")[0]
+    .split("#")[0]
+    .replace(/\/{2,}/g, "/")
+    .replace(/[^a-zA-Z0-9/_-]/g, "")
+    .toLowerCase()
+    .slice(0, MAX_ROUTE_LENGTH);
+
+  return cleaned || "unknown-route";
+}
+
+function normalizeAction(value = "") {
+  const normalized = safeString(value || "allow", 20).toLowerCase();
+  if (normalized === "block" || normalized === "challenge" || normalized === "throttle") {
+    return normalized;
+  }
+  return "allow";
 }
 
 function buildThreatKey({ ip = "", sessionId = "", userId = "" } = {}) {
@@ -73,9 +123,9 @@ function normalizeThreatRecord(raw, now) {
   const record = raw && typeof raw === "object" ? raw : {};
 
   return {
-    createdAt: safeInt(record.createdAt, now, 0, now + 60_000),
-    updatedAt: safeInt(record.updatedAt, now, 0, now + 60_000),
-    lastDecayAt: safeInt(record.lastDecayAt, now, 0, now + 60_000),
+    createdAt: safeTimestamp(record.createdAt, now),
+    updatedAt: safeTimestamp(record.updatedAt, now),
+    lastDecayAt: safeTimestamp(record.lastDecayAt, now),
 
     threatScore: safeInt(record.threatScore, 0, 0, 100),
     highestThreatScore: safeInt(record.highestThreatScore, 0, 0, 100),
@@ -92,10 +142,11 @@ function normalizeThreatRecord(raw, now) {
 
     lastRoute: normalizeRoute(record.lastRoute || "unknown-route"),
     reasonHistory: Array.isArray(record.reasonHistory)
-      ? record.reasonHistory
-          .map((item) => safeString(item, MAX_REASON_LENGTH))
-          .filter(Boolean)
-          .slice(-MAX_REASON_HISTORY)
+      ? [...new Set(
+          record.reasonHistory
+            .map((item) => safeString(item, MAX_REASON_LENGTH))
+            .filter(Boolean)
+        )].slice(-MAX_REASON_HISTORY)
       : []
   };
 }
@@ -109,7 +160,11 @@ async function getStoredThreatRecord(redisKey, now) {
     }
 
     if (typeof raw === "string") {
-      return normalizeThreatRecord(JSON.parse(raw), now);
+      const parsed = safeJsonParse(raw, null);
+      if (!parsed || typeof parsed !== "object") {
+        return null;
+      }
+      return normalizeThreatRecord(parsed, now);
     }
 
     if (typeof raw === "object") {
@@ -126,7 +181,8 @@ async function getStoredThreatRecord(redisKey, now) {
 async function storeThreatRecord(redisKey, record) {
   try {
     const ttlSeconds = Math.max(1, Math.ceil(THREAT_STATE_TTL_MS / 1000));
-    await redis.set(redisKey, JSON.stringify(record), { ex: ttlSeconds });
+    const normalized = normalizeThreatRecord(record, Date.now());
+    await redis.set(redisKey, JSON.stringify(normalized), { ex: ttlSeconds });
     return true;
   } catch (error) {
     console.error("Threat intelligence write failed:", error);
@@ -142,12 +198,15 @@ function pushReason(record, reason) {
     record.reasonHistory = [];
   }
 
-  record.reasonHistory.push(safeReason);
+  if (!record.reasonHistory.includes(safeReason)) {
+    record.reasonHistory.push(safeReason);
+  }
+
   record.reasonHistory = record.reasonHistory.slice(-MAX_REASON_HISTORY);
 }
 
 function decayThreatScore(record, now) {
-  const lastDecayAt = safeInt(record.lastDecayAt, now, 0, now);
+  const lastDecayAt = safeTimestamp(record.lastDecayAt, now);
   const elapsed = now - lastDecayAt;
 
   if (elapsed < THREAT_DECAY_MS) {
@@ -222,6 +281,12 @@ export async function evaluateThreat({
       scoreIncrease += 10;
       pushReason(record, "bot_sensitive_route_targeting");
     }
+
+    if (safeInt(botResult?.distributed?.hardBlockCount, 0, 0, 100000) >= 2) {
+      record.hardBlockSignals += 1;
+      scoreIncrease += 15;
+      pushReason(record, "bot_distributed_hard_block_history");
+    }
   }
 
   if (abuseResult && typeof abuseResult === "object") {
@@ -280,11 +345,13 @@ export async function evaluateThreat({
   }
 
   if (riskResult && typeof riskResult === "object") {
-    if (safeString(riskResult.action || "", 20) === "challenge") {
+    const normalizedRiskAction = normalizeAction(riskResult.action || "");
+
+    if (normalizedRiskAction === "challenge") {
       record.challengeEvents += 1;
     }
 
-    if (safeString(riskResult.action || "", 20) === "block") {
+    if (normalizedRiskAction === "block") {
       record.blockEvents += 1;
       scoreIncrease += 20;
       pushReason(record, "risk_engine_block");
@@ -383,7 +450,7 @@ export async function getThreatSnapshot({
     clientKeyPreview: safeString(redisKey.replace(/^threat:/, ""), 24),
     threatScore: safeInt(record.threatScore, 0, 0, 100),
     highestThreatScore: safeInt(record.highestThreatScore, 0, 0, 100),
-    updatedAt: safeInt(record.updatedAt, 0, 0, now + 60_000),
+    updatedAt: safeTimestamp(record.updatedAt, 0),
     lastRoute: normalizeRoute(record.lastRoute || "unknown-route"),
     events: {
       botEvents: safeInt(record.botEvents, 0, 0, 100000),
