@@ -1,9 +1,52 @@
 import { initializeApp, cert, getApps } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
 import { writeSecurityLog } from "./_security-log-writer.js";
-import { safeString } from "./_api-security.js";
+import { safeString as baseSafeString } from "./_api-security.js";
 
 let adminAuthInstance = null;
+
+function safeString(value, maxLength = 300) {
+  return baseSafeString(
+    String(value || "").replace(/[\u0000-\u001F\u007F]/g, ""),
+    maxLength
+  );
+}
+
+function normalizeRoute(route = "") {
+  const raw = safeString(route || "unknown-route", 300);
+  if (!raw) return "unknown-route";
+
+  const cleaned = raw
+    .split("?")[0]
+    .split("#")[0]
+    .replace(/\/{2,}/g, "/")
+    .replace(/[^a-zA-Z0-9/_-]/g, "")
+    .toLowerCase()
+    .slice(0, 150);
+
+  return cleaned || "unknown-route";
+}
+
+function getRequiredEnv(name) {
+  return safeString(process.env[name] || "", 5000);
+}
+
+function ensureAdminEnv() {
+  const projectId = getRequiredEnv("FIREBASE_PROJECT_ID");
+  const clientEmail = getRequiredEnv("FIREBASE_CLIENT_EMAIL");
+  const privateKeyRaw = process.env.FIREBASE_PRIVATE_KEY || "";
+  const privateKey = String(privateKeyRaw).replace(/\\n/g, "\n").trim();
+
+  if (!projectId || !clientEmail || !privateKey) {
+    throw new Error("Missing Firebase Admin credentials.");
+  }
+
+  return {
+    projectId,
+    clientEmail,
+    privateKey
+  };
+}
 
 function getAdminAuth() {
   if (adminAuthInstance) {
@@ -11,11 +54,13 @@ function getAdminAuth() {
   }
 
   if (!getApps().length) {
+    const creds = ensureAdminEnv();
+
     initializeApp({
       credential: cert({
-        projectId: process.env.FIREBASE_PROJECT_ID,
-        clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-        privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, "\n")
+        projectId: creds.projectId,
+        clientEmail: creds.clientEmail,
+        privateKey: creds.privateKey
       })
     });
   }
@@ -25,13 +70,34 @@ function getAdminAuth() {
 }
 
 function getBearerToken(req) {
-  const authHeader = safeString(req?.headers?.authorization || "", 2000);
+  const authHeader = safeString(req?.headers?.authorization || "", 5000);
 
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+  if (!authHeader) {
     return "";
   }
 
-  return safeString(authHeader.slice(7).trim(), 4000);
+  const match = authHeader.match(/^Bearer\s+(.+)$/i);
+  if (!match) {
+    return "";
+  }
+
+  const token = safeString(match[1] || "", 4000);
+
+  // basic JWT shape sanity check
+  if (!token || token.split(".").length !== 3) {
+    return "";
+  }
+
+  return token;
+}
+
+function sanitizeClaims(claims = {}) {
+  return {
+    admin: claims?.admin === true,
+    developer: claims?.developer === true,
+    email_verified: claims?.email_verified === true,
+    uid: safeString(claims?.uid || "", 128)
+  };
 }
 
 function buildRoleResult({
@@ -40,7 +106,10 @@ function buildRoleResult({
   code = "unauthorized",
   message = "Unauthorized.",
   decodedToken = null,
-  claims = {}
+  claims = {},
+  uid = "",
+  emailVerified = false,
+  disabled = false
 } = {}) {
   return {
     ok,
@@ -48,11 +117,27 @@ function buildRoleResult({
     code,
     message,
     decodedToken,
-    claims
+    claims,
+    uid: safeString(uid || "", 128),
+    emailVerified: emailVerified === true,
+    disabled: disabled === true
   };
 }
 
-export async function verifyRequestToken(req) {
+async function checkUserDisabled(adminAuth, uid) {
+  try {
+    const safeUid = safeString(uid || "", 128);
+    if (!safeUid) return false;
+
+    const userRecord = await adminAuth.getUser(safeUid);
+    return userRecord?.disabled === true;
+  } catch {
+    // fail open on lookup issue, token verification is still primary
+    return false;
+  }
+}
+
+export async function verifyRequestToken(req, { requireEmailVerified = false } = {}) {
   try {
     const token = getBearerToken(req);
 
@@ -67,7 +152,38 @@ export async function verifyRequestToken(req) {
 
     const adminAuth = getAdminAuth();
     const decodedToken = await adminAuth.verifyIdToken(token, true);
-    const claims = decodedToken || {};
+    const claims = sanitizeClaims(decodedToken || {});
+    const uid = safeString(decodedToken?.uid || "", 128);
+    const emailVerified = decodedToken?.email_verified === true;
+    const disabled = await checkUserDisabled(adminAuth, uid);
+
+    if (disabled) {
+      return buildRoleResult({
+        ok: false,
+        status: 403,
+        code: "disabled_user",
+        message: "User account is disabled.",
+        decodedToken: null,
+        claims,
+        uid,
+        emailVerified,
+        disabled: true
+      });
+    }
+
+    if (requireEmailVerified && !emailVerified) {
+      return buildRoleResult({
+        ok: false,
+        status: 403,
+        code: "email_not_verified",
+        message: "Verified email required.",
+        decodedToken,
+        claims,
+        uid,
+        emailVerified,
+        disabled: false
+      });
+    }
 
     return buildRoleResult({
       ok: true,
@@ -75,14 +191,30 @@ export async function verifyRequestToken(req) {
       code: "verified",
       message: "Token verified.",
       decodedToken,
-      claims
+      claims,
+      uid,
+      emailVerified,
+      disabled: false
     });
   } catch (error) {
+    const message = safeString(error?.message || "", 200);
+
+    const code =
+      message.includes("Firebase Admin credentials")
+        ? "server_auth_not_configured"
+        : "invalid_token";
+
+    const status = code === "server_auth_not_configured" ? 500 : 401;
+    const responseMessage =
+      code === "server_auth_not_configured"
+        ? "Server authentication is not configured."
+        : "Invalid or expired token.";
+
     return buildRoleResult({
       ok: false,
-      status: 401,
-      code: "invalid_token",
-      message: "Invalid or expired token."
+      status,
+      code,
+      message: responseMessage
     });
   }
 }
@@ -95,23 +227,53 @@ export function hasAdminRole(claims = {}) {
   return claims?.admin === true;
 }
 
-export async function requireDeveloperAccess(req, {
+async function logDeniedAccess({
+  type = "privileged_access_denied",
   route = "unknown-route",
-  logDenied = true
+  tokenResult = null,
+  message = "Access denied.",
+  code = "unauthorized"
 } = {}) {
-  const tokenResult = await verifyRequestToken(req);
+  try {
+    await writeSecurityLog({
+      type: safeString(type, 50),
+      level: "warning",
+      message: safeString(message, 300),
+      userId: safeString(tokenResult?.uid || tokenResult?.decodedToken?.uid || "", 128),
+      route: normalizeRoute(route),
+      metadata: {
+        source: "server_enforced",
+        code: safeString(code || tokenResult?.code || "unauthorized", 50),
+        claimsDeveloper: tokenResult?.claims?.developer === true,
+        claimsAdmin: tokenResult?.claims?.admin === true,
+        emailVerified: tokenResult?.emailVerified === true,
+        disabled: tokenResult?.disabled === true
+      }
+    });
+  } catch {
+    // never break auth flow because logging failed
+  }
+}
+
+export async function requireDeveloperAccess(
+  req,
+  {
+    route = "unknown-route",
+    logDenied = true,
+    requireEmailVerified = true
+  } = {}
+) {
+  const normalizedRoute = normalizeRoute(route);
+  const tokenResult = await verifyRequestToken(req, { requireEmailVerified });
 
   if (!tokenResult.ok) {
     if (logDenied) {
-      await writeSecurityLog({
+      await logDeniedAccess({
         type: "developer_access_denied",
-        level: "warning",
-        message: "Developer access denied due to missing or invalid token",
-        route,
-        metadata: {
-          source: "server_enforced",
-          code: tokenResult.code
-        }
+        route: normalizedRoute,
+        tokenResult,
+        message: "Developer access denied due to missing, invalid, disabled, or unverified token",
+        code: tokenResult.code
       });
     }
 
@@ -125,18 +287,12 @@ export async function requireDeveloperAccess(req, {
 
   if (!hasDeveloperRole(tokenResult.claims)) {
     if (logDenied) {
-      await writeSecurityLog({
+      await logDeniedAccess({
         type: "developer_access_denied",
-        level: "warning",
+        route: normalizedRoute,
+        tokenResult,
         message: "Developer access denied due to insufficient role",
-        userId: safeString(tokenResult.decodedToken?.uid || "", 128),
-        route,
-        metadata: {
-          source: "server_enforced",
-          code: "insufficient_role",
-          claimsDeveloper: tokenResult.claims?.developer === true,
-          claimsAdmin: tokenResult.claims?.admin === true
-        }
+        code: "insufficient_role"
       });
     }
 
@@ -153,29 +309,32 @@ export async function requireDeveloperAccess(req, {
     status: 200,
     code: "authorized",
     message: "Developer access granted.",
-    uid: safeString(tokenResult.decodedToken?.uid || "", 128),
+    uid: safeString(tokenResult.uid || "", 128),
     decodedToken: tokenResult.decodedToken,
-    claims: tokenResult.claims
+    claims: tokenResult.claims,
+    emailVerified: tokenResult.emailVerified
   };
 }
 
-export async function requireAdminAccess(req, {
-  route = "unknown-route",
-  logDenied = true
-} = {}) {
-  const tokenResult = await verifyRequestToken(req);
+export async function requireAdminAccess(
+  req,
+  {
+    route = "unknown-route",
+    logDenied = true,
+    requireEmailVerified = true
+  } = {}
+) {
+  const normalizedRoute = normalizeRoute(route);
+  const tokenResult = await verifyRequestToken(req, { requireEmailVerified });
 
   if (!tokenResult.ok) {
     if (logDenied) {
-      await writeSecurityLog({
+      await logDeniedAccess({
         type: "admin_access_denied",
-        level: "warning",
-        message: "Admin access denied due to missing or invalid token",
-        route,
-        metadata: {
-          source: "server_enforced",
-          code: tokenResult.code
-        }
+        route: normalizedRoute,
+        tokenResult,
+        message: "Admin access denied due to missing, invalid, disabled, or unverified token",
+        code: tokenResult.code
       });
     }
 
@@ -189,17 +348,12 @@ export async function requireAdminAccess(req, {
 
   if (!hasAdminRole(tokenResult.claims)) {
     if (logDenied) {
-      await writeSecurityLog({
+      await logDeniedAccess({
         type: "admin_access_denied",
-        level: "warning",
+        route: normalizedRoute,
+        tokenResult,
         message: "Admin access denied due to insufficient role",
-        userId: safeString(tokenResult.decodedToken?.uid || "", 128),
-        route,
-        metadata: {
-          source: "server_enforced",
-          code: "insufficient_role",
-          claimsAdmin: tokenResult.claims?.admin === true
-        }
+        code: "insufficient_role"
       });
     }
 
@@ -216,8 +370,9 @@ export async function requireAdminAccess(req, {
     status: 200,
     code: "authorized",
     message: "Admin access granted.",
-    uid: safeString(tokenResult.decodedToken?.uid || "", 128),
+    uid: safeString(tokenResult.uid || "", 128),
     decodedToken: tokenResult.decodedToken,
-    claims: tokenResult.claims
+    claims: tokenResult.claims,
+    emailVerified: tokenResult.emailVerified
   };
 }
