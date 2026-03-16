@@ -26,12 +26,21 @@ const MAX_METADATA_ARRAY_ITEMS = 25;
 const MAX_METADATA_DEPTH = 4;
 
 function safeString(value, maxLength = 300) {
-  return String(value || "").slice(0, maxLength);
+  return String(value || "")
+    .replace(/[\u0000-\u001F\u007F]/g, "")
+    .trim()
+    .slice(0, maxLength);
 }
 
 function safeNumber(value, fallback = 0) {
   const num = Number(value);
   return Number.isFinite(num) ? num : fallback;
+}
+
+function safeInt(value, fallback = 0, min = 0, max = 1_000_000) {
+  const num = Math.floor(safeNumber(value, fallback));
+  if (!Number.isFinite(num)) return fallback;
+  return Math.min(max, Math.max(min, num));
 }
 
 function safeLevel(level) {
@@ -41,6 +50,53 @@ function safeLevel(level) {
 
 function isPlainObject(value) {
   return Object.prototype.toString.call(value) === "[object Object]";
+}
+
+function normalizeEmail(value = "") {
+  const email = safeString(value || "", MAX_EMAIL_LENGTH).toLowerCase();
+  if (!email) return "";
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return "";
+  }
+  return email;
+}
+
+function normalizeUserId(value = "") {
+  return safeString(value || "", MAX_USER_ID_LENGTH).replace(/[^a-zA-Z0-9._:@/-]/g, "");
+}
+
+function normalizeIp(value = "") {
+  let ip = safeString(value || "unknown", MAX_IP_LENGTH);
+
+  if (!ip) return "unknown";
+
+  if (ip.startsWith("::ffff:")) {
+    ip = ip.slice(7);
+  }
+
+  ip = ip.replace(/[^a-fA-F0-9:.,]/g, "").slice(0, MAX_IP_LENGTH);
+
+  return ip || "unknown";
+}
+
+function normalizeRoute(value = "") {
+  const raw = safeString(value || "unknown-route", MAX_ROUTE_LENGTH * 2);
+
+  if (!raw) return "unknown-route";
+
+  const cleaned = raw
+    .split("?")[0]
+    .split("#")[0]
+    .replace(/\/{2,}/g, "/")
+    .replace(/[^a-zA-Z0-9/_-]/g, "")
+    .toLowerCase()
+    .slice(0, MAX_ROUTE_LENGTH);
+
+  return cleaned || "unknown-route";
+}
+
+function normalizeEventId(value = "") {
+  return safeString(value || "", MAX_EVENT_ID_LENGTH).replace(/[^a-zA-Z0-9._:-]/g, "");
 }
 
 function sanitizeMetadata(value, depth = 0) {
@@ -75,7 +131,10 @@ function sanitizeMetadata(value, depth = 0) {
     const entries = Object.entries(value).slice(0, MAX_METADATA_ITEMS);
 
     for (const [key, val] of entries) {
-      output[safeString(key, MAX_METADATA_KEY_LENGTH)] = sanitizeMetadata(val, depth + 1);
+      const safeKey = safeString(key, MAX_METADATA_KEY_LENGTH);
+      if (safeKey) {
+        output[safeKey] = sanitizeMetadata(val, depth + 1);
+      }
     }
 
     return output;
@@ -84,18 +143,21 @@ function sanitizeMetadata(value, depth = 0) {
   return safeString(value, 500);
 }
 
+function getRequiredEnv(name) {
+  return safeString(process.env[name] || "", 5000);
+}
+
 function hasFirebaseAdminEnv() {
   return Boolean(
-    process.env.FIREBASE_PROJECT_ID &&
-    process.env.FIREBASE_CLIENT_EMAIL &&
-    process.env.FIREBASE_PRIVATE_KEY
+    getRequiredEnv("FIREBASE_PROJECT_ID") &&
+    getRequiredEnv("FIREBASE_CLIENT_EMAIL") &&
+    safeString(process.env.FIREBASE_PRIVATE_KEY || "", 10000)
   );
 }
 
 function createEventId() {
-  return safeString(
-    `sec_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
-    MAX_EVENT_ID_LENGTH
+  return normalizeEventId(
+    `sec_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`
   );
 }
 
@@ -125,9 +187,9 @@ function getAdminDb() {
     if (!getApps().length) {
       initializeApp({
         credential: cert({
-          projectId: process.env.FIREBASE_PROJECT_ID,
-          clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-          privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, "\n")
+          projectId: getRequiredEnv("FIREBASE_PROJECT_ID"),
+          clientEmail: getRequiredEnv("FIREBASE_CLIENT_EMAIL"),
+          privateKey: String(process.env.FIREBASE_PRIVATE_KEY || "").replace(/\\n/g, "\n").trim()
         })
       });
     }
@@ -149,13 +211,13 @@ export async function writeSecurityLog(data = {}) {
       return false;
     }
 
-    const type = safeString(data.type || "unknown", MAX_TYPE_LENGTH);
+    const type = safeString(data.type || "unknown", MAX_TYPE_LENGTH).toLowerCase();
     const level = safeLevel(data.level);
     const message = safeString(data.message || "", MAX_MESSAGE_LENGTH);
-    const email = safeString(data.email || "", MAX_EMAIL_LENGTH);
-    const userId = safeString(data.userId || "", MAX_USER_ID_LENGTH);
-    const ip = safeString(data.ip || "unknown", MAX_IP_LENGTH);
-    const route = safeString(data.route || "unknown-route", MAX_ROUTE_LENGTH);
+    const email = normalizeEmail(data.email || "");
+    const userId = normalizeUserId(data.userId || "");
+    const ip = normalizeIp(data.ip || "unknown");
+    const route = normalizeRoute(data.route || "unknown-route");
 
     const metadataInput = isPlainObject(data.metadata) ? data.metadata : {};
     const metadata = sanitizeMetadata(metadataInput);
@@ -163,12 +225,14 @@ export async function writeSecurityLog(data = {}) {
     const source = safeString(
       metadataInput?.source || data.source || "unspecified",
       MAX_SOURCE_LENGTH
-    );
+    ).toLowerCase();
 
-    const eventId = safeString(data.eventId || createEventId(), MAX_EVENT_ID_LENGTH);
-    const severityScore = safeNumber(
+    const eventId = normalizeEventId(data.eventId || createEventId()) || createEventId();
+    const severityScore = safeInt(
       data.severityScore,
-      getSeverityScore(level)
+      getSeverityScore(level),
+      0,
+      100
     );
 
     const log = {
@@ -187,7 +251,7 @@ export async function writeSecurityLog(data = {}) {
       createdAtMs: Date.now()
     };
 
-    await db.collection("securityLogs").add(log);
+    await db.collection("securityLogs").doc(eventId).set(log, { merge: false });
     return true;
   } catch (error) {
     console.error("writeSecurityLog failed:", error);
