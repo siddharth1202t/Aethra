@@ -23,6 +23,17 @@ const ALLOWED_HOSTNAMES = new Set([
   "aethra-hb2h.vercel.app"
 ]);
 
+function normalizeOrigin(origin = "") {
+  const raw = safeString(origin || "", 200).trim();
+  if (!raw) return "";
+
+  try {
+    return new URL(raw).origin.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
 function normalizeHostname(hostname = "") {
   return safeString(hostname, 200).trim().toLowerCase();
 }
@@ -36,7 +47,10 @@ function safeErrorCodes(value) {
     return [];
   }
 
-  return value.slice(0, 10).map((item) => safeString(item, 100));
+  return value
+    .slice(0, 10)
+    .map((item) => safeString(item, 100))
+    .filter(Boolean);
 }
 
 function createTimeoutSignal(timeoutMs = TURNSTILE_TIMEOUT_MS) {
@@ -46,7 +60,18 @@ function createTimeoutSignal(timeoutMs = TURNSTILE_TIMEOUT_MS) {
 }
 
 function isOriginAllowed(origin = "") {
-  return ALLOWED_ORIGINS.has(safeString(origin, 200).trim().toLowerCase());
+  return ALLOWED_ORIGINS.has(normalizeOrigin(origin));
+}
+
+function pickSecurityAction(security) {
+  return safeString(
+    security?.risk?.finalAction || security?.risk?.action || "allow",
+    20
+  ).toLowerCase();
+}
+
+function getTurnstileSecret() {
+  return safeString(process.env.TURNSTILE_SECRET_KEY || "", 5000).trim();
 }
 
 export default async function handler(req, res) {
@@ -57,7 +82,7 @@ export default async function handler(req, res) {
   try {
     const body = sanitizeBody(req.body, 20);
 
-    const token = safeString(body.token || "", 5000);
+    const token = safeString(body.token || "", 5000).trim();
     const behavior =
       body.behavior && typeof body.behavior === "object" && !Array.isArray(body.behavior)
         ? body.behavior
@@ -108,7 +133,8 @@ export default async function handler(req, res) {
     });
 
     const ip = security.actor.ip;
-    const secret = process.env.TURNSTILE_SECRET_KEY;
+    const securityAction = pickSecurityAction(security);
+    const secret = getTurnstileSecret();
 
     if (security.signals.rateLimitResult && !security.signals.rateLimitResult.allowed) {
       await writeSecurityLog({
@@ -135,7 +161,7 @@ export default async function handler(req, res) {
       });
     }
 
-    if (security.risk.action === "block") {
+    if (securityAction === "block") {
       await writeSecurityLog({
         type: "blocked_suspicious_turnstile_request",
         level: "critical",
@@ -153,12 +179,12 @@ export default async function handler(req, res) {
 
       return res.status(429).json(
         buildBlockedResponse("Suspicious activity detected. Please try again later.", {
-          action: security.risk.action
+          action: "block"
         })
       );
     }
 
-    if (security.risk.action === "challenge" || security.risk.action === "throttle") {
+    if (securityAction === "challenge" || securityAction === "throttle") {
       await writeSecurityLog({
         type: "temporary_turnstile_security_challenge",
         level: "warning",
@@ -264,7 +290,7 @@ export default async function handler(req, res) {
       });
     }
 
-    if (!data || typeof data !== "object") {
+    if (!data || typeof data !== "object" || Array.isArray(data)) {
       await writeSecurityLog({
         type: "turnstile_invalid_upstream_payload",
         level: "error",
@@ -283,7 +309,7 @@ export default async function handler(req, res) {
       });
     }
 
-    if (!data.success) {
+    if (data.success !== true) {
       await writeSecurityLog({
         type: "turnstile_verification_failed",
         level: "warning",
@@ -329,7 +355,7 @@ export default async function handler(req, res) {
 
     return res.status(200).json({
       success: true,
-      action: security.risk.action === "allow" ? "allow" : security.risk.action
+      action: securityAction === "allow" ? "allow" : securityAction
     });
   } catch (error) {
     console.error("Turnstile API error:", error);
