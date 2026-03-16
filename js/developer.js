@@ -11,9 +11,16 @@ const backHomeBtn = document.getElementById("backHomeBtn");
 
 let pageAuthorized = false;
 let logoutInProgress = false;
+let pageInitializing = true;
 
 function goTo(page) {
   window.location.replace(page);
+}
+
+function safeSetText(element, value) {
+  if (element) {
+    element.textContent = String(value || "");
+  }
 }
 
 function setPageVisible() {
@@ -38,7 +45,38 @@ function setButtonsDisabled(disabled) {
   }
 }
 
+async function fetchContainmentState() {
+  try {
+    const response = await fetch("/api/security-containment-state", {
+      method: "GET",
+      headers: {
+        "Content-Type": "application/json"
+      }
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const data = await response.json().catch(() => null);
+    return data && typeof data === "object" ? data : null;
+  } catch (error) {
+    console.warn("Containment state fetch failed:", error);
+    return null;
+  }
+}
+
+function isDeveloperAccessRestricted(containmentState) {
+  if (!containmentState || typeof containmentState !== "object") {
+    return false;
+  }
+
+  const flags = containmentState.flags || {};
+  return flags.readOnlyMode === true || flags.lockAdminWrites === true;
+}
+
 async function handleUnauthorizedAccess(reason = "developer_access_denied") {
+  pageAuthorized = false;
   setPageHidden();
   setButtonsDisabled(true);
 
@@ -59,11 +97,41 @@ async function handleUnauthorizedAccess(reason = "developer_access_denied") {
   goTo("home.html");
 }
 
-async function initializeDeveloperPage() {
+async function handleContainmentRestriction(reason = "developer_access_restricted") {
+  pageAuthorized = false;
   setPageHidden();
   setButtonsDisabled(true);
 
   try {
+    await logSecurityEvent({
+      type: "client_security_event",
+      level: "warning",
+      message: "Developer page access restricted by containment policy",
+      metadata: {
+        reason,
+        page: "developer.html"
+      }
+    });
+  } catch (error) {
+    console.error("Failed to log containment-restricted developer access:", error);
+  }
+
+  goTo("home.html");
+}
+
+async function initializeDeveloperPage() {
+  setPageHidden();
+  setButtonsDisabled(true);
+  pageInitializing = true;
+
+  try {
+    const containmentState = await fetchContainmentState();
+
+    if (isDeveloperAccessRestricted(containmentState)) {
+      await handleContainmentRestriction("containment_lock_active");
+      return;
+    }
+
     await requireDeveloper(async () => {
       pageAuthorized = true;
       setPageVisible();
@@ -72,16 +140,31 @@ async function initializeDeveloperPage() {
 
     if (!pageAuthorized) {
       await handleUnauthorizedAccess("developer_check_failed");
+      return;
+    }
+
+    try {
+      await logSecurityEvent({
+        type: "client_security_event",
+        level: "info",
+        message: "Developer page access granted",
+        metadata: {
+          page: "developer.html"
+        }
+      });
+    } catch (error) {
+      console.error("Failed to log developer access grant:", error);
     }
   } catch (error) {
     console.error("Developer access check failed:", error);
     await handleUnauthorizedAccess("developer_check_error");
+  } finally {
+    pageInitializing = false;
   }
 }
 
 backHomeBtn?.addEventListener("click", () => {
-  if (!pageAuthorized) {
-    goTo("home.html");
+  if (pageInitializing) {
     return;
   }
 
@@ -89,16 +172,27 @@ backHomeBtn?.addEventListener("click", () => {
 });
 
 logoutBtn?.addEventListener("click", async () => {
-  if (logoutInProgress) {
+  if (logoutInProgress || pageInitializing) {
     return;
   }
 
   logoutInProgress = true;
+  setButtonsDisabled(true);
 
   try {
-    if (logoutBtn) {
-      logoutBtn.disabled = true;
-      logoutBtn.textContent = "Logging out...";
+    safeSetText(logoutBtn, "Logging out...");
+
+    try {
+      await logSecurityEvent({
+        type: "client_security_event",
+        level: "info",
+        message: "Developer initiated logout",
+        metadata: {
+          page: "developer.html"
+        }
+      });
+    } catch (error) {
+      console.error("Failed to log developer logout:", error);
     }
 
     await signOut(auth);
