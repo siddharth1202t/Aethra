@@ -686,7 +686,7 @@ async function handleGoogleLogin() {
     try {
       userCredential = await withTimeout(
         signInWithPopup(auth, provider),
-        30000,
+        90000,
         "Google sign-in timed out."
       );
       console.log("[Google Login] popup success");
