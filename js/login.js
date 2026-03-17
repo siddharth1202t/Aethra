@@ -65,6 +65,24 @@ function waitForTurnstile(timeout = 10000) {
   });
 }
 
+function withTimeout(promise, ms, message) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(message || "Request timed out."));
+    }, ms);
+
+    promise
+      .then((value) => {
+        clearTimeout(timer);
+        resolve(value);
+      })
+      .catch((error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+  });
+}
+
 async function safeSecurityLog(payload) {
   try {
     await writeSecurityLog(payload);
@@ -316,6 +334,10 @@ function getFriendlyAuthMessage(error) {
     return "Captcha verification failed. Please complete it again.";
   }
 
+  if (message.toLowerCase().includes("timed out")) {
+    return "Google sign-in took too long. Please try again.";
+  }
+
   if (isLockedMessage(message)) {
     return message;
   }
@@ -416,10 +438,17 @@ async function verifyPostGoogleSecurity(user, token, actionLabel) {
   const email = normalizeEmail(user?.email || "google-login");
   const securityContext = getClientSecurityContext();
 
+  console.log("[Google Login] verifyPostGoogleSecurity:start", {
+    email,
+    actionLabel
+  });
+
   const checkResult = await callLoginAttemptApi(email, "check", {
     actionLabel,
     ...securityContext
   });
+
+  console.log("[Google Login] verifyPostGoogleSecurity:login-attempt ok", checkResult);
 
   if (checkResult?.isLocked) {
     throw new Error(
@@ -433,17 +462,22 @@ async function verifyPostGoogleSecurity(user, token, actionLabel) {
   }
 
   await verifyTurnstileToken(token, securityContext.behavior || {});
+  console.log("[Google Login] verifyPostGoogleSecurity:turnstile ok");
+
   return securityContext;
 }
 
 async function handleRedirectResultIfAny() {
   try {
+    console.log("[Google Login] handleRedirectResultIfAny:start");
     const result = await getRedirectResult(auth);
 
     if (!result?.user) {
+      console.log("[Google Login] handleRedirectResultIfAny:no redirect result");
       return false;
     }
 
+    console.log("[Google Login] handleRedirectResultIfAny:user found", result.user.email || "");
     const user = result.user;
     const token = getTurnstileToken();
 
@@ -453,8 +487,12 @@ async function handleRedirectResultIfAny() {
       "google_login_redirect"
     );
 
+    console.log("[Google Login] handleRedirectResultIfAny:security ok");
     await ensureUserProfile(user);
+    console.log("[Google Login] handleRedirectResultIfAny:profile ok");
+
     await reload(user);
+    console.log("[Google Login] handleRedirectResultIfAny:reload ok");
 
     await safeSecurityLog({
       type: "google_login_success",
@@ -472,7 +510,7 @@ async function handleRedirectResultIfAny() {
     const code = error?.code || "";
     const message = String(error?.message || "").toLowerCase();
 
-    console.warn("Redirect sign-in warning:", error);
+    console.warn("[Google Login] Redirect sign-in warning:", error);
 
     const ignorableRedirectError =
       code === "auth/internal-error" ||
@@ -487,7 +525,7 @@ async function handleRedirectResultIfAny() {
     try {
       await signOut(auth);
     } catch (signOutError) {
-      console.warn("Redirect cleanup sign-out failed:", signOutError);
+      console.warn("[Google Login] Redirect cleanup sign-out failed:", signOutError);
     }
 
     await safeSecurityLog({
@@ -620,15 +658,18 @@ async function handleGoogleLogin() {
   let signedInUser = null;
 
   try {
+    console.log("[Google Login] clicked");
     setLoading(googleBtn, "Please wait...");
     clearCaptchaError();
 
     if (!token) {
+      console.log("[Google Login] missing captcha token");
       showCaptchaError("Please complete the captcha first.");
       throw new Error("Captcha missing");
     }
 
     if (isMobileDevice()) {
+      console.log("[Google Login] using redirect flow");
       await safeSecurityLog({
         type: "google_login_redirect_started",
         message: "Google redirect sign-in started",
@@ -639,11 +680,19 @@ async function handleGoogleLogin() {
       return;
     }
 
+    console.log("[Google Login] starting popup");
     let userCredential;
 
     try {
-      userCredential = await signInWithPopup(auth, provider);
+      userCredential = await withTimeout(
+        signInWithPopup(auth, provider),
+        30000,
+        "Google sign-in timed out."
+      );
+      console.log("[Google Login] popup success");
     } catch (popupError) {
+      console.error("[Google Login] popup failed", popupError);
+
       if (
         popupError?.code === "auth/popup-blocked" ||
         popupError?.code === "auth/cancelled-popup-request"
@@ -654,6 +703,7 @@ async function handleGoogleLogin() {
           email: "google-login"
         });
 
+        console.log("[Google Login] falling back to redirect");
         await signInWithRedirect(auth, provider);
         return;
       }
@@ -663,11 +713,16 @@ async function handleGoogleLogin() {
 
     const user = userCredential.user;
     signedInUser = user;
+    console.log("[Google Login] signed in user", user.email || "");
 
     securityContext = await verifyPostGoogleSecurity(user, token, "google_login");
+    console.log("[Google Login] post-google security passed");
 
     await ensureUserProfile(user);
+    console.log("[Google Login] ensureUserProfile passed");
+
     await reload(user);
+    console.log("[Google Login] reload passed");
 
     await safeSecurityLog({
       type: "google_login_success",
@@ -679,15 +734,16 @@ async function handleGoogleLogin() {
       }
     });
 
+    console.log("[Google Login] redirecting to home");
     redirectToHome();
   } catch (error) {
-    console.error("Google login failed:", error);
+    console.error("[Google Login] failed", error);
 
     if (signedInUser) {
       try {
         await signOut(auth);
       } catch (signOutError) {
-        console.warn("Google login cleanup sign-out failed:", signOutError);
+        console.warn("[Google Login] cleanup signOut failed:", signOutError);
       }
     }
 
@@ -850,15 +906,21 @@ forgotPasswordBtn?.addEventListener("click", async () => {
 window.addEventListener("load", async () => {
   try {
     setButtonsDisabled(true);
+    console.log("[Google Login] page load:start");
 
     containmentState = await fetchContainmentState();
+    console.log("[Google Login] containment state loaded");
 
     await initTurnstile();
+    console.log("[Google Login] turnstile initialized");
+
     await handleRedirectResultIfAny();
+    console.log("[Google Login] redirect handler completed");
   } catch (error) {
     console.error("Page init failed:", error);
     showFormError("Page failed to load properly. Please refresh and try again.");
   } finally {
     setButtonsDisabled(false);
+    console.log("[Google Login] page load:done");
   }
 });
