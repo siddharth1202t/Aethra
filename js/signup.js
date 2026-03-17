@@ -17,6 +17,9 @@ import { detectBotBehavior } from "./bot-detection.js";
 
 const auth = getAuth(app);
 const provider = new GoogleAuthProvider();
+provider.setCustomParameters({
+  prompt: "select_account"
+});
 
 const signupForm = document.getElementById("signupForm");
 const googleBtn = document.getElementById("googleSignInBtn");
@@ -347,6 +350,12 @@ function mapSignupError(error) {
       return "Google sign-in was closed before completion.";
     case "auth/popup-blocked":
       return "Popup was blocked by the browser.";
+    case "auth/cancelled-popup-request":
+      return "Another sign-in popup was already open.";
+    case "auth/unauthorized-domain":
+      return "This domain is not authorized in Firebase.";
+    case "auth/operation-not-allowed":
+      return "Google sign-in is not enabled in Firebase Authentication.";
     case "auth/network-request-failed":
       return "Network error. Please check your connection.";
     default:
@@ -463,7 +472,9 @@ async function handleGoogleSignup() {
 
     await verifyTurnstileToken(token);
 
-    if (/Android|iPhone|iPad|iPod/i.test(navigator.userAgent)) {
+    const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+
+    if (isMobile) {
       await signInWithRedirect(auth, provider);
       return;
     }
@@ -546,15 +557,16 @@ window.addEventListener("load", async () => {
       setFormError("Registrations are temporarily disabled.");
     }
 
-    await ensureTurnstileReady();
-
     const redirected = await getRedirectResult(auth);
 
     if (redirected?.user) {
       await ensureUserProfile(redirected.user);
       await reload(redirected.user);
       goTo("home.html");
+      return;
     }
+
+    await ensureTurnstileReady();
   } catch (error) {
     console.error("Signup page init failed:", error);
     setFormError("Page failed to load. Please refresh.");
