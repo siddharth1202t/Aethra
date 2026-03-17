@@ -94,14 +94,6 @@ async function fetchContainmentState() {
   }
 }
 
-function isForceCaptchaEnabled(state) {
-  return state?.flags?.forceCaptcha === true;
-}
-
-function areRegistrationsFrozen(state) {
-  return state?.flags?.freezeRegistrations === true;
-}
-
 function isReadOnlyMode(state) {
   return state?.flags?.readOnlyMode === true;
 }
@@ -349,6 +341,8 @@ function getFriendlyAuthMessage(error) {
       return "This domain is not authorized for Google sign-in.";
     case "auth/operation-not-allowed":
       return "Google sign-in is not enabled right now.";
+    case "auth/internal-error":
+      return "Google sign-in could not be completed. Please try again.";
     default:
       return safeString(message, 300) || "Login failed. Please try again.";
   }
@@ -400,9 +394,7 @@ async function precheckSensitiveAction(email, token, actionLabel = "login_check"
     );
   }
 
-  const mustUseCaptcha = isForceCaptchaEnabled(containmentState) || true;
-
-  if (mustUseCaptcha && !token) {
+  if (!token) {
     await safeSecurityLog({
       type: "captcha_missing",
       message: `User attempted ${actionLabel} without captcha`,
@@ -416,10 +408,7 @@ async function precheckSensitiveAction(email, token, actionLabel = "login_check"
     throw new Error("Captcha missing");
   }
 
-  if (mustUseCaptcha) {
-    await verifyTurnstileToken(token, securityContext.behavior || {});
-  }
-
+  await verifyTurnstileToken(token, securityContext.behavior || {});
   return securityContext;
 }
 
@@ -451,7 +440,7 @@ async function handleRedirectResultIfAny() {
   try {
     const result = await getRedirectResult(auth);
 
-    if (!result || !result.user) {
+    if (!result?.user) {
       return false;
     }
 
@@ -690,11 +679,6 @@ async function handleGoogleLogin() {
       }
     });
 
-    if (!user.emailVerified) {
-      redirectToVerifyEmail();
-      return;
-    }
-
     redirectToHome();
   } catch (error) {
     console.error("Google login failed:", error);
@@ -869,17 +853,8 @@ window.addEventListener("load", async () => {
 
     containmentState = await fetchContainmentState();
 
-    if (areRegistrationsFrozen(containmentState)) {
-      // login page: informational only
-    }
-
     await initTurnstile();
-    const redirected = await handleRedirectResultIfAny();
-
-    if (!redirected) {
-      setButtonsDisabled(false);
-      return;
-    }
+    await handleRedirectResultIfAny();
   } catch (error) {
     console.error("Page init failed:", error);
     showFormError("Page failed to load properly. Please refresh and try again.");
