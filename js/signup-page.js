@@ -1,11 +1,13 @@
 const starsContainer = document.getElementById("stars");
 
-function createStars() {
+function createStars(count = 90) {
   if (!starsContainer) return;
 
-  for (let i = 0; i < 90; i += 1) {
+  const fragment = document.createDocumentFragment();
+
+  for (let i = 0; i < count; i += 1) {
     const star = document.createElement("div");
-    star.classList.add("star");
+    star.className = "star";
 
     const size = Math.random() * 2.2 + 1;
     star.style.width = `${size}px`;
@@ -15,8 +17,10 @@ function createStars() {
     star.style.animationDuration = `${Math.random() * 4 + 2}s`;
     star.style.animationDelay = `${Math.random() * 4}s`;
 
-    starsContainer.appendChild(star);
+    fragment.appendChild(star);
   }
+
+  starsContainer.appendChild(fragment);
 }
 
 createStars();
