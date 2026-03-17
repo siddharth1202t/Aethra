@@ -17,6 +17,7 @@ import { detectBotBehavior } from "./bot-detection.js";
 
 const auth = getAuth(app);
 const provider = new GoogleAuthProvider();
+
 provider.setCustomParameters({
   prompt: "select_account"
 });
@@ -399,7 +400,8 @@ async function handleEmailSignup() {
     const user = credential.user;
 
     await updateProfile(user, { displayName: name });
-    await ensureUserProfile(user);
+    const profileResult = await ensureUserProfile(user);
+
     await sendEmailVerification(user);
     await reload(user);
 
@@ -409,7 +411,8 @@ async function handleEmailSignup() {
       email,
       userId: user.uid,
       metadata: {
-        behavior: securityContext.behavior || {}
+        behavior: securityContext.behavior || {},
+        profileResult: profileResult || {}
       }
     });
 
@@ -453,15 +456,6 @@ async function handleGoogleSignup() {
       return;
     }
 
-    const token = getTurnstileToken();
-
-    if (!token) {
-      setFieldError(captchaError, "Please complete the captcha.");
-      throw new Error("Captcha missing");
-    }
-
-    await verifyTurnstileToken(token);
-
     const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 
     if (isMobile) {
@@ -469,17 +463,35 @@ async function handleGoogleSignup() {
       return;
     }
 
-    const credential = await signInWithPopup(auth, provider);
-    const user = credential.user;
+    let credential;
 
-    await ensureUserProfile(user);
+    try {
+      credential = await signInWithPopup(auth, provider);
+    } catch (popupError) {
+      if (
+        popupError?.code === "auth/popup-blocked" ||
+        popupError?.code === "auth/cancelled-popup-request"
+      ) {
+        await signInWithRedirect(auth, provider);
+        return;
+      }
+
+      throw popupError;
+    }
+
+    const user = credential.user;
+    const profileResult = await ensureUserProfile(user);
+
     await reload(user);
 
     await safeSecurityLog({
       type: "google_signup_success",
       message: "Google signup completed",
       email: user?.email || "",
-      userId: user?.uid || ""
+      userId: user?.uid || "",
+      metadata: {
+        profileResult: profileResult || {}
+      }
     });
 
     goTo("home.html");
@@ -495,7 +507,6 @@ async function handleGoogleSignup() {
     });
 
     setFormError(mapSignupError(error));
-    resetTurnstile();
   } finally {
     setBusyState(false);
     isSubmitting = false;
@@ -550,8 +561,20 @@ window.addEventListener("load", async () => {
     const redirected = await getRedirectResult(auth);
 
     if (redirected?.user) {
-      await ensureUserProfile(redirected.user);
+      const profileResult = await ensureUserProfile(redirected.user);
+
       await reload(redirected.user);
+
+      await safeSecurityLog({
+        type: "google_signup_success",
+        message: "Google signup completed via redirect",
+        email: redirected.user?.email || "",
+        userId: redirected.user?.uid || "",
+        metadata: {
+          profileResult: profileResult || {}
+        }
+      });
+
       goTo("home.html");
       return;
     }
