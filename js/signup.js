@@ -513,6 +513,12 @@ async function handleGoogleSignup() {
   }
 }
 
+/* ---------------- GLOBAL BUTTON HANDLER ---------------- */
+
+window.aethraGoogleSignup = async function () {
+  await handleGoogleSignup();
+};
+
 /* ---------------- LIVE VALIDATION ---------------- */
 
 nameInput?.addEventListener("blur", validateName);
