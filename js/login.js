@@ -6,7 +6,6 @@ import {
   signInWithRedirect,
   getRedirectResult,
   sendPasswordResetEmail,
-  reload,
   signOut
 } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
 
@@ -98,6 +97,12 @@ async function safeSecurityLog(payload) {
   } catch (error) {
     console.warn("Security log failed:", error);
   }
+}
+
+function fireAndForgetSecurityLog(payload) {
+  safeSecurityLog(payload).catch((error) => {
+    console.warn("Async security log failed:", error);
+  });
 }
 
 async function fetchContainmentState() {
@@ -478,10 +483,7 @@ async function handleRedirectResultIfAny() {
     await ensureUserProfile(user);
     console.log("[Google Login] handleRedirectResultIfAny:profile ok");
 
-    await reload(user);
-    console.log("[Google Login] handleRedirectResultIfAny:reload ok");
-
-    await safeSecurityLog({
+    fireAndForgetSecurityLog({
       type: "google_login_success",
       message: "User logged in with Google via redirect",
       email: user.email || "",
@@ -515,7 +517,7 @@ async function handleRedirectResultIfAny() {
       console.warn("[Google Login] Redirect cleanup sign-out failed:", signOutError);
     }
 
-    await safeSecurityLog({
+    fireAndForgetSecurityLog({
       type: "google_login_failed",
       message: error?.message || "Google redirect login failed",
       email: ""
@@ -561,9 +563,8 @@ async function handleEmailLogin() {
     const user = userCredential.user;
 
     await ensureUserProfile(user);
-    await reload(user);
 
-    await safeSecurityLog({
+    fireAndForgetSecurityLog({
       type: "login_success",
       message: "User logged in successfully",
       email,
@@ -582,7 +583,7 @@ async function handleEmailLogin() {
   } catch (error) {
     console.error("Email login failed:", error);
 
-    await safeSecurityLog({
+    fireAndForgetSecurityLog({
       type: "login_failed",
       message: error?.message || "Unknown login error",
       email,
@@ -656,7 +657,7 @@ async function handleGoogleLogin() {
     if (isMobileDevice()) {
       console.log("[Google Login] using redirect flow");
 
-      await safeSecurityLog({
+      fireAndForgetSecurityLog({
         type: "google_login_redirect_started",
         message: "Google redirect sign-in started",
         email: "google-login"
@@ -684,7 +685,7 @@ async function handleGoogleLogin() {
         popupError?.code === "auth/popup-blocked" ||
         popupError?.code === "auth/cancelled-popup-request"
       ) {
-        await safeSecurityLog({
+        fireAndForgetSecurityLog({
           type: "google_login_redirect_fallback",
           message: "Popup failed, falling back to redirect",
           email: "google-login"
@@ -724,10 +725,7 @@ async function handleGoogleLogin() {
     await ensureUserProfile(user);
     console.log("[Google Login] ensureUserProfile passed");
 
-    await reload(user);
-    console.log("[Google Login] reload passed");
-
-    await safeSecurityLog({
+    fireAndForgetSecurityLog({
       type: "google_login_success",
       message: "User logged in with Google",
       email: user.email || "",
@@ -750,7 +748,7 @@ async function handleGoogleLogin() {
       }
     }
 
-    await safeSecurityLog({
+    fireAndForgetSecurityLog({
       type: "google_login_failed",
       message: error?.message || "Google login failed",
       email: signedInUser?.email || "google-login",
@@ -809,7 +807,7 @@ async function handleForgotPassword() {
 
     await sendPasswordResetEmail(auth, email);
 
-    await safeSecurityLog({
+    fireAndForgetSecurityLog({
       type: "password_reset_requested",
       message: "Password reset requested",
       email,
@@ -822,7 +820,7 @@ async function handleForgotPassword() {
   } catch (error) {
     console.error("Password reset failed:", error);
 
-    await safeSecurityLog({
+    fireAndForgetSecurityLog({
       type: "password_reset_failed",
       message: error?.message || "Password reset failed",
       email,
