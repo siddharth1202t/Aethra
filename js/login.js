@@ -22,6 +22,11 @@ provider.setCustomParameters({
   prompt: "select_account"
 });
 
+const ALLOWED_GOOGLE_AUTH_HOSTS = new Set([
+  "aethra-hb2h.vercel.app",
+  "aethra-gules.vercel.app"
+]);
+
 const form = document.getElementById("loginForm");
 const googleBtn = document.getElementById("googleLoginBtn");
 const loginBtn = document.querySelector(".login-btn");
@@ -45,6 +50,10 @@ function safeString(value, maxLength = 500) {
 
 function goTo(page) {
   window.location.replace(page);
+}
+
+function isAllowedGoogleAuthHost() {
+  return ALLOWED_GOOGLE_AUTH_HOSTS.has(window.location.hostname);
 }
 
 function waitForTurnstile(timeout = 10000) {
@@ -434,39 +443,6 @@ async function precheckSensitiveAction(email, token, actionLabel = "login_check"
   return securityContext;
 }
 
-async function verifyPostGoogleSecurity(user, token, actionLabel) {
-  const email = normalizeEmail(user?.email || "google-login");
-  const securityContext = getClientSecurityContext();
-
-  console.log("[Google Login] verifyPostGoogleSecurity:start", {
-    email,
-    actionLabel
-  });
-
-  const checkResult = await callLoginAttemptApi(email, "check", {
-    actionLabel,
-    ...securityContext
-  });
-
-  console.log("[Google Login] verifyPostGoogleSecurity:login-attempt ok", checkResult);
-
-  if (checkResult?.isLocked) {
-    throw new Error(
-      `This account is temporarily locked. Please try again in ${formatRemainingMinutes(checkResult.remainingMs)}.`
-    );
-  }
-
-  if (!token) {
-    showCaptchaError("Please complete the captcha first.");
-    throw new Error("Captcha missing");
-  }
-
-  await verifyTurnstileToken(token, securityContext.behavior || {});
-  console.log("[Google Login] verifyPostGoogleSecurity:turnstile ok");
-
-  return securityContext;
-}
-
 async function handleRedirectResultIfAny() {
   try {
     console.log("[Google Login] handleRedirectResultIfAny:start");
@@ -479,15 +455,26 @@ async function handleRedirectResultIfAny() {
 
     console.log("[Google Login] handleRedirectResultIfAny:user found", result.user.email || "");
     const user = result.user;
-    const token = getTurnstileToken();
 
-    const securityContext = await verifyPostGoogleSecurity(
-      user,
-      token,
-      "google_login_redirect"
+    const securityContext = getClientSecurityContext();
+
+    const checkResult = await callLoginAttemptApi(
+      normalizeEmail(user?.email || "google-login"),
+      "check",
+      {
+        actionLabel: "google_login_redirect",
+        ...securityContext
+      }
     );
 
-    console.log("[Google Login] handleRedirectResultIfAny:security ok");
+    if (checkResult?.isLocked) {
+      throw new Error(
+        `This account is temporarily locked. Please try again in ${formatRemainingMinutes(checkResult.remainingMs)}.`
+      );
+    }
+
+    console.log("[Google Login] handleRedirectResultIfAny:login-attempt ok");
+
     await ensureUserProfile(user);
     console.log("[Google Login] handleRedirectResultIfAny:profile ok");
 
@@ -653,7 +640,6 @@ async function handleGoogleLogin() {
 
   clearAllErrors();
 
-  const token = getTurnstileToken();
   let securityContext = {};
   let signedInUser = null;
 
@@ -662,14 +648,14 @@ async function handleGoogleLogin() {
     setLoading(googleBtn, "Please wait...");
     clearCaptchaError();
 
-    if (!token) {
-      console.log("[Google Login] missing captcha token");
-      showCaptchaError("Please complete the captcha first.");
-      throw new Error("Captcha missing");
+    if (!isAllowedGoogleAuthHost()) {
+      showFormError("Google sign-in is only available on the official Aethra domains.");
+      return;
     }
 
     if (isMobileDevice()) {
       console.log("[Google Login] using redirect flow");
+
       await safeSecurityLog({
         type: "google_login_redirect_started",
         message: "Google redirect sign-in started",
@@ -681,6 +667,7 @@ async function handleGoogleLogin() {
     }
 
     console.log("[Google Login] starting popup");
+
     let userCredential;
 
     try {
@@ -715,8 +702,24 @@ async function handleGoogleLogin() {
     signedInUser = user;
     console.log("[Google Login] signed in user", user.email || "");
 
-    securityContext = await verifyPostGoogleSecurity(user, token, "google_login");
-    console.log("[Google Login] post-google security passed");
+    securityContext = getClientSecurityContext();
+
+    const checkResult = await callLoginAttemptApi(
+      normalizeEmail(user?.email || "google-login"),
+      "check",
+      {
+        actionLabel: "google_login",
+        ...securityContext
+      }
+    );
+
+    if (checkResult?.isLocked) {
+      throw new Error(
+        `This account is temporarily locked. Please try again in ${formatRemainingMinutes(checkResult.remainingMs)}.`
+      );
+    }
+
+    console.log("[Google Login] login-attempt check passed");
 
     await ensureUserProfile(user);
     console.log("[Google Login] ensureUserProfile passed");
@@ -757,8 +760,7 @@ async function handleGoogleLogin() {
     });
 
     showFormError(getFriendlyAuthMessage(error));
-    resetTurnstile();
-    setTemporaryCooldown(googleBtn, 3000);
+    setTemporaryCooldown(googleBtn, 2000);
   } finally {
     clearLoading(googleBtn);
     isSubmitting = false;
