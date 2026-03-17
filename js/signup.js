@@ -34,28 +34,77 @@ const confirmPasswordError = document.getElementById("confirmPasswordError");
 const captchaError = document.getElementById("captchaError");
 const formError = document.getElementById("formError");
 
-let widgetId = null;
 let isSubmitting = false;
 let containmentState = null;
+
+/* ---------------- NAVIGATION ---------------- */
 
 function goTo(page) {
   window.location.replace(page);
 }
 
-function waitForTurnstile(timeout = 10000) {
-  return new Promise((resolve, reject) => {
-    const start = Date.now();
+/* ---------------- UI HELPERS ---------------- */
 
-    const check = () => {
-      if (window.turnstile) resolve();
-      else if (Date.now() - start > timeout)
-        reject(new Error("Turnstile script did not load."));
-      else setTimeout(check, 100);
-    };
+function setFormError(message = "") {
+  if (!formError) return;
 
-    check();
-  });
+  formError.textContent = message;
+
+  if (message) {
+    formError.classList.add("show");
+  } else {
+    formError.classList.remove("show");
+  }
 }
+
+function setFieldError(element, message) {
+  if (!element) return;
+  element.textContent = message || "";
+}
+
+function clearFieldState(input) {
+  if (!input) return;
+  input.classList.remove("input-invalid", "input-valid");
+}
+
+function markFieldValid(input) {
+  if (!input) return;
+  input.classList.remove("input-invalid");
+  input.classList.add("input-valid");
+}
+
+function markFieldInvalid(input) {
+  if (!input) return;
+  input.classList.remove("input-valid");
+  input.classList.add("input-invalid");
+}
+
+function setBusyState(isBusy, submitText = "Create Account") {
+  if (signupBtn) {
+    signupBtn.disabled = isBusy;
+    signupBtn.textContent = isBusy ? "Creating account..." : submitText;
+  }
+
+  if (googleBtn) {
+    googleBtn.disabled = isBusy;
+  }
+}
+
+function clearAllErrors() {
+  setFieldError(nameError, "");
+  setFieldError(emailError, "");
+  setFieldError(passwordError, "");
+  setFieldError(confirmPasswordError, "");
+  setFieldError(captchaError, "");
+  setFormError("");
+
+  clearFieldState(nameInput);
+  clearFieldState(emailInput);
+  clearFieldState(passwordInput);
+  clearFieldState(confirmPasswordInput);
+}
+
+/* ---------------- SECURITY LOGGING ---------------- */
 
 async function safeSecurityLog(payload) {
   try {
@@ -111,14 +160,47 @@ async function verifyTurnstileToken(token) {
 }
 
 function getTurnstileToken() {
-  if (!window.turnstile || widgetId === null) return "";
-  return window.turnstile.getResponse(widgetId) || "";
+  const managerToken =
+    window.aethraTurnstile &&
+    typeof window.aethraTurnstile.getToken === "function"
+      ? window.aethraTurnstile.getToken()
+      : "";
+
+  if (managerToken) return managerToken;
+
+  const hiddenTokenInput = document.getElementById("turnstileToken");
+  return hiddenTokenInput?.value || "";
 }
 
 function resetTurnstile() {
-  if (widgetId !== null && window.turnstile) {
-    window.turnstile.reset(widgetId);
+  if (
+    window.aethraTurnstile &&
+    typeof window.aethraTurnstile.reset === "function"
+  ) {
+    window.aethraTurnstile.reset();
+    return;
   }
+
+  const hiddenTokenInput = document.getElementById("turnstileToken");
+  if (hiddenTokenInput) hiddenTokenInput.value = "";
+}
+
+async function ensureTurnstileReady(timeout = 12000) {
+  const start = Date.now();
+
+  while (Date.now() - start < timeout) {
+    const managerReady =
+      window.aethraTurnstile &&
+      typeof window.aethraTurnstile.getToken === "function";
+
+    if (managerReady) {
+      return true;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+
+  throw new Error("Turnstile manager did not initialize.");
 }
 
 /* ---------------- VALIDATION ---------------- */
@@ -153,11 +235,13 @@ function validateName() {
   if (nameInput) nameInput.value = name;
 
   if (!name || name.length < 3 || name.length > 20) {
-    nameError.textContent = "Username must be 3-20 characters.";
+    setFieldError(nameError, "Username must be 3-20 characters.");
+    markFieldInvalid(nameInput);
     return false;
   }
 
-  nameError.textContent = "";
+  setFieldError(nameError, "");
+  markFieldValid(nameInput);
   return true;
 }
 
@@ -166,11 +250,13 @@ function validateEmail() {
   if (emailInput) emailInput.value = email;
 
   if (!email || !isValidEmail(email)) {
-    emailError.textContent = "Please enter a valid email.";
+    setFieldError(emailError, "Please enter a valid email.");
+    markFieldInvalid(emailInput);
     return false;
   }
 
-  emailError.textContent = "";
+  setFieldError(emailError, "");
+  markFieldValid(emailInput);
   return true;
 }
 
@@ -178,31 +264,38 @@ function validatePassword() {
   const password = passwordInput?.value || "";
 
   if (password.length < 8 || !hasUppercase(password) || !hasNumber(password)) {
-    passwordError.textContent =
-      "Password must be 8+ chars with uppercase & number.";
+    setFieldError(
+      passwordError,
+      "Password must be 8+ chars with uppercase & number."
+    );
+    markFieldInvalid(passwordInput);
     return false;
   }
 
-  passwordError.textContent = "";
+  setFieldError(passwordError, "");
+  markFieldValid(passwordInput);
   return true;
 }
 
 function validateConfirmPassword() {
-  if ((passwordInput?.value || "") !== (confirmPasswordInput?.value || "")) {
-    confirmPasswordError.textContent = "Passwords do not match.";
+  const password = passwordInput?.value || "";
+  const confirmPassword = confirmPasswordInput?.value || "";
+
+  if (!confirmPassword) {
+    setFieldError(confirmPasswordError, "Please confirm your password.");
+    markFieldInvalid(confirmPasswordInput);
     return false;
   }
 
-  confirmPasswordError.textContent = "";
-  return true;
-}
+  if (password !== confirmPassword) {
+    setFieldError(confirmPasswordError, "Passwords do not match.");
+    markFieldInvalid(confirmPasswordInput);
+    return false;
+  }
 
-function clearAllErrors() {
-  nameError.textContent = "";
-  emailError.textContent = "";
-  passwordError.textContent = "";
-  confirmPasswordError.textContent = "";
-  captchaError.textContent = "";
+  setFieldError(confirmPasswordError, "");
+  markFieldValid(confirmPasswordInput);
+  return true;
 }
 
 /* ---------------- SECURITY CONTEXT ---------------- */
@@ -228,7 +321,7 @@ function getClientSecurityContext() {
 
 async function precheckSensitiveAction(email, token) {
   if (!token) {
-    captchaError.textContent = "Please complete the captcha.";
+    setFieldError(captchaError, "Please complete the captcha.");
     throw new Error("Captcha missing");
   }
 
@@ -237,6 +330,28 @@ async function precheckSensitiveAction(email, token) {
   await verifyTurnstileToken(token);
 
   return securityContext;
+}
+
+function mapSignupError(error) {
+  const code = error?.code || "";
+  const message = error?.message || "";
+
+  switch (code) {
+    case "auth/email-already-in-use":
+      return "This email is already in use.";
+    case "auth/invalid-email":
+      return "Please enter a valid email.";
+    case "auth/weak-password":
+      return "Password is too weak.";
+    case "auth/popup-closed-by-user":
+      return "Google sign-in was closed before completion.";
+    case "auth/popup-blocked":
+      return "Popup was blocked by the browser.";
+    case "auth/network-request-failed":
+      return "Network error. Please check your connection.";
+    default:
+      return message || "Signup failed. Please try again.";
+  }
 }
 
 async function handleEmailSignup() {
@@ -259,22 +374,20 @@ async function handleEmailSignup() {
     areRegistrationsFrozen(containmentState) ||
     isReadOnlyMode(containmentState)
   ) {
-    formError.textContent =
-      "Account registration is temporarily disabled.";
+    setFormError("Account registration is temporarily disabled.");
     isSubmitting = false;
     return;
   }
 
+  const email = normalizeEmail(emailInput?.value || "");
+  const password = passwordInput?.value || "";
+  const name = sanitizeUsername(nameInput?.value || "");
   const token = getTurnstileToken();
-  const email = normalizeEmail(emailInput.value);
-  const password = passwordInput.value;
-  const name = sanitizeUsername(nameInput.value);
 
   let securityContext = {};
 
   try {
-    signupBtn.disabled = true;
-    signupBtn.textContent = "Creating account...";
+    setBusyState(true);
 
     securityContext = await precheckSensitiveAction(email, token);
 
@@ -287,11 +400,8 @@ async function handleEmailSignup() {
     const user = credential.user;
 
     await updateProfile(user, { displayName: name });
-
     await ensureUserProfile(user);
-
     await sendEmailVerification(user);
-
     await reload(user);
 
     await safeSecurityLog({
@@ -311,15 +421,16 @@ async function handleEmailSignup() {
     await safeSecurityLog({
       type: "signup_failed",
       message: error?.message || "Signup failed",
-      email
+      email,
+      metadata: {
+        code: error?.code || "unknown"
+      }
     });
 
-    formError.textContent = "Signup failed. Please try again.";
-
+    setFormError(mapSignupError(error));
     resetTurnstile();
   } finally {
-    signupBtn.disabled = false;
-    signupBtn.textContent = "Sign Up";
+    setBusyState(false, "Create Account");
     isSubmitting = false;
   }
 }
@@ -333,44 +444,86 @@ async function handleGoogleSignup() {
   clearAllErrors();
 
   try {
+    setBusyState(true, "Create Account");
+
+    if (
+      areRegistrationsFrozen(containmentState) ||
+      isReadOnlyMode(containmentState)
+    ) {
+      setFormError("Account registration is temporarily disabled.");
+      return;
+    }
+
     const token = getTurnstileToken();
+
+    if (!token) {
+      setFieldError(captchaError, "Please complete the captcha.");
+      throw new Error("Captcha missing");
+    }
+
     await verifyTurnstileToken(token);
 
-    if (/Android|iPhone|iPad/i.test(navigator.userAgent)) {
+    if (/Android|iPhone|iPad|iPod/i.test(navigator.userAgent)) {
       await signInWithRedirect(auth, provider);
       return;
     }
 
     const credential = await signInWithPopup(auth, provider);
-
     const user = credential.user;
 
     await ensureUserProfile(user);
     await reload(user);
 
+    await safeSecurityLog({
+      type: "google_signup_success",
+      message: "Google signup completed",
+      email: user?.email || "",
+      userId: user?.uid || ""
+    });
+
     goTo("home.html");
   } catch (error) {
     console.error("Google signup failed:", error);
-    formError.textContent = "Google signup failed.";
+
+    await safeSecurityLog({
+      type: "google_signup_failed",
+      message: error?.message || "Google signup failed",
+      metadata: {
+        code: error?.code || "unknown"
+      }
+    });
+
+    setFormError(mapSignupError(error));
     resetTurnstile();
   } finally {
+    setBusyState(false, "Create Account");
     isSubmitting = false;
   }
 }
 
-/* ---------------- TURNSTILE ---------------- */
+/* ---------------- LIVE VALIDATION ---------------- */
 
-async function initTurnstile() {
-  await waitForTurnstile();
+nameInput?.addEventListener("blur", validateName);
+emailInput?.addEventListener("blur", validateEmail);
+passwordInput?.addEventListener("blur", validatePassword);
+confirmPasswordInput?.addEventListener("blur", validateConfirmPassword);
 
-  const container = document.getElementById("turnstile-container");
+nameInput?.addEventListener("input", () => {
+  if (nameError?.textContent) validateName();
+});
 
-  widgetId = window.turnstile.render("#turnstile-container", {
-    sitekey: "0x4AAAAAACqA_Z98nhvcobbI",
-    theme: "dark",
-    size: "flexible"
-  });
-}
+emailInput?.addEventListener("input", () => {
+  if (emailError?.textContent) validateEmail();
+});
+
+passwordInput?.addEventListener("input", () => {
+  if (passwordError?.textContent) validatePassword();
+  if (confirmPasswordInput?.value) validateConfirmPassword();
+});
+
+confirmPasswordInput?.addEventListener("input", () => {
+  if (confirmPasswordError?.textContent) validateConfirmPassword();
+});
 
 /* ---------------- EVENTS ---------------- */
 
@@ -390,16 +543,20 @@ window.addEventListener("load", async () => {
     containmentState = await fetchContainmentState();
 
     if (areRegistrationsFrozen(containmentState)) {
-      formError.textContent = "Registrations are temporarily disabled.";
+      setFormError("Registrations are temporarily disabled.");
     }
+
+    await ensureTurnstileReady();
 
     const redirected = await getRedirectResult(auth);
 
-    if (!redirected) {
-      await initTurnstile();
+    if (redirected?.user) {
+      await ensureUserProfile(redirected.user);
+      await reload(redirected.user);
+      goTo("home.html");
     }
   } catch (error) {
     console.error("Signup page init failed:", error);
-    formError.textContent = "Page failed to load. Please refresh.";
+    setFormError("Page failed to load. Please refresh.");
   }
 });
