@@ -1,10 +1,6 @@
 import {
   getAuth,
   createUserWithEmailAndPassword,
-  signInWithPopup,
-  signInWithRedirect,
-  getRedirectResult,
-  GoogleAuthProvider,
   updateProfile,
   sendEmailVerification,
   reload
@@ -16,14 +12,8 @@ import { writeSecurityLog } from "./security-logger.js";
 import { detectBotBehavior } from "./bot-detection.js";
 
 const auth = getAuth(app);
-const provider = new GoogleAuthProvider();
-
-provider.setCustomParameters({
-  prompt: "select_account"
-});
 
 const signupForm = document.getElementById("signupForm");
-const googleBtn = document.getElementById("googleSignInBtn");
 const signupBtn = document.querySelector(".signup-btn");
 
 const nameInput = document.getElementById("name");
@@ -81,10 +71,6 @@ function setBusyState(isBusy) {
   if (signupBtn) {
     signupBtn.disabled = isBusy;
     signupBtn.textContent = isBusy ? "Creating account..." : "Create Account";
-  }
-
-  if (googleBtn) {
-    googleBtn.disabled = isBusy;
   }
 }
 
@@ -339,16 +325,6 @@ function mapSignupError(error) {
       return "Please enter a valid email.";
     case "auth/weak-password":
       return "Password is too weak.";
-    case "auth/popup-closed-by-user":
-      return "Google sign-in was closed before completion.";
-    case "auth/popup-blocked":
-      return "Popup was blocked by the browser.";
-    case "auth/cancelled-popup-request":
-      return "Another sign-in popup was already open.";
-    case "auth/unauthorized-domain":
-      return "This domain is not authorized in Firebase.";
-    case "auth/operation-not-allowed":
-      return "Google sign-in is not enabled in Firebase Authentication.";
     case "auth/network-request-failed":
       return "Network error. Please check your connection.";
     default:
@@ -437,88 +413,6 @@ async function handleEmailSignup() {
   }
 }
 
-/* ---------------- GOOGLE SIGNUP ---------------- */
-
-async function handleGoogleSignup() {
-  if (isSubmitting) return;
-  isSubmitting = true;
-
-  clearAllErrors();
-
-  try {
-    setBusyState(true);
-
-    if (
-      areRegistrationsFrozen(containmentState) ||
-      isReadOnlyMode(containmentState)
-    ) {
-      setFormError("Account registration is temporarily disabled.");
-      return;
-    }
-
-    const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-
-    if (isMobile) {
-      await signInWithRedirect(auth, provider);
-      return;
-    }
-
-    let credential;
-
-    try {
-      credential = await signInWithPopup(auth, provider);
-    } catch (popupError) {
-      if (
-        popupError?.code === "auth/popup-blocked" ||
-        popupError?.code === "auth/cancelled-popup-request"
-      ) {
-        await signInWithRedirect(auth, provider);
-        return;
-      }
-
-      throw popupError;
-    }
-
-    const user = credential.user;
-    const profileResult = await ensureUserProfile(user);
-
-    await reload(user);
-
-    await safeSecurityLog({
-      type: "google_signup_success",
-      message: "Google signup completed",
-      email: user?.email || "",
-      userId: user?.uid || "",
-      metadata: {
-        profileResult: profileResult || {}
-      }
-    });
-
-    goTo("home.html");
-  } catch (error) {
-    console.error("Google signup failed:", error);
-
-    await safeSecurityLog({
-      type: "google_signup_failed",
-      message: error?.message || "Google signup failed",
-      metadata: {
-        code: error?.code || "unknown"
-      }
-    });
-
-    setFormError(mapSignupError(error));
-  } finally {
-    setBusyState(false);
-    isSubmitting = false;
-  }
-}
-
-/* ---------------- GLOBAL BUTTON HANDLER ---------------- */
-
-window.aethraGoogleSignup = async function () {
-  await handleGoogleSignup();
-};
-
 /* ---------------- LIVE VALIDATION ---------------- */
 
 nameInput?.addEventListener("blur", validateName);
@@ -550,10 +444,6 @@ signupForm?.addEventListener("submit", async (e) => {
   await handleEmailSignup();
 });
 
-googleBtn?.addEventListener("click", async () => {
-  await handleGoogleSignup();
-});
-
 /* ---------------- PAGE INIT ---------------- */
 
 window.addEventListener("load", async () => {
@@ -562,27 +452,6 @@ window.addEventListener("load", async () => {
 
     if (areRegistrationsFrozen(containmentState)) {
       setFormError("Registrations are temporarily disabled.");
-    }
-
-    const redirected = await getRedirectResult(auth);
-
-    if (redirected?.user) {
-      const profileResult = await ensureUserProfile(redirected.user);
-
-      await reload(redirected.user);
-
-      await safeSecurityLog({
-        type: "google_signup_success",
-        message: "Google signup completed via redirect",
-        email: redirected.user?.email || "",
-        userId: redirected.user?.uid || "",
-        metadata: {
-          profileResult: profileResult || {}
-        }
-      });
-
-      goTo("home.html");
-      return;
     }
 
     await ensureTurnstileReady();
