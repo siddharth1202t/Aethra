@@ -29,9 +29,16 @@ function setFormError(message = "") {
 
 function setBusyState(isBusy) {
   const googleBtn = document.getElementById("googleSignInBtn");
-  if (googleBtn) {
-    googleBtn.disabled = isBusy;
+  if (!googleBtn) return;
+
+  if (!googleBtn.dataset.originalText) {
+    googleBtn.dataset.originalText = googleBtn.textContent.trim();
   }
+
+  googleBtn.disabled = isBusy;
+  googleBtn.textContent = isBusy
+    ? "Please wait..."
+    : googleBtn.dataset.originalText;
 }
 
 function goTo(page) {
@@ -39,7 +46,7 @@ function goTo(page) {
 }
 
 function isMobileDevice() {
-  return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+  return /Android|iPhone|iPad|iPod|Opera Mini|IEMobile|WPDesktop/i.test(navigator.userAgent);
 }
 
 function mapGoogleError(error) {
@@ -50,7 +57,7 @@ function mapGoogleError(error) {
     case "auth/popup-closed-by-user":
       return "Google sign-in was closed before completion.";
     case "auth/popup-blocked":
-      return "Popup was blocked by the browser.";
+      return "Popup was blocked by the browser. Please allow popups and try again.";
     case "auth/cancelled-popup-request":
       return "Another sign-in popup was already open.";
     case "auth/unauthorized-domain":
@@ -70,9 +77,7 @@ async function handleRedirectResultIfAny() {
 
     if (!redirected?.user) return;
 
-    const profileResult = await ensureUserProfile(redirected.user);
-    console.log("[Aethra Google] redirect profile result:", profileResult);
-
+    await ensureUserProfile(redirected.user);
     await reload(redirected.user);
     goTo("home.html");
   } catch (error) {
@@ -83,17 +88,13 @@ async function handleRedirectResultIfAny() {
 
 async function handleGoogleSignup() {
   if (googleInProgress) return;
-
   googleInProgress = true;
 
   try {
     setFormError("");
     setBusyState(true);
 
-    console.log("[Aethra Google] button clicked");
-
     if (isMobileDevice()) {
-      console.log("[Aethra Google] using redirect");
       await signInWithRedirect(auth, provider);
       return;
     }
@@ -101,9 +102,7 @@ async function handleGoogleSignup() {
     let credential;
 
     try {
-      console.log("[Aethra Google] trying popup");
       credential = await signInWithPopup(auth, provider);
-      console.log("[Aethra Google] popup success");
     } catch (popupError) {
       console.error("[Aethra Google] popup failed:", popupError);
 
@@ -111,7 +110,6 @@ async function handleGoogleSignup() {
         popupError?.code === "auth/popup-blocked" ||
         popupError?.code === "auth/cancelled-popup-request"
       ) {
-        console.log("[Aethra Google] falling back to redirect");
         await signInWithRedirect(auth, provider);
         return;
       }
@@ -120,9 +118,8 @@ async function handleGoogleSignup() {
     }
 
     const user = credential.user;
-    const profileResult = await ensureUserProfile(user);
-    console.log("[Aethra Google] popup profile result:", profileResult);
 
+    await ensureUserProfile(user);
     await reload(user);
     goTo("home.html");
   } catch (error) {
@@ -134,8 +131,6 @@ async function handleGoogleSignup() {
   }
 }
 
-window.aethraGoogleSignup = handleGoogleSignup;
-
 window.addEventListener("DOMContentLoaded", () => {
   const btn = document.getElementById("googleSignInBtn");
 
@@ -145,7 +140,6 @@ window.addEventListener("DOMContentLoaded", () => {
   }
 
   btn.addEventListener("click", handleGoogleSignup);
-  console.log("[Aethra Google] button listener attached");
 });
 
 handleRedirectResultIfAny();
