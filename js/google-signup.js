@@ -17,6 +17,8 @@ provider.setCustomParameters({
   prompt: "select_account"
 });
 
+let googleInProgress = false;
+
 function setFormError(message = "") {
   const formError = document.getElementById("formError");
   if (!formError) return;
@@ -80,6 +82,10 @@ async function handleRedirectResultIfAny() {
 }
 
 async function handleGoogleSignup() {
+  if (googleInProgress) return;
+
+  googleInProgress = true;
+
   try {
     setFormError("");
     setBusyState(true);
@@ -124,6 +130,7 @@ async function handleGoogleSignup() {
     setFormError(mapGoogleError(error));
   } finally {
     setBusyState(false);
+    googleInProgress = false;
   }
 }
 
@@ -137,10 +144,7 @@ window.addEventListener("DOMContentLoaded", () => {
     return;
   }
 
-  btn.addEventListener("click", async () => {
-    await handleGoogleSignup();
-  });
-
+  btn.addEventListener("click", handleGoogleSignup);
   console.log("[Aethra Google] button listener attached");
 });
 
