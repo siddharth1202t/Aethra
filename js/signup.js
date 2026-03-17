@@ -50,19 +50,13 @@ function goTo(page) {
 
 function setFormError(message = "") {
   if (!formError) return;
-
   formError.textContent = message;
-
-  if (message) {
-    formError.classList.add("show");
-  } else {
-    formError.classList.remove("show");
-  }
+  formError.classList.toggle("show", Boolean(message));
 }
 
-function setFieldError(element, message) {
+function setFieldError(element, message = "") {
   if (!element) return;
-  element.textContent = message || "";
+  element.textContent = message;
 }
 
 function clearFieldState(input) {
@@ -82,10 +76,10 @@ function markFieldInvalid(input) {
   input.classList.add("input-invalid");
 }
 
-function setBusyState(isBusy, submitText = "Create Account") {
+function setBusyState(isBusy) {
   if (signupBtn) {
     signupBtn.disabled = isBusy;
-    signupBtn.textContent = isBusy ? "Creating account..." : submitText;
+    signupBtn.textContent = isBusy ? "Creating account..." : "Create Account";
   }
 
   if (googleBtn) {
@@ -94,11 +88,11 @@ function setBusyState(isBusy, submitText = "Create Account") {
 }
 
 function clearAllErrors() {
-  setFieldError(nameError, "");
-  setFieldError(emailError, "");
-  setFieldError(passwordError, "");
-  setFieldError(confirmPasswordError, "");
-  setFieldError(captchaError, "");
+  setFieldError(nameError);
+  setFieldError(emailError);
+  setFieldError(passwordError);
+  setFieldError(confirmPasswordError);
+  setFieldError(captchaError);
   setFormError("");
 
   clearFieldState(nameInput);
@@ -243,7 +237,7 @@ function validateName() {
     return false;
   }
 
-  setFieldError(nameError, "");
+  setFieldError(nameError);
   markFieldValid(nameInput);
   return true;
 }
@@ -258,7 +252,7 @@ function validateEmail() {
     return false;
   }
 
-  setFieldError(emailError, "");
+  setFieldError(emailError);
   markFieldValid(emailInput);
   return true;
 }
@@ -275,7 +269,7 @@ function validatePassword() {
     return false;
   }
 
-  setFieldError(passwordError, "");
+  setFieldError(passwordError);
   markFieldValid(passwordInput);
   return true;
 }
@@ -296,7 +290,7 @@ function validateConfirmPassword() {
     return false;
   }
 
-  setFieldError(confirmPasswordError, "");
+  setFieldError(confirmPasswordError);
   markFieldValid(confirmPasswordInput);
   return true;
 }
@@ -322,16 +316,14 @@ function getClientSecurityContext() {
 
 /* ---------------- SIGNUP FLOW ---------------- */
 
-async function precheckSensitiveAction(email, token) {
+async function precheckSensitiveAction(token) {
   if (!token) {
     setFieldError(captchaError, "Please complete the captcha.");
     throw new Error("Captcha missing");
   }
 
   const securityContext = getClientSecurityContext();
-
   await verifyTurnstileToken(token);
-
   return securityContext;
 }
 
@@ -393,12 +385,10 @@ async function handleEmailSignup() {
   const name = sanitizeUsername(nameInput?.value || "");
   const token = getTurnstileToken();
 
-  let securityContext = {};
-
   try {
     setBusyState(true);
 
-    securityContext = await precheckSensitiveAction(email, token);
+    const securityContext = await precheckSensitiveAction(token);
 
     const credential = await createUserWithEmailAndPassword(
       auth,
@@ -439,7 +429,7 @@ async function handleEmailSignup() {
     setFormError(mapSignupError(error));
     resetTurnstile();
   } finally {
-    setBusyState(false, "Create Account");
+    setBusyState(false);
     isSubmitting = false;
   }
 }
@@ -453,7 +443,7 @@ async function handleGoogleSignup() {
   clearAllErrors();
 
   try {
-    setBusyState(true, "Create Account");
+    setBusyState(true);
 
     if (
       areRegistrationsFrozen(containmentState) ||
@@ -507,7 +497,7 @@ async function handleGoogleSignup() {
     setFormError(mapSignupError(error));
     resetTurnstile();
   } finally {
-    setBusyState(false, "Create Account");
+    setBusyState(false);
     isSubmitting = false;
   }
 }
