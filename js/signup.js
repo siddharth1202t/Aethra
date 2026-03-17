@@ -2,8 +2,7 @@ import {
   getAuth,
   createUserWithEmailAndPassword,
   updateProfile,
-  sendEmailVerification,
-  reload
+  sendEmailVerification
 } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
 
 import { app } from "./firestore-config.js";
@@ -43,6 +42,16 @@ function setFormError(message = "") {
   if (!formError) return;
   formError.textContent = message;
   formError.classList.toggle("show", Boolean(message));
+
+  if (message) {
+    formError.style.background = "rgba(255, 102, 102, 0.12)";
+    formError.style.borderColor = "rgba(255, 102, 102, 0.2)";
+    formError.style.color = "#ffd0d0";
+  } else {
+    formError.style.background = "";
+    formError.style.borderColor = "";
+    formError.style.color = "";
+  }
 }
 
 function setFieldError(element, message = "") {
@@ -68,10 +77,16 @@ function markFieldInvalid(input) {
 }
 
 function setBusyState(isBusy) {
-  if (signupBtn) {
-    signupBtn.disabled = isBusy;
-    signupBtn.textContent = isBusy ? "Creating account..." : "Create Account";
+  if (!signupBtn) return;
+
+  if (!signupBtn.dataset.originalText) {
+    signupBtn.dataset.originalText = signupBtn.textContent || "Create Account";
   }
+
+  signupBtn.disabled = isBusy;
+  signupBtn.textContent = isBusy
+    ? "Creating account..."
+    : signupBtn.dataset.originalText;
 }
 
 function clearAllErrors() {
@@ -96,6 +111,12 @@ async function safeSecurityLog(payload) {
   } catch (error) {
     console.warn("Security log failed:", error);
   }
+}
+
+function fireAndForgetSecurityLog(payload) {
+  safeSecurityLog(payload).catch((error) => {
+    console.warn("Async security log failed:", error);
+  });
 }
 
 /* ---------------- CONTAINMENT STATE ---------------- */
@@ -296,8 +317,8 @@ function getClientSecurityContext() {
 
   return {
     behavior,
-    userAgent: navigator.userAgent,
-    language: navigator.language
+    userAgent: navigator.userAgent || "",
+    language: navigator.language || ""
   };
 }
 
@@ -379,9 +400,8 @@ async function handleEmailSignup() {
     const profileResult = await ensureUserProfile(user);
 
     await sendEmailVerification(user);
-    await reload(user);
 
-    await safeSecurityLog({
+    fireAndForgetSecurityLog({
       type: "signup_success",
       message: "User account created",
       email,
@@ -396,7 +416,7 @@ async function handleEmailSignup() {
   } catch (error) {
     console.error("Signup failed:", error);
 
-    await safeSecurityLog({
+    fireAndForgetSecurityLog({
       type: "signup_failed",
       message: error?.message || "Signup failed",
       email,
