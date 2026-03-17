@@ -42,8 +42,10 @@ function sanitizePhotoURL(value) {
 
   try {
     const parsed = new URL(url);
-    return /^https?:$/i.test(parsed.protocol) ? parsed.toString().slice(0, MAX_PHOTO_URL_LENGTH) : "";
-  } catch (error) {
+    return /^https?:$/i.test(parsed.protocol)
+      ? parsed.toString().slice(0, MAX_PHOTO_URL_LENGTH)
+      : "";
+  } catch {
     return "";
   }
 }
@@ -52,40 +54,10 @@ function safeExistingString(value) {
   return typeof value === "string" ? value : "";
 }
 
-async function fetchContainmentState() {
-  try {
-    const response = await fetch("/api/security-containment-state", {
-      method: "GET",
-      headers: {
-        "Content-Type": "application/json"
-      }
-    });
-
-    if (!response.ok) {
-      return null;
-    }
-
-    const data = await response.json().catch(() => null);
-    return data && typeof data === "object" ? data : null;
-  } catch (error) {
-    console.warn("Containment state fetch failed:", error);
-    return null;
-  }
-}
-
-function isProfileEditBlocked(containmentState) {
-  if (!containmentState || typeof containmentState !== "object") {
-    return false;
-  }
-
-  const flags = containmentState.flags || {};
-
-  return flags.readOnlyMode === true || flags.disableProfileEdits === true;
-}
-
 function buildCreatePayload(user) {
   const safeUid = safeString(user?.uid || "", MAX_UID_LENGTH);
-  const safeDisplayName = sanitizeDisplayName(user?.displayName) || DEFAULT_DISPLAY_NAME;
+  const safeDisplayName =
+    sanitizeDisplayName(user?.displayName) || DEFAULT_DISPLAY_NAME;
   const safeEmail = normalizeEmail(user?.email);
   const safePhotoURL = sanitizePhotoURL(user?.photoURL);
 
@@ -105,7 +77,8 @@ function buildCreatePayload(user) {
 function buildSafeUpdatePayload(existingData, user) {
   const updates = {};
 
-  const safeDisplayName = sanitizeDisplayName(user?.displayName) || DEFAULT_DISPLAY_NAME;
+  const safeDisplayName =
+    sanitizeDisplayName(user?.displayName) || DEFAULT_DISPLAY_NAME;
   const safePhotoURL = sanitizePhotoURL(user?.photoURL);
   const safeEmail = normalizeEmail(user?.email);
 
@@ -160,12 +133,6 @@ export async function ensureUserProfile(user) {
 
   if (existingData.profileLocked === true) {
     return { ok: true, action: "skipped_locked_profile" };
-  }
-
-  const containmentState = await fetchContainmentState();
-
-  if (isProfileEditBlocked(containmentState)) {
-    return { ok: true, action: "skipped_containment_block" };
   }
 
   const updates = buildSafeUpdatePayload(existingData, user);
