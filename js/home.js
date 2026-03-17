@@ -1,7 +1,6 @@
 import { getAuth, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
 import { doc, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 import { app, db } from "./firestore-config.js";
-import { ensureUserProfile } from "./user-profile.js";
 import { requireAuth } from "./auth-guard.js";
 
 const auth = getAuth(app);
@@ -18,7 +17,9 @@ function goTo(page) {
 }
 
 function createStars() {
-  if (!starsContainer) return;
+  if (!starsContainer || starsContainer.dataset.ready === "true") return;
+
+  const fragment = document.createDocumentFragment();
 
   for (let i = 0; i < 90; i += 1) {
     const star = document.createElement("div");
@@ -32,8 +33,11 @@ function createStars() {
     star.style.animationDuration = `${Math.random() * 4 + 2}s`;
     star.style.animationDelay = `${Math.random() * 4}s`;
 
-    starsContainer.appendChild(star);
+    fragment.appendChild(star);
   }
+
+  starsContainer.appendChild(fragment);
+  starsContainer.dataset.ready = "true";
 }
 
 function setPageVisible() {
@@ -50,23 +54,33 @@ function getBestDisplayName(user) {
   return directName || providerName || emailName || "Explorer";
 }
 
-requireAuth(async (user) => {
+function setDefaultUserUI(user) {
+  if (heroUsernameEl) {
+    heroUsernameEl.textContent = getBestDisplayName(user);
+  }
+
+  if (userRoleEl) {
+    userRoleEl.textContent = "User";
+  }
+
+  if (devBtn) {
+    devBtn.style.display = "none";
+  }
+}
+
+async function hydrateRole(user) {
+  if (!user?.uid) return;
+
   try {
-    await ensureUserProfile(user);
-
-    if (heroUsernameEl) {
-      heroUsernameEl.textContent = getBestDisplayName(user);
-    }
-
-    let isDeveloper = false;
-
     const userRef = doc(db, "users", user.uid);
     const userSnap = await getDoc(userRef);
 
-    if (userSnap.exists()) {
-      const userData = userSnap.data() || {};
-      isDeveloper = String(userData.role || "").toLowerCase() === "developer";
+    if (!userSnap.exists()) {
+      return;
     }
+
+    const userData = userSnap.data() || {};
+    const isDeveloper = String(userData.role || "").toLowerCase() === "developer";
 
     if (userRoleEl) {
       userRoleEl.textContent = isDeveloper ? "Developer" : "User";
@@ -75,23 +89,22 @@ requireAuth(async (user) => {
     if (devBtn) {
       devBtn.style.display = isDeveloper ? "block" : "none";
     }
+  } catch (error) {
+    console.error("Role hydration failed:", error);
+  }
+}
 
+requireAuth(async (user) => {
+  try {
+    // Show useful UI immediately after auth is confirmed.
+    setDefaultUserUI(user);
     setPageVisible();
+
+    // Load role in the background so the page feels instant.
+    await hydrateRole(user);
   } catch (error) {
     console.error("Home auth setup failed:", error);
-
-    if (heroUsernameEl) {
-      heroUsernameEl.textContent = "Explorer";
-    }
-
-    if (userRoleEl) {
-      userRoleEl.textContent = "User";
-    }
-
-    if (devBtn) {
-      devBtn.style.display = "none";
-    }
-
+    setDefaultUserUI(user);
     setPageVisible();
   }
 });
