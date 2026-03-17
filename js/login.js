@@ -6,8 +6,10 @@ import {
   signInWithRedirect,
   getRedirectResult,
   sendPasswordResetEmail,
-  reload
+  reload,
+  signOut
 } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+
 import { app } from "./firestore-config.js";
 import { ensureUserProfile } from "./user-profile.js";
 import { writeSecurityLog } from "./security-logger.js";
@@ -15,6 +17,10 @@ import { getSecurityBehaviorPayload } from "./security-client.js";
 
 const auth = getAuth(app);
 const provider = new GoogleAuthProvider();
+
+provider.setCustomParameters({
+  prompt: "select_account"
+});
 
 const form = document.getElementById("loginForm");
 const googleBtn = document.getElementById("googleLoginBtn");
@@ -46,7 +52,7 @@ function waitForTurnstile(timeout = 10000) {
     const start = Date.now();
 
     const check = () => {
-      if (window.turnstile) {
+      if (window.turnstile && typeof window.turnstile.render === "function") {
         resolve();
       } else if (Date.now() - start > timeout) {
         reject(new Error("Turnstile script did not load."));
@@ -318,6 +324,10 @@ function getFriendlyAuthMessage(error) {
     return "Captcha verification failed. Please complete it again.";
   }
 
+  if (isLockedMessage(message)) {
+    return message;
+  }
+
   switch (code) {
     case "auth/invalid-credential":
     case "auth/wrong-password":
@@ -335,8 +345,12 @@ function getFriendlyAuthMessage(error) {
       return "Popup was blocked by the browser. Please allow popups or try again.";
     case "auth/cancelled-popup-request":
       return "Another sign-in request is already in progress.";
+    case "auth/unauthorized-domain":
+      return "This domain is not authorized for Google sign-in.";
+    case "auth/operation-not-allowed":
+      return "Google sign-in is not enabled right now.";
     default:
-      return "Login failed. Please try again.";
+      return safeString(message, 300) || "Login failed. Please try again.";
   }
 }
 
@@ -409,7 +423,31 @@ async function precheckSensitiveAction(email, token, actionLabel = "login_check"
   return securityContext;
 }
 
-async function handleRedirectResult() {
+async function verifyPostGoogleSecurity(user, token, actionLabel) {
+  const email = normalizeEmail(user?.email || "google-login");
+  const securityContext = getClientSecurityContext();
+
+  const checkResult = await callLoginAttemptApi(email, "check", {
+    actionLabel,
+    ...securityContext
+  });
+
+  if (checkResult?.isLocked) {
+    throw new Error(
+      `This account is temporarily locked. Please try again in ${formatRemainingMinutes(checkResult.remainingMs)}.`
+    );
+  }
+
+  if (!token) {
+    showCaptchaError("Please complete the captcha first.");
+    throw new Error("Captcha missing");
+  }
+
+  await verifyTurnstileToken(token, securityContext.behavior || {});
+  return securityContext;
+}
+
+async function handleRedirectResultIfAny() {
   try {
     const result = await getRedirectResult(auth);
 
@@ -419,6 +457,15 @@ async function handleRedirectResult() {
 
     const user = result.user;
 
+    // Redirect returns on mobile flow. Security is rechecked here.
+    const token = getTurnstileToken();
+
+    const securityContext = await verifyPostGoogleSecurity(
+      user,
+      token,
+      "google_login_redirect"
+    );
+
     await ensureUserProfile(user);
     await reload(user);
 
@@ -426,7 +473,10 @@ async function handleRedirectResult() {
       type: "google_login_success",
       message: "User logged in with Google via redirect",
       email: user.email || "",
-      userId: user.uid
+      userId: user.uid,
+      metadata: {
+        behavior: securityContext.behavior || {}
+      }
     });
 
     if (!user.emailVerified) {
@@ -438,6 +488,12 @@ async function handleRedirectResult() {
     return true;
   } catch (error) {
     console.error("Redirect sign-in failed:", error);
+
+    try {
+      await signOut(auth);
+    } catch (signOutError) {
+      console.warn("Redirect cleanup sign-out failed:", signOutError);
+    }
 
     await safeSecurityLog({
       type: "google_login_failed",
@@ -564,32 +620,56 @@ async function handleGoogleLogin() {
 
   clearAllErrors();
 
-  const email = normalizeEmail(emailInput?.value || "google-login");
   const token = getTurnstileToken();
   let securityContext = {};
+  let signedInUser = null;
 
   try {
     setLoading(googleBtn, "Please wait...");
     clearCaptchaError();
 
-    securityContext = await precheckSensitiveAction(email, token, "google_login");
+    if (!token) {
+      showCaptchaError("Please complete the captcha first.");
+      throw new Error("Captcha missing");
+    }
 
     if (isMobileDevice()) {
       await safeSecurityLog({
         type: "google_login_redirect_started",
         message: "Google redirect sign-in started",
-        email,
-        metadata: {
-          behavior: securityContext.behavior || {}
-        }
+        email: "google-login"
       });
 
       await signInWithRedirect(auth, provider);
       return;
     }
 
-    const userCredential = await signInWithPopup(auth, provider);
+    let userCredential;
+
+    try {
+      userCredential = await signInWithPopup(auth, provider);
+    } catch (popupError) {
+      if (
+        popupError?.code === "auth/popup-blocked" ||
+        popupError?.code === "auth/cancelled-popup-request"
+      ) {
+        await safeSecurityLog({
+          type: "google_login_redirect_fallback",
+          message: "Popup failed, falling back to redirect",
+          email: "google-login"
+        });
+
+        await signInWithRedirect(auth, provider);
+        return;
+      }
+
+      throw popupError;
+    }
+
     const user = userCredential.user;
+    signedInUser = user;
+
+    securityContext = await verifyPostGoogleSecurity(user, token, "google_login");
 
     await ensureUserProfile(user);
     await reload(user);
@@ -613,10 +693,18 @@ async function handleGoogleLogin() {
   } catch (error) {
     console.error("Google login failed:", error);
 
+    if (signedInUser) {
+      try {
+        await signOut(auth);
+      } catch (signOutError) {
+        console.warn("Google login cleanup sign-out failed:", signOutError);
+      }
+    }
+
     await safeSecurityLog({
       type: "google_login_failed",
       message: error?.message || "Google login failed",
-      email,
+      email: signedInUser?.email || "google-login",
       metadata: {
         behavior: securityContext.behavior || {}
       }
@@ -771,20 +859,25 @@ forgotPasswordBtn?.addEventListener("click", async () => {
 
 window.addEventListener("load", async () => {
   try {
+    setButtonsDisabled(true);
+
     containmentState = await fetchContainmentState();
 
     if (areRegistrationsFrozen(containmentState)) {
-      // informative only for login page context; no action needed
+      // login page: informational only
     }
 
-    const redirected = await handleRedirectResult();
+    await initTurnstile();
+    const redirected = await handleRedirectResultIfAny();
 
     if (!redirected) {
-      await initTurnstile();
+      setButtonsDisabled(false);
+      return;
     }
   } catch (error) {
     console.error("Page init failed:", error);
     showFormError("Page failed to load properly. Please refresh and try again.");
+  } finally {
     setButtonsDisabled(false);
   }
 });
