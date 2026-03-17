@@ -4,32 +4,26 @@
   "description": "Aethra AI character life simulator backend",
   "private": true,
   "type": "commonjs",
-
   "scripts": {
     "start": "node index.js",
     "lint": "echo \"Add linting later\"",
     "test": "echo \"No tests configured\""
   },
-
   "repository": {
     "type": "git",
     "url": "https://github.com/siddharth1202t/Aethra.git"
   },
-
   "bugs": {
     "url": "https://github.com/siddharth1202t/Aethra/issues"
   },
-
   "homepage": "https://github.com/siddharth1202t/Aethra",
-
   "license": "ISC",
-
   "engines": {
     "node": ">=18"
   },
-
   "dependencies": {
     "@upstash/redis": "^1.37.0",
+    "@vercel/speed-insights": "^2.0.0",
     "firebase-admin": "^10.3.0"
   }
 }
