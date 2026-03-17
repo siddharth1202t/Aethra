@@ -451,13 +451,11 @@ async function handleRedirectResultIfAny() {
   try {
     const result = await getRedirectResult(auth);
 
-    if (!result?.user) {
+    if (!result || !result.user) {
       return false;
     }
 
     const user = result.user;
-
-    // Redirect returns on mobile flow. Security is rechecked here.
     const token = getTurnstileToken();
 
     const securityContext = await verifyPostGoogleSecurity(
@@ -479,15 +477,23 @@ async function handleRedirectResultIfAny() {
       }
     });
 
-    if (!user.emailVerified) {
-      redirectToVerifyEmail();
-      return true;
-    }
-
     redirectToHome();
     return true;
   } catch (error) {
-    console.error("Redirect sign-in failed:", error);
+    const code = error?.code || "";
+    const message = String(error?.message || "").toLowerCase();
+
+    console.warn("Redirect sign-in warning:", error);
+
+    const ignorableRedirectError =
+      code === "auth/internal-error" ||
+      code === "auth/no-auth-event" ||
+      message.includes("no auth event") ||
+      message.includes("internal-error");
+
+    if (ignorableRedirectError) {
+      return false;
+    }
 
     try {
       await signOut(auth);
