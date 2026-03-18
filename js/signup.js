@@ -12,6 +12,8 @@ import { detectBotBehavior } from "./bot-detection.js";
 
 const auth = getAuth(app);
 
+/* ---------------- DOM ---------------- */
+
 const signupForm = document.getElementById("signupForm");
 const signupBtn = document.querySelector(".signup-btn");
 
@@ -38,42 +40,53 @@ function goTo(page) {
 
 /* ---------------- UI HELPERS ---------------- */
 
-function setFormError(message = "") {
+function setFormError(message = "", type = "error") {
   if (!formError) return;
-  formError.textContent = message;
+
+  formError.textContent = String(message || "").trim();
   formError.classList.toggle("show", Boolean(message));
 
-  if (message) {
-    formError.style.background = "rgba(255, 102, 102, 0.12)";
-    formError.style.borderColor = "rgba(255, 102, 102, 0.2)";
-    formError.style.color = "#ffd0d0";
-  } else {
+  if (!message) {
     formError.style.background = "";
     formError.style.borderColor = "";
     formError.style.color = "";
+    return;
+  }
+
+  if (type === "success") {
+    formError.style.background = "rgba(125, 255, 179, 0.12)";
+    formError.style.borderColor = "rgba(125, 255, 179, 0.2)";
+    formError.style.color = "#d8ffe8";
+  } else {
+    formError.style.background = "rgba(255, 102, 102, 0.12)";
+    formError.style.borderColor = "rgba(255, 102, 102, 0.2)";
+    formError.style.color = "#ffd0d0";
   }
 }
 
 function setFieldError(element, message = "") {
   if (!element) return;
-  element.textContent = message;
+  element.textContent = String(message || "").trim();
 }
 
 function clearFieldState(input) {
   if (!input) return;
   input.classList.remove("input-invalid", "input-valid");
+  input.removeAttribute("aria-invalid");
 }
 
 function markFieldValid(input) {
   if (!input) return;
   input.classList.remove("input-invalid");
   input.classList.add("input-valid");
+  input.setAttribute("aria-invalid", "false");
 }
 
 function markFieldInvalid(input) {
   if (!input) return;
   input.classList.remove("input-valid");
   input.classList.add("input-invalid");
+  input.setAttribute("aria-invalid", "true");
 }
 
 function setBusyState(isBusy) {
@@ -83,10 +96,14 @@ function setBusyState(isBusy) {
     signupBtn.dataset.originalText = signupBtn.textContent || "Create Account";
   }
 
-  signupBtn.disabled = isBusy;
+  signupBtn.disabled = Boolean(isBusy);
   signupBtn.textContent = isBusy
     ? "Creating account..."
     : signupBtn.dataset.originalText;
+
+  if (signupForm) {
+    signupForm.setAttribute("aria-busy", isBusy ? "true" : "false");
+  }
 }
 
 function clearAllErrors() {
@@ -125,7 +142,8 @@ async function fetchContainmentState() {
   try {
     const res = await fetch("/api/security-containment-state", {
       method: "GET",
-      headers: { "Content-Type": "application/json" }
+      headers: { "Content-Type": "application/json" },
+      cache: "no-store"
     });
 
     if (!res.ok) return null;
@@ -268,6 +286,12 @@ function validateEmail() {
 function validatePassword() {
   const password = passwordInput?.value || "";
 
+  if (!password) {
+    setFieldError(passwordError, "Please enter a password.");
+    markFieldInvalid(passwordInput);
+    return false;
+  }
+
   if (password.length < 8 || !hasUppercase(password) || !hasNumber(password)) {
     setFieldError(
       passwordError,
@@ -341,13 +365,26 @@ function mapSignupError(error) {
 
   switch (code) {
     case "auth/email-already-in-use":
+      setFieldError(emailError, "This email is already in use.");
+      markFieldInvalid(emailInput);
       return "This email is already in use.";
+
     case "auth/invalid-email":
+      setFieldError(emailError, "Please enter a valid email.");
+      markFieldInvalid(emailInput);
       return "Please enter a valid email.";
+
     case "auth/weak-password":
+      setFieldError(passwordError, "Password is too weak.");
+      markFieldInvalid(passwordInput);
       return "Password is too weak.";
+
     case "auth/network-request-failed":
       return "Network error. Please check your connection.";
+
+    case "auth/too-many-requests":
+      return "Too many attempts. Please wait and try again.";
+
     default:
       return message || "Signup failed. Please try again.";
   }
@@ -358,33 +395,30 @@ async function handleEmailSignup() {
   isSubmitting = true;
 
   clearAllErrors();
-
-  if (
-    !validateName() ||
-    !validateEmail() ||
-    !validatePassword() ||
-    !validateConfirmPassword()
-  ) {
-    isSubmitting = false;
-    return;
-  }
-
-  if (
-    areRegistrationsFrozen(containmentState) ||
-    isReadOnlyMode(containmentState)
-  ) {
-    setFormError("Account registration is temporarily disabled.");
-    isSubmitting = false;
-    return;
-  }
-
-  const email = normalizeEmail(emailInput?.value || "");
-  const password = passwordInput?.value || "";
-  const name = sanitizeUsername(nameInput?.value || "");
-  const token = getTurnstileToken();
+  setBusyState(true);
 
   try {
-    setBusyState(true);
+    if (
+      !validateName() ||
+      !validateEmail() ||
+      !validatePassword() ||
+      !validateConfirmPassword()
+    ) {
+      return;
+    }
+
+    if (
+      areRegistrationsFrozen(containmentState) ||
+      isReadOnlyMode(containmentState)
+    ) {
+      setFormError("Account registration is temporarily disabled.");
+      return;
+    }
+
+    const email = normalizeEmail(emailInput?.value || "");
+    const password = passwordInput?.value || "";
+    const name = sanitizeUsername(nameInput?.value || "");
+    const token = getTurnstileToken();
 
     const securityContext = await precheckSensitiveAction(token);
 
@@ -398,7 +432,6 @@ async function handleEmailSignup() {
 
     await updateProfile(user, { displayName: name });
     const profileResult = await ensureUserProfile(user);
-
     await sendEmailVerification(user);
 
     fireAndForgetSecurityLog({
@@ -415,6 +448,8 @@ async function handleEmailSignup() {
     goTo("verify-email.html");
   } catch (error) {
     console.error("Signup failed:", error);
+
+    const email = normalizeEmail(emailInput?.value || "");
 
     fireAndForgetSecurityLog({
       type: "signup_failed",
@@ -459,15 +494,40 @@ confirmPasswordInput?.addEventListener("input", () => {
 
 /* ---------------- EVENTS ---------------- */
 
-signupForm?.addEventListener("submit", async (e) => {
-  e.preventDefault();
-  await handleEmailSignup();
-});
+if (signupBtn) {
+  signupBtn.addEventListener("click", (e) => {
+    e.preventDefault();
+  });
+}
+
+if (signupForm) {
+  signupForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    if (isSubmitting) return;
+
+    try {
+      await handleEmailSignup();
+    } catch (error) {
+      console.error("Unhandled signup submit error:", error);
+      setFormError("Something went wrong. Please try again.");
+      setBusyState(false);
+      isSubmitting = false;
+    }
+  });
+} else {
+  console.error("signupForm not found");
+}
 
 /* ---------------- PAGE INIT ---------------- */
 
-window.addEventListener("load", async () => {
+async function initSignupPage() {
   try {
+    if (!signupForm || !signupBtn || !nameInput || !emailInput || !passwordInput || !confirmPasswordInput) {
+      throw new Error("Required signup elements are missing.");
+    }
+
     containmentState = await fetchContainmentState();
 
     if (areRegistrationsFrozen(containmentState)) {
@@ -475,8 +535,15 @@ window.addEventListener("load", async () => {
     }
 
     await ensureTurnstileReady();
+    console.log("signup.js loaded");
   } catch (error) {
     console.error("Signup page init failed:", error);
     setFormError("Page failed to load. Please refresh.");
   }
-});
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", initSignupPage, { once: true });
+} else {
+  initSignupPage();
+}
