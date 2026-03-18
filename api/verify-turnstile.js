@@ -10,7 +10,8 @@ import {
 } from "./_api-security.js";
 
 const ROUTE = "/api/verify-turnstile";
-const TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
+const TURNSTILE_VERIFY_URL =
+  "https://challenges.cloudflare.com/turnstile/v0/siteverify";
 const TURNSTILE_TIMEOUT_MS = 8000;
 
 const ALLOWED_ORIGINS = new Set([
@@ -22,6 +23,12 @@ const ALLOWED_HOSTNAMES = new Set([
   "aethra-gules.vercel.app",
   "aethra-hb2h.vercel.app"
 ]);
+
+function setNoStore(res) {
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+}
 
 function normalizeOrigin(origin = "") {
   const raw = safeString(origin || "", 200).trim();
@@ -42,6 +49,10 @@ function isExpectedHostname(hostname = "") {
   return ALLOWED_HOSTNAMES.has(normalizeHostname(hostname));
 }
 
+function isOriginAllowed(origin = "") {
+  return ALLOWED_ORIGINS.has(normalizeOrigin(origin));
+}
+
 function safeErrorCodes(value) {
   if (!Array.isArray(value)) {
     return [];
@@ -59,10 +70,6 @@ function createTimeoutSignal(timeoutMs = TURNSTILE_TIMEOUT_MS) {
   return { controller, timeout };
 }
 
-function isOriginAllowed(origin = "") {
-  return ALLOWED_ORIGINS.has(normalizeOrigin(origin));
-}
-
 function pickSecurityAction(security) {
   return safeString(
     security?.risk?.finalAction || security?.risk?.action || "allow",
@@ -74,7 +81,21 @@ function getTurnstileSecret() {
   return safeString(process.env.TURNSTILE_SECRET_KEY || "", 5000).trim();
 }
 
+function buildJsonError(res, status, message, extra = {}) {
+  return res.status(status).json({
+    success: false,
+    message: safeString(message || "Request failed.", 300),
+    ...extra
+  });
+}
+
 export default async function handler(req, res) {
+  setNoStore(res);
+
+  if (req.method === "OPTIONS") {
+    return res.status(204).end();
+  }
+
   if (req.method !== "POST") {
     return res.status(405).json(buildMethodNotAllowedResponse());
   }
@@ -84,7 +105,9 @@ export default async function handler(req, res) {
 
     const token = safeString(body.token || "", 5000).trim();
     const behavior =
-      body.behavior && typeof body.behavior === "object" && !Array.isArray(body.behavior)
+      body.behavior &&
+      typeof body.behavior === "object" &&
+      !Array.isArray(body.behavior)
         ? body.behavior
         : {};
 
@@ -153,12 +176,15 @@ export default async function handler(req, res) {
         }
       });
 
-      return res.status(429).json({
-        success: false,
-        message: "Too many requests. Please try again later.",
-        action: security.signals.rateLimitResult.recommendedAction,
-        remainingMs: security.signals.rateLimitResult.remainingMs || 0
-      });
+      return buildJsonError(
+        res,
+        429,
+        "Too many requests. Please try again later.",
+        {
+          action: security.signals.rateLimitResult.recommendedAction,
+          remainingMs: security.signals.rateLimitResult.remainingMs || 0
+        }
+      );
     }
 
     if (securityAction === "block") {
@@ -178,9 +204,10 @@ export default async function handler(req, res) {
       });
 
       return res.status(429).json(
-        buildBlockedResponse("Suspicious activity detected. Please try again later.", {
-          action: "block"
-        })
+        buildBlockedResponse(
+          "Suspicious activity detected. Please try again later.",
+          { action: "block" }
+        )
       );
     }
 
@@ -216,10 +243,7 @@ export default async function handler(req, res) {
         }
       });
 
-      return res.status(400).json({
-        success: false,
-        message: "Missing token or secret."
-      });
+      return buildJsonError(res, 400, "Missing token or secret.");
     }
 
     const { controller, timeout } = createTimeoutSignal();
@@ -262,10 +286,11 @@ export default async function handler(req, res) {
         }
       });
 
-      return res.status(502).json({
-        success: false,
-        message: "Captcha verification service failed."
-      });
+      return buildJsonError(
+        res,
+        502,
+        "Captcha verification service failed."
+      );
     } finally {
       clearTimeout(timeout);
     }
@@ -284,10 +309,11 @@ export default async function handler(req, res) {
         }
       });
 
-      return res.status(502).json({
-        success: false,
-        message: "Captcha verification service failed."
-      });
+      return buildJsonError(
+        res,
+        502,
+        "Captcha verification service failed."
+      );
     }
 
     if (!data || typeof data !== "object" || Array.isArray(data)) {
@@ -303,10 +329,11 @@ export default async function handler(req, res) {
         }
       });
 
-      return res.status(502).json({
-        success: false,
-        message: "Captcha verification service failed."
-      });
+      return buildJsonError(
+        res,
+        502,
+        "Captcha verification service failed."
+      );
     }
 
     if (data.success !== true) {
@@ -327,10 +354,7 @@ export default async function handler(req, res) {
         }
       });
 
-      return res.status(400).json({
-        success: false,
-        message: "Captcha verification failed."
-      });
+      return buildJsonError(res, 400, "Captcha verification failed.");
     }
 
     if (data.hostname && !isExpectedHostname(data.hostname)) {
@@ -347,10 +371,7 @@ export default async function handler(req, res) {
         }
       });
 
-      return res.status(400).json({
-        success: false,
-        message: "Captcha hostname validation failed."
-      });
+      return buildJsonError(res, 400, "Captcha hostname validation failed.");
     }
 
     return res.status(200).json({
@@ -375,9 +396,6 @@ export default async function handler(req, res) {
       console.error("Security log write failed:", logError);
     }
 
-    return res.status(500).json({
-      success: false,
-      message: "Server error."
-    });
+    return buildJsonError(res, 500, "Server error.");
   }
 }
