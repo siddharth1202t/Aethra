@@ -19,6 +19,8 @@ provider.setCustomParameters({
   prompt: "select_account"
 });
 
+const HOME_PAGE = "home.html";
+
 const ALLOWED_GOOGLE_AUTH_HOSTS = new Set([
   "aethra-hb2h.vercel.app",
   "aethra-gules.vercel.app"
@@ -35,54 +37,64 @@ function goTo(page) {
 }
 
 function isMobileDevice() {
-  return /Android|iPhone|iPad|iPod|Opera Mini|IEMobile|WPDesktop/i.test(navigator.userAgent);
+  return /Android|iPhone|iPad|iPod|Opera Mini|IEMobile|WPDesktop/i.test(
+    navigator.userAgent
+  );
 }
 
 function withTimeout(promise, ms, message) {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
+    const timer = window.setTimeout(() => {
       reject(new Error(message || "Request timed out."));
     }, ms);
 
     promise
       .then((value) => {
-        clearTimeout(timer);
+        window.clearTimeout(timer);
         resolve(value);
       })
       .catch((error) => {
-        clearTimeout(timer);
+        window.clearTimeout(timer);
         reject(error);
       });
   });
 }
 
-function setFormError(message = "") {
+function setFormMessage(message = "", type = "error") {
   const formError = document.getElementById("formError");
-  if (!formError) return;
-
-  formError.textContent = message;
-  formError.classList.toggle("show", Boolean(message));
-
-  if (message) {
-    formError.style.background = "rgba(255, 102, 102, 0.12)";
-    formError.style.borderColor = "rgba(255, 102, 102, 0.2)";
-    formError.style.color = "#ffd0d0";
-  } else {
-    formError.style.background = "";
-    formError.style.borderColor = "";
-    formError.style.color = "";
+  if (!formError) {
+    return;
   }
+
+  const safeMessage = String(message || "").trim();
+  formError.textContent = safeMessage;
+  formError.classList.toggle("show", Boolean(safeMessage));
+  formError.classList.remove("form-error--danger", "form-error--success");
+
+  if (!safeMessage) {
+    return;
+  }
+
+  formError.classList.add(
+    type === "success" ? "form-error--success" : "form-error--danger"
+  );
+}
+
+function setFormError(message = "") {
+  setFormMessage(message, "error");
 }
 
 function setBusyState(isBusy) {
   const googleBtn = document.getElementById("googleSignInBtn");
-  if (!googleBtn) return;
+  if (!googleBtn) {
+    return;
+  }
 
   if (!googleBtn.dataset.originalText) {
     googleBtn.dataset.originalText = googleBtn.textContent.trim();
   }
 
-  googleBtn.disabled = isBusy;
+  googleBtn.disabled = Boolean(isBusy);
   googleBtn.textContent = isBusy
     ? "Please wait..."
     : googleBtn.dataset.originalText;
@@ -115,9 +127,10 @@ function getClientSecurityContext() {
   let behavior = {};
 
   try {
-    behavior = typeof getSecurityBehaviorPayload === "function"
-      ? getSecurityBehaviorPayload()
-      : {};
+    behavior =
+      typeof getSecurityBehaviorPayload === "function"
+        ? getSecurityBehaviorPayload()
+        : {};
   } catch (error) {
     console.warn("Security behavior payload failed:", error);
     behavior = {};
@@ -136,7 +149,7 @@ function getClientSecurityContext() {
 }
 
 async function callLoginAttemptApi(email, action, extra = {}) {
-  const res = await fetch("/api/login-attempt", {
+  const response = await fetch("/api/login-attempt", {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
@@ -148,9 +161,9 @@ async function callLoginAttemptApi(email, action, extra = {}) {
     })
   });
 
-  const data = await res.json().catch(() => ({}));
+  const data = await response.json().catch(() => ({}));
 
-  if (!res.ok || !data.success) {
+  if (!response.ok || !data.success) {
     throw new Error(data?.message || "Signup security check failed.");
   }
 
@@ -226,7 +239,7 @@ async function handleRedirectResultIfAny() {
       }
     });
 
-    goTo("home.html");
+    goTo(HOME_PAGE);
     return true;
   } catch (error) {
     const code = error?.code || "";
@@ -247,7 +260,10 @@ async function handleRedirectResultIfAny() {
     try {
       await signOut(auth);
     } catch (signOutError) {
-      console.warn("[Google Signup] redirect cleanup signOut failed:", signOutError);
+      console.warn(
+        "[Google Signup] redirect cleanup signOut failed:",
+        signOutError
+      );
     }
 
     fireAndForgetSecurityLog({
@@ -262,7 +278,10 @@ async function handleRedirectResultIfAny() {
 }
 
 async function handleGoogleSignup() {
-  if (googleInProgress) return;
+  if (googleInProgress) {
+    return;
+  }
+
   googleInProgress = true;
 
   let signedInUser = null;
@@ -274,7 +293,9 @@ async function handleGoogleSignup() {
     console.log("[Google Signup] clicked");
 
     if (!isAllowedGoogleAuthHost()) {
-      setFormError("Google sign-in is only available on the official Aethra domains.");
+      setFormError(
+        "Google sign-in is only available on the official Aethra domains."
+      );
       return;
     }
 
@@ -353,7 +374,7 @@ async function handleGoogleSignup() {
       }
     });
 
-    goTo("home.html");
+    goTo(HOME_PAGE);
   } catch (error) {
     console.error("[Google Signup] failed:", error);
 
