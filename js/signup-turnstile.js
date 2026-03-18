@@ -1,9 +1,14 @@
 const TURNSTILE_SITEKEY = "0x4AAAAAACqA_Z98nhvcobbI";
 
+const TURNSTILE_WAIT_INTERVAL_MS = 250;
+const TURNSTILE_MAX_WAIT_ATTEMPTS = 60;
+
 window.aethraTurnstile = {
   widgetId: null,
   token: "",
   rendered: false,
+  renderRequested: false,
+  isWaitingForApi: false,
 
   setToken(token) {
     this.token = token || "";
@@ -25,6 +30,13 @@ window.aethraTurnstile = {
 
   getToken() {
     return this.token || "";
+  },
+
+  showCaptchaError(message) {
+    const captchaError = document.getElementById("captchaError");
+    if (captchaError) {
+      captchaError.textContent = message || "";
+    }
   },
 
   reset() {
@@ -61,47 +73,111 @@ window.aethraTurnstile = {
       },
       "timeout-callback": () => {
         this.clearToken();
-        const captchaError = document.getElementById("captchaError");
-        if (captchaError) {
-          captchaError.textContent = "Captcha timed out. Please try again.";
-        }
+        this.showCaptchaError("Captcha timed out. Please try again.");
       },
       "error-callback": () => {
         this.clearToken();
-        const captchaError = document.getElementById("captchaError");
-        if (captchaError) {
-          captchaError.textContent =
-            "Captcha failed to load. Refresh the page and try again.";
-        }
+        this.showCaptchaError(
+          "Captcha failed to load. Refresh the page and try again."
+        );
       }
     });
 
     this.rendered = true;
-  }
-};
+    this.renderRequested = true;
+    this.showCaptchaError("");
+  },
 
-function waitForTurnstileAndRender() {
-  let attempts = 0;
-  const maxAttempts = 60;
-
-  const timer = window.setInterval(() => {
-    attempts += 1;
-
-    if (window.turnstile && typeof window.turnstile.render === "function") {
-      window.clearInterval(timer);
-      window.aethraTurnstile.render();
+  ensureRendered() {
+    if (this.rendered || this.renderRequested) {
       return;
     }
 
-    if (attempts >= maxAttempts) {
-      window.clearInterval(timer);
-      const captchaError = document.getElementById("captchaError");
-      if (captchaError) {
-        captchaError.textContent =
-          "Captcha could not be loaded. Please refresh the page.";
-      }
+    this.renderRequested = true;
+
+    if (window.turnstile && typeof window.turnstile.render === "function") {
+      this.render();
+      return;
     }
-  }, 250);
+
+    this.waitForApiAndRender();
+  },
+
+  waitForApiAndRender() {
+    if (this.isWaitingForApi) {
+      return;
+    }
+
+    this.isWaitingForApi = true;
+    let attempts = 0;
+
+    const timer = window.setInterval(() => {
+      attempts += 1;
+
+      if (window.turnstile && typeof window.turnstile.render === "function") {
+        window.clearInterval(timer);
+        this.isWaitingForApi = false;
+        this.render();
+        return;
+      }
+
+      if (attempts >= TURNSTILE_MAX_WAIT_ATTEMPTS) {
+        window.clearInterval(timer);
+        this.isWaitingForApi = false;
+        this.renderRequested = false;
+        this.showCaptchaError(
+          "Captcha could not be loaded. Please refresh the page."
+        );
+      }
+    }, TURNSTILE_WAIT_INTERVAL_MS);
+  }
+};
+
+function triggerTurnstileRender() {
+  window.aethraTurnstile.ensureRendered();
 }
 
-document.addEventListener("DOMContentLoaded", waitForTurnstileAndRender);
+function bindTurnstileLazyRender() {
+  const form = document.getElementById("signupForm");
+  const createAccountBtn = document.getElementById("createAccountBtn");
+
+  const interactionSelectors = [
+    "#name",
+    "#email",
+    "#password",
+    "#confirmPassword"
+  ];
+
+  interactionSelectors.forEach((selector) => {
+    const element = document.querySelector(selector);
+    if (!element) return;
+
+    element.addEventListener(
+      "focus",
+      () => {
+        triggerTurnstileRender();
+      },
+      { once: true }
+    );
+
+    element.addEventListener(
+      "pointerdown",
+      () => {
+        triggerTurnstileRender();
+      },
+      { once: true }
+    );
+  });
+
+  if (createAccountBtn) {
+    createAccountBtn.addEventListener("pointerdown", triggerTurnstileRender);
+  }
+
+  if (form) {
+    form.addEventListener("submit", () => {
+      triggerTurnstileRender();
+    });
+  }
+}
+
+document.addEventListener("DOMContentLoaded", bindTurnstileLazyRender);
