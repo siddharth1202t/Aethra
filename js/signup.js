@@ -50,10 +50,11 @@ function goTo(page) {
 function setFormError(message = "", type = "error") {
   if (!formError) return;
 
-  formError.textContent = String(message || "").trim();
-  formError.classList.toggle("show", Boolean(message));
+  const safeMessage = String(message || "").trim();
+  formError.textContent = safeMessage;
+  formError.classList.toggle("show", Boolean(safeMessage));
 
-  if (!message) {
+  if (!safeMessage) {
     formError.style.background = "";
     formError.style.borderColor = "";
     formError.style.color = "";
@@ -422,12 +423,13 @@ async function handleEmailSignup() {
     touchedFields.password = true;
     touchedFields.confirmPassword = true;
 
-    if (
-      !validateName() ||
-      !validateEmail() ||
-      !validatePassword() ||
-      !validateConfirmPassword()
-    ) {
+    const isValid =
+      validateName() &&
+      validateEmail() &&
+      validatePassword() &&
+      validateConfirmPassword();
+
+    if (!isValid) {
       return;
     }
 
@@ -511,29 +513,22 @@ confirmPasswordInput?.addEventListener("focus", () => {
 });
 
 nameInput?.addEventListener("input", () => {
-  if (touchedFields.name) {
-    validateName();
-  }
+  if (touchedFields.name) validateName();
 });
 
 emailInput?.addEventListener("input", () => {
-  if (touchedFields.email) {
-    validateEmail();
-  }
+  if (touchedFields.email) validateEmail();
 });
 
 passwordInput?.addEventListener("input", () => {
-  if (touchedFields.password) {
-    validatePassword();
-  }
-
+  if (touchedFields.password) validatePassword();
   if (touchedFields.confirmPassword || confirmPasswordInput?.value) {
     validateConfirmPassword();
   }
 });
 
 confirmPasswordInput?.addEventListener("input", () => {
-  if (touchedFields.confirmPassword) {
+  if (touchedFields.confirmPassword || confirmPasswordInput?.value) {
     validateConfirmPassword();
   }
 });
@@ -560,27 +555,13 @@ confirmPasswordInput?.addEventListener("blur", () => {
 
 /* ---------------- EVENTS ---------------- */
 
-if (signupBtn) {
-  signupBtn.addEventListener("click", (e) => {
-    e.preventDefault();
-  });
-}
-
 if (signupForm) {
   signupForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     e.stopPropagation();
 
     if (isSubmitting) return;
-
-    try {
-      await handleEmailSignup();
-    } catch (error) {
-      console.error("Unhandled signup submit error:", error);
-      setFormError("Something went wrong. Please try again.");
-      setBusyState(false);
-      isSubmitting = false;
-    }
+    await handleEmailSignup();
   });
 } else {
   console.error("signupForm not found");
