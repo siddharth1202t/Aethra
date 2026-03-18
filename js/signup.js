@@ -12,6 +12,7 @@ import { detectBotBehavior } from "./bot-detection.js";
 
 const auth = getAuth(app);
 const VERIFY_EMAIL_PAGE = "verify-email.html";
+const TURNSTILE_MANAGER_TIMEOUT_MS = 10000;
 
 /* ---------------- DOM ---------------- */
 
@@ -209,15 +210,18 @@ async function verifyTurnstileToken(token) {
   }
 }
 
-function getTurnstileToken() {
-  const managerToken =
-    window.aethraTurnstile &&
-    typeof window.aethraTurnstile.getToken === "function"
-      ? window.aethraTurnstile.getToken()
-      : "";
+function getTurnstileManager() {
+  return window.aethraTurnstile || null;
+}
 
-  if (managerToken) {
-    return managerToken;
+function getTurnstileToken() {
+  const manager = getTurnstileManager();
+
+  if (manager && typeof manager.getToken === "function") {
+    const managerToken = manager.getToken();
+    if (managerToken) {
+      return managerToken;
+    }
   }
 
   const hiddenTokenInput = document.getElementById("turnstileToken");
@@ -225,11 +229,10 @@ function getTurnstileToken() {
 }
 
 function resetTurnstile() {
-  if (
-    window.aethraTurnstile &&
-    typeof window.aethraTurnstile.reset === "function"
-  ) {
-    window.aethraTurnstile.reset();
+  const manager = getTurnstileManager();
+
+  if (manager && typeof manager.reset === "function") {
+    manager.reset();
     return;
   }
 
@@ -239,22 +242,56 @@ function resetTurnstile() {
   }
 }
 
-async function ensureTurnstileReady(timeout = 12000) {
+async function waitForTurnstileManager(timeout = TURNSTILE_MANAGER_TIMEOUT_MS) {
   const start = Date.now();
 
   while (Date.now() - start < timeout) {
-    const managerReady =
-      window.aethraTurnstile &&
-      typeof window.aethraTurnstile.getToken === "function";
+    const manager = getTurnstileManager();
 
-    if (managerReady) {
-      return true;
+    if (manager && typeof manager.getToken === "function") {
+      return manager;
     }
 
     await new Promise((resolve) => window.setTimeout(resolve, 150));
   }
 
   throw new Error("Turnstile manager did not initialize.");
+}
+
+async function ensureTurnstileRendered() {
+  const manager = await waitForTurnstileManager();
+
+  if (typeof manager.ensureRendered === "function") {
+    manager.ensureRendered();
+  }
+
+  return manager;
+}
+
+async function getVerifiedTurnstileToken() {
+  setFieldError(captchaError, "");
+
+  const manager = await ensureTurnstileRendered();
+  let token = getTurnstileToken();
+
+  if (token) {
+    return token;
+  }
+
+  setFieldError(
+    captchaError,
+    "Please complete the captcha before creating your account."
+  );
+
+  const container = document.getElementById("turnstile-container");
+  if (container) {
+    container.scrollIntoView({
+      behavior: "smooth",
+      block: "center"
+    });
+  }
+
+  throw new Error("Captcha missing");
 }
 
 /* ---------------- VALIDATION ---------------- */
@@ -397,15 +434,16 @@ function getClientSecurityContext() {
 
 /* ---------------- SIGNUP FLOW ---------------- */
 
-async function precheckSensitiveAction(token) {
-  if (!token) {
-    setFieldError(captchaError, "Please complete the captcha.");
-    throw new Error("Captcha missing");
-  }
-
+async function precheckSensitiveAction() {
+  const token = await getVerifiedTurnstileToken();
   const securityContext = getClientSecurityContext();
+
   await verifyTurnstileToken(token);
-  return securityContext;
+
+  return {
+    token,
+    securityContext
+  };
 }
 
 function mapSignupError(error) {
@@ -475,9 +513,8 @@ async function handleEmailSignup() {
     const email = normalizeEmail(emailInput?.value || "");
     const password = passwordInput?.value || "";
     const name = sanitizeUsername(nameInput?.value || "");
-    const token = getTurnstileToken();
 
-    const securityContext = await precheckSensitiveAction(token);
+    const { securityContext } = await precheckSensitiveAction();
 
     const credential = await createUserWithEmailAndPassword(
       auth,
@@ -502,6 +539,7 @@ async function handleEmailSignup() {
       }
     });
 
+    setFormSuccess("Account created. Redirecting...");
     goTo(VERIFY_EMAIL_PAGE);
   } catch (error) {
     console.error("Signup failed:", error);
@@ -629,7 +667,6 @@ async function initSignupPage() {
       setFormError("Registrations are temporarily disabled.");
     }
 
-    await ensureTurnstileReady();
     console.log("signup.js loaded");
   } catch (error) {
     console.error("Signup page init failed:", error);
