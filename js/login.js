@@ -22,6 +22,9 @@ provider.setCustomParameters({
 });
 
 const TURNSTILE_SITEKEY = "0x4AAAAAACqA_Z98nhvcobbI";
+const TURNSTILE_WAIT_INTERVAL_MS = 250;
+const TURNSTILE_MAX_WAIT_ATTEMPTS = 60;
+
 const HOME_PAGE = "home.html";
 const VERIFY_EMAIL_PAGE = "verify-email.html";
 
@@ -32,7 +35,7 @@ const ALLOWED_GOOGLE_AUTH_HOSTS = new Set([
 
 const form = document.getElementById("loginForm");
 const googleBtn = document.getElementById("googleLoginBtn");
-const loginBtn = document.querySelector(".login-btn");
+const loginBtn = document.getElementById("loginBtn") || document.querySelector(".login-btn");
 const forgotPasswordBtn = document.getElementById("forgotPasswordBtn");
 
 const emailInput = document.getElementById("email");
@@ -48,7 +51,6 @@ const touchedFields = {
   password: false
 };
 
-let widgetId = null;
 let isSubmitting = false;
 let containmentState = null;
 let eventsBound = false;
@@ -63,28 +65,6 @@ function goTo(page) {
 
 function isAllowedGoogleAuthHost() {
   return ALLOWED_GOOGLE_AUTH_HOSTS.has(window.location.hostname);
-}
-
-function waitForTurnstile(timeout = 10000) {
-  return new Promise((resolve, reject) => {
-    const start = Date.now();
-
-    function check() {
-      if (window.turnstile && typeof window.turnstile.render === "function") {
-        resolve();
-        return;
-      }
-
-      if (Date.now() - start > timeout) {
-        reject(new Error("Turnstile script did not load."));
-        return;
-      }
-
-      window.setTimeout(check, 100);
-    }
-
-    check();
-  });
 }
 
 function withTimeout(promise, ms, message) {
@@ -125,7 +105,8 @@ async function fetchContainmentState() {
       method: "GET",
       headers: {
         "Content-Type": "application/json"
-      }
+      },
+      cache: "no-store"
     });
 
     if (!response.ok) {
@@ -188,18 +169,220 @@ async function callLoginAttemptApi(email, action, extra = {}) {
   return data;
 }
 
+/* ---------------- TURNSTILE MANAGER ---------------- */
+
+window.aethraLoginTurnstile = {
+  widgetId: null,
+  token: "",
+  rendered: false,
+  renderRequested: false,
+  isWaitingForApi: false,
+
+  setToken(token) {
+    this.token = token || "";
+
+    const hiddenInput = document.getElementById("turnstileToken");
+    if (hiddenInput) {
+      hiddenInput.value = this.token;
+    }
+
+    if (this.token) {
+      clearCaptchaError();
+    }
+  },
+
+  clearToken() {
+    this.setToken("");
+  },
+
+  getToken() {
+    if (this.token) {
+      return this.token;
+    }
+
+    const hiddenInput = document.getElementById("turnstileToken");
+    return hiddenInput?.value || "";
+  },
+
+  reset() {
+    this.clearToken();
+
+    if (
+      this.widgetId !== null &&
+      window.turnstile &&
+      typeof window.turnstile.reset === "function"
+    ) {
+      window.turnstile.reset(this.widgetId);
+    }
+  },
+
+  render() {
+    const container = document.getElementById("turnstile-container");
+
+    if (!container || this.rendered) {
+      return;
+    }
+
+    if (!window.turnstile || typeof window.turnstile.render !== "function") {
+      return;
+    }
+
+    container.replaceChildren();
+
+    this.widgetId = window.turnstile.render(container, {
+      sitekey: TURNSTILE_SITEKEY,
+      theme: "dark",
+      size: "flexible",
+      retry: "auto",
+      "refresh-expired": "auto",
+      callback: (token) => {
+        this.setToken(token);
+      },
+      "error-callback": () => {
+        this.clearToken();
+        showCaptchaError("Captcha failed to load. Please refresh and try again.");
+      },
+      "expired-callback": () => {
+        this.clearToken();
+        showCaptchaError("Captcha expired. Please complete it again.");
+      },
+      "timeout-callback": () => {
+        this.clearToken();
+        showCaptchaError("Captcha timed out. Please try again.");
+      }
+    });
+
+    this.rendered = true;
+    this.renderRequested = true;
+    clearCaptchaError();
+  },
+
+  waitForApiAndRender() {
+    if (this.isWaitingForApi) {
+      return;
+    }
+
+    this.isWaitingForApi = true;
+    let attempts = 0;
+
+    const timer = window.setInterval(() => {
+      attempts += 1;
+
+      if (window.turnstile && typeof window.turnstile.render === "function") {
+        window.clearInterval(timer);
+        this.isWaitingForApi = false;
+        this.render();
+        return;
+      }
+
+      if (attempts >= TURNSTILE_MAX_WAIT_ATTEMPTS) {
+        window.clearInterval(timer);
+        this.isWaitingForApi = false;
+        this.renderRequested = false;
+        showCaptchaError("Captcha could not be loaded. Please refresh the page.");
+      }
+    }, TURNSTILE_WAIT_INTERVAL_MS);
+  },
+
+  ensureRendered() {
+    if (this.rendered || this.renderRequested) {
+      return;
+    }
+
+    this.renderRequested = true;
+
+    if (window.turnstile && typeof window.turnstile.render === "function") {
+      this.render();
+      return;
+    }
+
+    this.waitForApiAndRender();
+  }
+};
+
+function getTurnstileManager() {
+  return window.aethraLoginTurnstile || null;
+}
+
 function getTurnstileToken() {
-  if (widgetId === null || !window.turnstile) {
-    return "";
+  const manager = getTurnstileManager();
+
+  if (manager && typeof manager.getToken === "function") {
+    return manager.getToken();
   }
 
-  return window.turnstile.getResponse(widgetId) || "";
+  const hiddenInput = document.getElementById("turnstileToken");
+  return hiddenInput?.value || "";
 }
 
 function resetTurnstile() {
-  if (widgetId !== null && window.turnstile) {
-    window.turnstile.reset(widgetId);
+  const manager = getTurnstileManager();
+
+  if (manager && typeof manager.reset === "function") {
+    manager.reset();
+    return;
   }
+
+  const hiddenInput = document.getElementById("turnstileToken");
+  if (hiddenInput) {
+    hiddenInput.value = "";
+  }
+}
+
+function triggerTurnstileRender() {
+  const manager = getTurnstileManager();
+  if (manager && typeof manager.ensureRendered === "function") {
+    manager.ensureRendered();
+  }
+}
+
+function bindTurnstileLazyRender() {
+  const interactionElements = [
+    emailInput,
+    passwordInput
+  ].filter(Boolean);
+
+  interactionElements.forEach((element) => {
+    element.addEventListener(
+      "focus",
+      () => {
+        triggerTurnstileRender();
+      },
+      { once: true }
+    );
+
+    element.addEventListener(
+      "pointerdown",
+      () => {
+        triggerTurnstileRender();
+      },
+      { once: true }
+    );
+  });
+
+  loginBtn?.addEventListener("pointerdown", triggerTurnstileRender);
+  forgotPasswordBtn?.addEventListener("pointerdown", triggerTurnstileRender);
+}
+
+async function ensureCaptchaSolved(message = "Please complete the captcha first.") {
+  triggerTurnstileRender();
+
+  const token = getTurnstileToken();
+  if (token) {
+    return token;
+  }
+
+  showCaptchaError(message);
+
+  const container = document.getElementById("turnstile-container");
+  if (container) {
+    container.scrollIntoView({
+      behavior: "smooth",
+      block: "center"
+    });
+  }
+
+  throw new Error("Captcha missing");
 }
 
 function isMobileDevice() {
@@ -274,6 +457,7 @@ function clearFieldState(input, errorEl) {
 
   errorEl.textContent = "";
   input.classList.remove("input-invalid", "input-valid");
+  input.removeAttribute("aria-invalid");
 }
 
 function setFieldError(input, errorEl, message) {
@@ -284,6 +468,7 @@ function setFieldError(input, errorEl, message) {
   errorEl.textContent = String(message || "").trim();
   input.classList.add("input-invalid");
   input.classList.remove("input-valid");
+  input.setAttribute("aria-invalid", "true");
 }
 
 function setFieldValid(input, errorEl) {
@@ -294,6 +479,7 @@ function setFieldValid(input, errorEl) {
   errorEl.textContent = "";
   input.classList.remove("input-invalid");
   input.classList.add("input-valid");
+  input.setAttribute("aria-invalid", "false");
 }
 
 function setFormMessage(message = "", type = "error") {
@@ -470,7 +656,7 @@ function getClientSecurityContext() {
   };
 }
 
-async function precheckSensitiveAction(email, token, actionLabel = "login_check") {
+async function precheckSensitiveAction(email, actionLabel = "login_check") {
   const securityContext = getClientSecurityContext();
 
   const checkResult = await callLoginAttemptApi(email, "check", {
@@ -484,35 +670,20 @@ async function precheckSensitiveAction(email, token, actionLabel = "login_check"
     );
   }
 
-  if (!token) {
-    await safeSecurityLog({
-      type: "captcha_missing",
-      message: `User attempted ${actionLabel} without captcha`,
-      email,
-      metadata: {
-        behavior: securityContext.behavior || {}
-      }
-    });
-
-    showCaptchaError("Please complete the captcha first.");
-    throw new Error("Captcha missing");
-  }
-
+  const token = await ensureCaptchaSolved("Please complete the captcha first.");
   await verifyTurnstileToken(token, securityContext.behavior || {});
+
   return securityContext;
 }
 
 async function handleRedirectResultIfAny() {
   try {
-    console.log("[Google Login] handleRedirectResultIfAny:start");
     const result = await getRedirectResult(auth);
 
     if (!result?.user) {
-      console.log("[Google Login] handleRedirectResultIfAny:no redirect result");
       return false;
     }
 
-    console.log("[Google Login] handleRedirectResultIfAny:user found", result.user.email || "");
     const user = result.user;
     const securityContext = getClientSecurityContext();
 
@@ -597,7 +768,6 @@ async function handleEmailLogin() {
 
   const email = normalizeEmail(emailInput?.value || "");
   const password = passwordInput?.value || "";
-  const token = getTurnstileToken();
 
   if (emailInput) {
     emailInput.value = email;
@@ -609,7 +779,7 @@ async function handleEmailLogin() {
     setLoading(loginBtn, "Logging in...");
     clearCaptchaError();
 
-    securityContext = await precheckSensitiveAction(email, token, "email_login");
+    securityContext = await precheckSensitiveAction(email, "email_login");
 
     const userCredential = await signInWithEmailAndPassword(auth, email, password);
     const user = userCredential.user;
@@ -840,14 +1010,13 @@ async function handleForgotPassword() {
     return;
   }
 
-  const token = getTurnstileToken();
   let securityContext = {};
 
   try {
     setLoading(forgotPasswordBtn, "Sending...");
     clearCaptchaError();
 
-    securityContext = await precheckSensitiveAction(email, token, "password_reset");
+    securityContext = await precheckSensitiveAction(email, "password_reset");
 
     await sendPasswordResetEmail(auth, email);
 
@@ -885,38 +1054,12 @@ async function handleForgotPassword() {
   }
 }
 
-async function initTurnstile() {
-  await waitForTurnstile();
-
-  const container = document.getElementById("turnstile-container");
-  if (!container) {
-    throw new Error("Turnstile container not found.");
-  }
-
-  container.replaceChildren();
-
-  widgetId = window.turnstile.render("#turnstile-container", {
-    sitekey: TURNSTILE_SITEKEY,
-    theme: "dark",
-    size: "flexible",
-    retry: "auto",
-    "refresh-expired": "auto",
-    callback() {
-      clearCaptchaError();
-    },
-    "error-callback"() {
-      showCaptchaError("Captcha failed to load. Please refresh and try again.");
-    },
-    "expired-callback"() {
-      showCaptchaError("Captcha expired. Please complete it again.");
-    }
-  });
-}
-
 function bindEvents() {
   if (eventsBound) {
     return;
   }
+
+  bindTurnstileLazyRender();
 
   emailInput?.addEventListener("focus", () => {
     touchedFields.email = true;
@@ -955,6 +1098,7 @@ function bindEvents() {
 
   form?.addEventListener("submit", async (event) => {
     event.preventDefault();
+    event.stopPropagation();
     await handleEmailLogin();
   });
 
@@ -975,7 +1119,6 @@ async function initLoginPage() {
     bindEvents();
 
     containmentState = await fetchContainmentState();
-    await initTurnstile();
     await handleRedirectResultIfAny();
   } catch (error) {
     console.error("Page init failed:", error);
@@ -986,7 +1129,7 @@ async function initLoginPage() {
 }
 
 if (document.readyState === "loading") {
-  window.addEventListener("load", initLoginPage, { once: true });
+  document.addEventListener("DOMContentLoaded", initLoginPage, { once: true });
 } else {
   initLoginPage();
 }
