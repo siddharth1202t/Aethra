@@ -21,6 +21,7 @@ function createAmbientScene(targetCanvas) {
   let resizeTimer = null;
   let cssWidth = 0;
   let cssHeight = 0;
+  let lastTime = performance.now();
 
   const starCount = isHomeScene ? 120 : 90;
   const petalCount = isHomeScene ? 18 : 0;
@@ -177,14 +178,11 @@ function createAmbientScene(targetCanvas) {
     ctx.shadowBlur = 0;
   }
 
-  let lastTime = performance.now();
-
   function draw(time) {
     const deltaSeconds = Math.min((time - lastTime) / 1000, 0.05);
     lastTime = time;
 
     ctx.clearRect(0, 0, cssWidth, cssHeight);
-
     drawStars(time);
 
     if (isHomeScene) {
@@ -220,7 +218,6 @@ function createAmbientScene(targetCanvas) {
     if (animationFrameId !== null) {
       window.cancelAnimationFrame(animationFrameId);
     }
-
     window.clearTimeout(resizeTimer);
   });
 
@@ -228,9 +225,11 @@ function createAmbientScene(targetCanvas) {
 }
 
 if (document.readyState === "loading") {
-  document.addEventListener("DOMContentLoaded", () => createAmbientScene(canvas), {
-    once: true
-  });
+  document.addEventListener(
+    "DOMContentLoaded",
+    () => createAmbientScene(canvas),
+    { once: true }
+  );
 } else {
   createAmbientScene(canvas);
 }
