@@ -21,6 +21,10 @@ provider.setCustomParameters({
   prompt: "select_account"
 });
 
+const TURNSTILE_SITEKEY = "0x4AAAAAACqA_Z98nhvcobbI";
+const HOME_PAGE = "home.html";
+const VERIFY_EMAIL_PAGE = "verify-email.html";
+
 const ALLOWED_GOOGLE_AUTH_HOSTS = new Set([
   "aethra-hb2h.vercel.app",
   "aethra-gules.vercel.app"
@@ -59,15 +63,19 @@ function waitForTurnstile(timeout = 10000) {
   return new Promise((resolve, reject) => {
     const start = Date.now();
 
-    const check = () => {
+    function check() {
       if (window.turnstile && typeof window.turnstile.render === "function") {
         resolve();
-      } else if (Date.now() - start > timeout) {
-        reject(new Error("Turnstile script did not load."));
-      } else {
-        setTimeout(check, 100);
+        return;
       }
-    };
+
+      if (Date.now() - start > timeout) {
+        reject(new Error("Turnstile script did not load."));
+        return;
+      }
+
+      window.setTimeout(check, 100);
+    }
 
     check();
   });
@@ -75,17 +83,17 @@ function waitForTurnstile(timeout = 10000) {
 
 function withTimeout(promise, ms, message) {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
+    const timer = window.setTimeout(() => {
       reject(new Error(message || "Request timed out."));
     }, ms);
 
     promise
       .then((value) => {
-        clearTimeout(timer);
+        window.clearTimeout(timer);
         resolve(value);
       })
       .catch((error) => {
-        clearTimeout(timer);
+        window.clearTimeout(timer);
         reject(error);
       });
   });
@@ -131,7 +139,7 @@ function isReadOnlyMode(state) {
 }
 
 async function verifyTurnstileToken(token, behavior = {}) {
-  const res = await fetch("/api/verify-turnstile", {
+  const response = await fetch("/api/verify-turnstile", {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
@@ -143,9 +151,9 @@ async function verifyTurnstileToken(token, behavior = {}) {
     })
   });
 
-  const data = await res.json().catch(() => ({}));
+  const data = await response.json().catch(() => ({}));
 
-  if (!res.ok || !data.success) {
+  if (!response.ok || !data.success) {
     throw new Error(data?.message || "Captcha verification failed. Please try again.");
   }
 
@@ -153,7 +161,7 @@ async function verifyTurnstileToken(token, behavior = {}) {
 }
 
 async function callLoginAttemptApi(email, action, extra = {}) {
-  const res = await fetch("/api/login-attempt", {
+  const response = await fetch("/api/login-attempt", {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
@@ -165,9 +173,9 @@ async function callLoginAttemptApi(email, action, extra = {}) {
     })
   });
 
-  const data = await res.json().catch(() => ({}));
+  const data = await response.json().catch(() => ({}));
 
-  if (!res.ok || !data.success) {
+  if (!response.ok || !data.success) {
     throw new Error(data?.message || "Login security check failed.");
   }
 
@@ -175,7 +183,10 @@ async function callLoginAttemptApi(email, action, extra = {}) {
 }
 
 function getTurnstileToken() {
-  if (widgetId === null || !window.turnstile) return "";
+  if (widgetId === null || !window.turnstile) {
+    return "";
+  }
+
   return window.turnstile.getResponse(widgetId) || "";
 }
 
@@ -202,21 +213,25 @@ function isLockedMessage(message) {
 }
 
 function setTemporaryCooldown(button, ms = 3000) {
-  if (!button) return;
+  if (!button) {
+    return;
+  }
 
   const originalText = button.dataset.originalText || button.textContent;
   button.dataset.originalText = originalText;
   button.disabled = true;
   button.textContent = "Please wait...";
 
-  setTimeout(() => {
+  window.setTimeout(() => {
     button.disabled = false;
     button.textContent = originalText;
   }, ms);
 }
 
 function setLoading(button, loadingText = "Please wait...") {
-  if (!button) return;
+  if (!button) {
+    return;
+  }
 
   if (!button.dataset.originalText) {
     button.dataset.originalText = button.textContent;
@@ -227,7 +242,9 @@ function setLoading(button, loadingText = "Please wait...") {
 }
 
 function clearLoading(button) {
-  if (!button) return;
+  if (!button) {
+    return;
+  }
 
   button.disabled = false;
   button.textContent = button.dataset.originalText || button.textContent;
@@ -245,50 +262,60 @@ function formatRemainingMinutes(ms) {
 }
 
 function clearFieldState(input, errorEl) {
-  if (!input || !errorEl) return;
+  if (!input || !errorEl) {
+    return;
+  }
+
   errorEl.textContent = "";
   input.classList.remove("input-invalid", "input-valid");
 }
 
 function setFieldError(input, errorEl, message) {
-  if (!input || !errorEl) return;
+  if (!input || !errorEl) {
+    return;
+  }
+
   errorEl.textContent = message;
   input.classList.add("input-invalid");
   input.classList.remove("input-valid");
 }
 
 function setFieldValid(input, errorEl) {
-  if (!input || !errorEl) return;
+  if (!input || !errorEl) {
+    return;
+  }
+
   errorEl.textContent = "";
   input.classList.remove("input-invalid");
   input.classList.add("input-valid");
 }
 
-function showFormError(message) {
-  if (!formError) return;
+function setFormMessage(message, type = "error") {
+  if (!formError) {
+    return;
+  }
+
   formError.textContent = message;
   formError.classList.add("show");
-  formError.style.background = "rgba(255, 102, 102, 0.12)";
-  formError.style.borderColor = "rgba(255, 102, 102, 0.2)";
-  formError.style.color = "#ffd0d0";
+  formError.classList.remove("form-error--success", "form-error--danger");
+  formError.classList.add(type === "success" ? "form-error--success" : "form-error--danger");
+}
+
+function showFormError(message) {
+  setFormMessage(message, "error");
 }
 
 function showFormSuccess(message) {
-  if (!formError) return;
-  formError.textContent = message;
-  formError.classList.add("show");
-  formError.style.background = "rgba(125, 255, 179, 0.12)";
-  formError.style.borderColor = "rgba(125, 255, 179, 0.2)";
-  formError.style.color = "#d4ffe6";
+  setFormMessage(message, "success");
 }
 
 function clearFormError() {
-  if (!formError) return;
+  if (!formError) {
+    return;
+  }
+
   formError.textContent = "";
-  formError.classList.remove("show");
-  formError.style.background = "";
-  formError.style.borderColor = "";
-  formError.style.color = "";
+  formError.classList.remove("show", "form-error--success", "form-error--danger");
 }
 
 function showCaptchaError(message) {
@@ -312,19 +339,29 @@ function clearAllErrors() {
 
 function validateEmail(showUI = true) {
   const email = normalizeEmail(emailInput?.value || "");
-  if (emailInput) emailInput.value = email;
+
+  if (emailInput) {
+    emailInput.value = email;
+  }
 
   if (!email) {
-    if (showUI) setFieldError(emailInput, emailError, "Please enter your email.");
+    if (showUI) {
+      setFieldError(emailInput, emailError, "Please enter your email.");
+    }
     return false;
   }
 
   if (!isValidEmail(email)) {
-    if (showUI) setFieldError(emailInput, emailError, "Please enter a valid email address.");
+    if (showUI) {
+      setFieldError(emailInput, emailError, "Please enter a valid email address.");
+    }
     return false;
   }
 
-  if (showUI) setFieldValid(emailInput, emailError);
+  if (showUI) {
+    setFieldValid(emailInput, emailError);
+  }
+
   return true;
 }
 
@@ -332,11 +369,16 @@ function validatePassword(showUI = true) {
   const password = passwordInput?.value || "";
 
   if (!password) {
-    if (showUI) setFieldError(passwordInput, passwordError, "Please enter your password.");
+    if (showUI) {
+      setFieldError(passwordInput, passwordError, "Please enter your password.");
+    }
     return false;
   }
 
-  if (showUI) setFieldValid(passwordInput, passwordError);
+  if (showUI) {
+    setFieldValid(passwordInput, passwordError);
+  }
+
   return true;
 }
 
@@ -385,20 +427,21 @@ function getFriendlyAuthMessage(error) {
 }
 
 function redirectToHome() {
-  goTo("home.html");
+  goTo(HOME_PAGE);
 }
 
 function redirectToVerifyEmail() {
-  goTo("verify-email.html");
+  goTo(VERIFY_EMAIL_PAGE);
 }
 
 function getClientSecurityContext() {
   let behavior = {};
 
   try {
-    behavior = typeof getSecurityBehaviorPayload === "function"
-      ? getSecurityBehaviorPayload()
-      : {};
+    behavior =
+      typeof getSecurityBehaviorPayload === "function"
+        ? getSecurityBehaviorPayload()
+        : {};
   } catch (error) {
     console.warn("Security behavior payload failed:", error);
     behavior = {};
@@ -529,9 +572,11 @@ async function handleRedirectResultIfAny() {
 }
 
 async function handleEmailLogin() {
-  if (isSubmitting) return;
-  isSubmitting = true;
+  if (isSubmitting) {
+    return;
+  }
 
+  isSubmitting = true;
   clearAllErrors();
 
   const isEmailValid = validateEmail(true);
@@ -636,9 +681,11 @@ async function handleEmailLogin() {
 }
 
 async function handleGoogleLogin() {
-  if (isSubmitting) return;
-  isSubmitting = true;
+  if (isSubmitting) {
+    return;
+  }
 
+  isSubmitting = true;
   clearAllErrors();
 
   let securityContext = {};
@@ -766,9 +813,11 @@ async function handleGoogleLogin() {
 }
 
 async function handleForgotPassword() {
-  if (isSubmitting) return;
-  isSubmitting = true;
+  if (isSubmitting) {
+    return;
+  }
 
+  isSubmitting = true;
   clearAllErrors();
 
   if (isReadOnlyMode(containmentState)) {
@@ -778,6 +827,7 @@ async function handleForgotPassword() {
   }
 
   const email = normalizeEmail(emailInput?.value || "");
+
   if (emailInput) {
     emailInput.value = email;
   }
@@ -849,10 +899,10 @@ async function initTurnstile() {
     throw new Error("Turnstile container not found.");
   }
 
-  container.innerHTML = "";
+  container.replaceChildren();
 
   widgetId = window.turnstile.render("#turnstile-container", {
-    sitekey: "0x4AAAAAACqA_Z98nhvcobbI",
+    sitekey: TURNSTILE_SITEKEY,
     theme: "dark",
     size: "flexible",
     retry: "auto",
@@ -869,43 +919,47 @@ async function initTurnstile() {
   });
 }
 
-emailInput?.addEventListener("input", () => {
-  clearFormError();
-  clearCaptchaError();
+function bindEvents() {
+  emailInput?.addEventListener("input", () => {
+    clearFormError();
+    clearCaptchaError();
 
-  if (emailInput.value.trim()) {
-    validateEmail(true);
-  } else {
-    clearFieldState(emailInput, emailError);
-  }
-});
+    if (emailInput.value.trim()) {
+      validateEmail(true);
+    } else {
+      clearFieldState(emailInput, emailError);
+    }
+  });
 
-passwordInput?.addEventListener("input", () => {
-  clearFormError();
+  passwordInput?.addEventListener("input", () => {
+    clearFormError();
 
-  if (passwordInput.value.trim()) {
-    validatePassword(true);
-  } else {
-    clearFieldState(passwordInput, passwordError);
-  }
-});
+    if (passwordInput.value.trim()) {
+      validatePassword(true);
+    } else {
+      clearFieldState(passwordInput, passwordError);
+    }
+  });
 
-form?.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  await handleEmailLogin();
-});
+  form?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await handleEmailLogin();
+  });
 
-googleBtn?.addEventListener("click", async () => {
-  await handleGoogleLogin();
-});
+  googleBtn?.addEventListener("click", async () => {
+    await handleGoogleLogin();
+  });
 
-forgotPasswordBtn?.addEventListener("click", async () => {
-  await handleForgotPassword();
-});
+  forgotPasswordBtn?.addEventListener("click", async () => {
+    await handleForgotPassword();
+  });
+}
 
 window.addEventListener("load", async () => {
   try {
     setButtonsDisabled(true);
+    bindEvents();
+
     console.log("[Google Login] page load:start");
 
     containmentState = await fetchContainmentState();
