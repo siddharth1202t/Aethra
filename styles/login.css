@@ -29,13 +29,13 @@ body {
   min-height: 100vh;
   overflow-x: hidden;
   overflow-y: auto;
+  position: relative;
   color: var(--text);
   background:
     radial-gradient(circle at 15% 20%, rgba(127, 90, 255, 0.22), transparent 22%),
     radial-gradient(circle at 85% 25%, rgba(93, 228, 255, 0.14), transparent 20%),
     radial-gradient(circle at 50% 85%, rgba(167, 92, 255, 0.14), transparent 24%),
     linear-gradient(135deg, var(--bg-1), var(--bg-2) 45%, var(--bg-3) 75%, #0b0218);
-  position: relative;
 }
 
 .stars-canvas {
@@ -60,11 +60,11 @@ body {
 }
 
 .side-character {
+  position: relative;
+  overflow: hidden;
   height: 72vh;
   min-height: 460px;
   border-radius: 28px;
-  overflow: hidden;
-  position: relative;
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(255, 255, 255, 0.09);
   backdrop-filter: blur(16px);
@@ -72,11 +72,11 @@ body {
 }
 
 .side-character img {
+  display: block;
   width: 100%;
   height: 100%;
   object-fit: cover;
   object-position: center top;
-  display: block;
   filter: saturate(1.08) brightness(0.88);
 }
 
@@ -95,16 +95,16 @@ body {
 }
 
 .side-label h3 {
-  font-size: 1.7rem;
   margin-bottom: 6px;
+  font-size: 1.7rem;
   letter-spacing: 1px;
 }
 
 .side-label p {
-  font-size: 0.95rem;
-  color: var(--muted);
-  line-height: 1.5;
   max-width: 180px;
+  font-size: 0.95rem;
+  line-height: 1.5;
+  color: var(--muted);
 }
 
 .center-wrap {
@@ -113,34 +113,44 @@ body {
 }
 
 .login-card {
+  position: relative;
+  overflow: hidden;
   width: min(460px, 100%);
   padding: 38px 32px;
   border-radius: 28px;
+  text-align: center;
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.04));
   border: 1px solid rgba(255, 255, 255, 0.1);
   backdrop-filter: blur(22px);
   box-shadow: var(--shadow);
-  text-align: center;
-  position: relative;
-  overflow: hidden;
 }
 
 .login-card::before {
   content: "";
   position: absolute;
   inset: 0;
-  background: radial-gradient(circle at top, rgba(138, 108, 255, 0.14), transparent 40%);
   pointer-events: none;
+  background: radial-gradient(circle at top, rgba(138, 108, 255, 0.14), transparent 40%);
+}
+
+.back-link,
+.badge,
+h1,
+.subtext,
+.auth-divider,
+.google-btn,
+.bottom-text,
+#loginForm {
+  position: relative;
+  z-index: 1;
 }
 
 .back-link {
   display: inline-block;
   margin-bottom: 16px;
-  color: var(--muted);
   font-size: 0.95rem;
+  color: var(--muted);
   text-decoration: none;
-  position: relative;
-  z-index: 1;
 }
 
 .back-link:hover {
@@ -149,59 +159,48 @@ body {
 
 .badge {
   display: inline-flex;
+  margin-bottom: 18px;
   padding: 9px 14px;
   border-radius: 999px;
+  font-size: 0.88rem;
+  color: #ddd4ff;
   background: rgba(138, 108, 255, 0.12);
   border: 1px solid rgba(255, 255, 255, 0.08);
-  color: #ddd4ff;
-  font-size: 0.88rem;
-  margin-bottom: 18px;
-  position: relative;
-  z-index: 1;
 }
 
 h1 {
-  font-size: 2.3rem;
   margin-bottom: 10px;
-  position: relative;
-  z-index: 1;
+  font-size: 2.3rem;
 }
 
 .subtext {
-  color: var(--muted);
+  margin-bottom: 24px;
   font-size: 1rem;
   line-height: 1.7;
-  margin-bottom: 24px;
-  position: relative;
-  z-index: 1;
-}
-
-#loginForm {
-  position: relative;
-  z-index: 1;
+  color: var(--muted);
 }
 
 .field {
-  text-align: left;
   margin-bottom: 14px;
+  text-align: left;
 }
 
 .field label {
   display: block;
+  margin-bottom: 8px;
   font-size: 0.92rem;
   color: rgba(240, 238, 255, 0.88);
-  margin-bottom: 8px;
 }
 
 .field input {
   width: 100%;
   padding: 14px 15px;
+  font-size: 0.98rem;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.06);
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 14px;
-  background: rgba(255, 255, 255, 0.06);
-  color: #fff;
   outline: none;
-  font-size: 0.98rem;
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
@@ -229,26 +228,36 @@ h1 {
   min-height: 18px;
   margin-top: 7px;
   font-size: 0.84rem;
-  color: var(--error);
   line-height: 1.4;
   text-align: left;
+  color: var(--error);
 }
 
 .form-error {
   display: none;
   margin: 0 0 14px;
   padding: 12px 14px;
+  border: 1px solid transparent;
   border-radius: 12px;
-  background: rgba(255, 102, 102, 0.12);
-  border: 1px solid rgba(255, 102, 102, 0.2);
-  color: #ffd0d0;
   font-size: 0.9rem;
-  text-align: left;
   line-height: 1.5;
+  text-align: left;
 }
 
 .form-error.show {
   display: block;
+}
+
+.form-error--danger {
+  background: rgba(255, 102, 102, 0.12);
+  border-color: rgba(255, 102, 102, 0.2);
+  color: #ffd0d0;
+}
+
+.form-error--success {
+  background: rgba(125, 255, 179, 0.12);
+  border-color: rgba(125, 255, 179, 0.2);
+  color: #d4ffe6;
 }
 
 .forgot-row {
@@ -258,12 +267,12 @@ h1 {
 }
 
 .forgot-btn {
+  padding: 0;
+  font-size: 0.9rem;
+  color: #b79cff;
   background: none;
   border: none;
-  color: #b79cff;
-  font-size: 0.9rem;
   cursor: pointer;
-  padding: 0;
 }
 
 .forgot-btn:hover {
@@ -271,33 +280,32 @@ h1 {
 }
 
 .captcha-wrap {
-  margin: 18px 0 6px;
-  width: 100%;
-  min-height: 70px;
   display: flex;
   justify-content: center;
   align-items: center;
+  width: 100%;
+  min-height: 70px;
+  margin: 18px 0 6px;
   overflow: hidden;
-  transform: none;
 }
 
 #turnstile-container {
-  width: 100%;
   display: flex;
   justify-content: center;
+  width: 100%;
 }
 
 .login-btn {
   width: 100%;
+  margin-top: 8px;
   padding: 15px 18px;
+  font-size: 1rem;
+  font-weight: 700;
+  color: #fff;
+  background: linear-gradient(135deg, #7b61ff, #9a7cff);
   border: none;
   border-radius: 16px;
-  background: linear-gradient(135deg, #7b61ff, #9a7cff);
-  color: #fff;
-  font-weight: 700;
-  font-size: 1rem;
   cursor: pointer;
-  margin-top: 8px;
   box-shadow: 0 10px 35px rgba(123, 97, 255, 0.38);
   transition: transform 0.25s ease, box-shadow 0.25s ease, opacity 0.25s ease;
 }
@@ -319,10 +327,8 @@ h1 {
   align-items: center;
   justify-content: center;
   margin: 18px 0;
-  color: var(--muted);
   font-size: 14px;
-  position: relative;
-  z-index: 1;
+  color: var(--muted);
 }
 
 .auth-divider::before,
@@ -330,27 +336,25 @@ h1 {
   content: "";
   flex: 1;
   height: 1px;
-  background: rgba(255, 255, 255, 0.15);
   margin: 0 10px;
+  background: rgba(255, 255, 255, 0.15);
 }
 
 .google-btn {
-  width: 100%;
-  padding: 14px 16px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 14px;
-  background: #fff;
-  color: #111;
-  font-weight: 700;
-  font-size: 0.98rem;
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 10px;
+  width: 100%;
+  padding: 14px 16px;
+  font-size: 0.98rem;
+  font-weight: 700;
+  color: #111;
+  background: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 14px;
   cursor: pointer;
   transition: transform 0.25s ease, box-shadow 0.25s ease, opacity 0.25s ease;
-  position: relative;
-  z-index: 1;
 }
 
 .google-btn:hover {
@@ -360,16 +364,14 @@ h1 {
 
 .bottom-text {
   margin-top: 18px;
-  color: var(--muted);
   font-size: 0.95rem;
-  position: relative;
-  z-index: 1;
+  color: var(--muted);
 }
 
 .bottom-text a {
+  font-weight: 600;
   color: #b79cff;
   text-decoration: none;
-  font-weight: 600;
 }
 
 .bottom-text a:hover {
@@ -387,10 +389,6 @@ h1 {
 }
 
 @media (max-width: 520px) {
-  body {
-    overflow-y: auto;
-  }
-
   .page {
     padding: 16px;
   }
