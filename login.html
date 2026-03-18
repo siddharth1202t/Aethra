@@ -2,8 +2,12 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+  />
   <title>Aethra Login</title>
+  <link rel="icon" type="image/png" href="images/favicon.png" />
   <link rel="stylesheet" href="styles/login.css" />
 </head>
 <body>
@@ -11,7 +15,7 @@
 
   <div class="page">
     <div class="side-character">
-      <img src="images/character-left.png" alt="Akira" />
+      <img src="images/character-left.png" alt="Akira" loading="lazy" />
       <div class="side-label">
         <h3>AKIRA</h3>
         <p>Mysterious, analytical, and always watching the world quietly.</p>
@@ -34,27 +38,35 @@
             <label for="email">Email</label>
             <input
               id="email"
+              name="email"
               type="email"
               placeholder="Enter your email"
               required
+              maxlength="120"
               autocomplete="email"
               inputmode="email"
+              autocapitalize="off"
               spellcheck="false"
+              aria-describedby="emailError"
             />
-            <small id="emailError" class="error-text"></small>
+            <small id="emailError" class="error-text" aria-live="polite"></small>
           </div>
 
           <div class="field">
             <label for="password">Password</label>
             <input
               id="password"
+              name="password"
               type="password"
               placeholder="Enter your password"
               required
+              minlength="8"
+              maxlength="128"
               autocomplete="current-password"
               spellcheck="false"
+              aria-describedby="passwordError"
             />
-            <small id="passwordError" class="error-text"></small>
+            <small id="passwordError" class="error-text" aria-live="polite"></small>
           </div>
 
           <div class="forgot-row">
@@ -64,9 +76,18 @@
           <div class="captcha-wrap">
             <div id="turnstile-container"></div>
           </div>
-          <small id="captchaError" class="error-text"></small>
 
-          <button class="login-btn" type="submit">Login</button>
+          <input
+            type="hidden"
+            id="turnstileToken"
+            name="turnstileToken"
+            value=""
+          />
+          <small id="captchaError" class="error-text" aria-live="polite"></small>
+
+          <button class="login-btn" id="loginBtn" type="submit">
+            Login
+          </button>
         </form>
 
         <div class="auth-divider">
@@ -74,7 +95,13 @@
         </div>
 
         <button type="button" id="googleLoginBtn" class="google-btn">
-          <img src="images/google-icon.svg" alt="Google" width="20" height="20" />
+          <img
+            src="images/google-icon.svg"
+            alt="Google"
+            width="20"
+            height="20"
+            loading="lazy"
+          />
           <span>Continue with Google</span>
         </button>
 
@@ -85,7 +112,7 @@
     </div>
 
     <div class="side-character">
-      <img src="images/character-right.png" alt="Luna" />
+      <img src="images/character-right.png" alt="Luna" loading="lazy" />
       <div class="side-label">
         <h3>LUNA</h3>
         <p>Warm, supportive, and emotionally aware in every conversation.</p>
@@ -93,9 +120,13 @@
     </div>
   </div>
 
-  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit" defer></script>
+  <script
+    src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit"
+    async
+    defer
+  ></script>
+  <script src="js/stars-canvas.js" defer></script>
   <script type="module" src="js/login-page.js"></script>
   <script type="module" src="js/login.js"></script>
-  <script src="js/stars-canvas.js" defer></script>
 </body>
 </html>
