@@ -43,9 +43,15 @@ const passwordError = document.getElementById("passwordError");
 const captchaError = document.getElementById("captchaError");
 const formError = document.getElementById("formError");
 
+const touchedFields = {
+  email: false,
+  password: false
+};
+
 let widgetId = null;
 let isSubmitting = false;
 let containmentState = null;
+let eventsBound = false;
 
 function safeString(value, maxLength = 500) {
   return String(value || "").trim().slice(0, maxLength);
@@ -275,7 +281,7 @@ function setFieldError(input, errorEl, message) {
     return;
   }
 
-  errorEl.textContent = message;
+  errorEl.textContent = String(message || "").trim();
   input.classList.add("input-invalid");
   input.classList.remove("input-valid");
 }
@@ -290,15 +296,25 @@ function setFieldValid(input, errorEl) {
   input.classList.add("input-valid");
 }
 
-function setFormMessage(message, type = "error") {
+function setFormMessage(message = "", type = "error") {
   if (!formError) {
     return;
   }
 
-  formError.textContent = message;
+  const safeMessage = String(message || "").trim();
+
+  if (!safeMessage) {
+    formError.textContent = "";
+    formError.classList.remove("show", "form-error--success", "form-error--danger");
+    return;
+  }
+
+  formError.textContent = safeMessage;
   formError.classList.add("show");
   formError.classList.remove("form-error--success", "form-error--danger");
-  formError.classList.add(type === "success" ? "form-error--success" : "form-error--danger");
+  formError.classList.add(
+    type === "success" ? "form-error--success" : "form-error--danger"
+  );
 }
 
 function showFormError(message) {
@@ -310,17 +326,12 @@ function showFormSuccess(message) {
 }
 
 function clearFormError() {
-  if (!formError) {
-    return;
-  }
-
-  formError.textContent = "";
-  formError.classList.remove("show", "form-error--success", "form-error--danger");
+  setFormMessage("");
 }
 
 function showCaptchaError(message) {
   if (captchaError) {
-    captchaError.textContent = message;
+    captchaError.textContent = String(message || "").trim();
   }
 }
 
@@ -503,7 +514,6 @@ async function handleRedirectResultIfAny() {
 
     console.log("[Google Login] handleRedirectResultIfAny:user found", result.user.email || "");
     const user = result.user;
-
     const securityContext = getClientSecurityContext();
 
     const checkResult = await callLoginAttemptApi(
@@ -521,10 +531,7 @@ async function handleRedirectResultIfAny() {
       );
     }
 
-    console.log("[Google Login] handleRedirectResultIfAny:login-attempt ok");
-
     await ensureUserProfile(user);
-    console.log("[Google Login] handleRedirectResultIfAny:profile ok");
 
     fireAndForgetSecurityLog({
       type: "google_login_success",
@@ -692,7 +699,6 @@ async function handleGoogleLogin() {
   let signedInUser = null;
 
   try {
-    console.log("[Google Login] clicked");
     setLoading(googleBtn, "Please wait...");
     clearCaptchaError();
 
@@ -702,8 +708,6 @@ async function handleGoogleLogin() {
     }
 
     if (isMobileDevice()) {
-      console.log("[Google Login] using redirect flow");
-
       fireAndForgetSecurityLog({
         type: "google_login_redirect_started",
         message: "Google redirect sign-in started",
@@ -714,8 +718,6 @@ async function handleGoogleLogin() {
       return;
     }
 
-    console.log("[Google Login] starting popup");
-
     let userCredential;
 
     try {
@@ -724,7 +726,6 @@ async function handleGoogleLogin() {
         90000,
         "Google sign-in timed out."
       );
-      console.log("[Google Login] popup success");
     } catch (popupError) {
       console.error("[Google Login] popup failed", popupError);
 
@@ -738,7 +739,6 @@ async function handleGoogleLogin() {
           email: "google-login"
         });
 
-        console.log("[Google Login] falling back to redirect");
         await signInWithRedirect(auth, provider);
         return;
       }
@@ -748,8 +748,6 @@ async function handleGoogleLogin() {
 
     const user = userCredential.user;
     signedInUser = user;
-    console.log("[Google Login] signed in user", user.email || "");
-
     securityContext = getClientSecurityContext();
 
     const checkResult = await callLoginAttemptApi(
@@ -767,10 +765,7 @@ async function handleGoogleLogin() {
       );
     }
 
-    console.log("[Google Login] login-attempt check passed");
-
     await ensureUserProfile(user);
-    console.log("[Google Login] ensureUserProfile passed");
 
     fireAndForgetSecurityLog({
       type: "google_login_success",
@@ -782,7 +777,6 @@ async function handleGoogleLogin() {
       }
     });
 
-    console.log("[Google Login] redirecting to home");
     redirectToHome();
   } catch (error) {
     console.error("[Google Login] failed", error);
@@ -920,25 +914,43 @@ async function initTurnstile() {
 }
 
 function bindEvents() {
+  if (eventsBound) {
+    return;
+  }
+
+  emailInput?.addEventListener("focus", () => {
+    touchedFields.email = true;
+  });
+
+  passwordInput?.addEventListener("focus", () => {
+    touchedFields.password = true;
+  });
+
   emailInput?.addEventListener("input", () => {
     clearFormError();
     clearCaptchaError();
 
-    if (emailInput.value.trim()) {
+    if (touchedFields.email) {
       validateEmail(true);
-    } else {
-      clearFieldState(emailInput, emailError);
     }
   });
 
   passwordInput?.addEventListener("input", () => {
     clearFormError();
 
-    if (passwordInput.value.trim()) {
+    if (touchedFields.password) {
       validatePassword(true);
-    } else {
-      clearFieldState(passwordInput, passwordError);
     }
+  });
+
+  emailInput?.addEventListener("blur", () => {
+    touchedFields.email = true;
+    validateEmail(true);
+  });
+
+  passwordInput?.addEventListener("blur", () => {
+    touchedFields.password = true;
+    validatePassword(true);
   });
 
   form?.addEventListener("submit", async (event) => {
@@ -953,28 +965,28 @@ function bindEvents() {
   forgotPasswordBtn?.addEventListener("click", async () => {
     await handleForgotPassword();
   });
+
+  eventsBound = true;
 }
 
-window.addEventListener("load", async () => {
+async function initLoginPage() {
   try {
     setButtonsDisabled(true);
     bindEvents();
 
-    console.log("[Google Login] page load:start");
-
     containmentState = await fetchContainmentState();
-    console.log("[Google Login] containment state loaded");
-
     await initTurnstile();
-    console.log("[Google Login] turnstile initialized");
-
     await handleRedirectResultIfAny();
-    console.log("[Google Login] redirect handler completed");
   } catch (error) {
     console.error("Page init failed:", error);
     showFormError("Page failed to load properly. Please refresh and try again.");
   } finally {
     setButtonsDisabled(false);
-    console.log("[Google Login] page load:done");
   }
-});
+}
+
+if (document.readyState === "loading") {
+  window.addEventListener("load", initLoginPage, { once: true });
+} else {
+  initLoginPage();
+}
