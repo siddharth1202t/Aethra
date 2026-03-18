@@ -13,6 +13,8 @@ function createStarField(targetCanvas, count = 90) {
   const stars = [];
   let animationFrameId = null;
   let resizeTimer = null;
+  let cssWidth = 0;
+  let cssHeight = 0;
 
   function randomBetween(min, max) {
     return Math.random() * (max - min) + min;
@@ -22,8 +24,11 @@ function createStarField(targetCanvas, count = 90) {
     const dpr = window.devicePixelRatio || 1;
     const rect = targetCanvas.getBoundingClientRect();
 
-    targetCanvas.width = Math.max(1, Math.floor(rect.width * dpr));
-    targetCanvas.height = Math.max(1, Math.floor(rect.height * dpr));
+    cssWidth = Math.max(1, rect.width);
+    cssHeight = Math.max(1, rect.height);
+
+    targetCanvas.width = Math.floor(cssWidth * dpr);
+    targetCanvas.height = Math.floor(cssHeight * dpr);
 
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.scale(dpr, dpr);
@@ -32,14 +37,10 @@ function createStarField(targetCanvas, count = 90) {
   function buildStars() {
     stars.length = 0;
 
-    const rect = targetCanvas.getBoundingClientRect();
-    const width = rect.width;
-    const height = rect.height;
-
     for (let i = 0; i < count; i += 1) {
       stars.push({
-        x: randomBetween(0, width),
-        y: randomBetween(0, height),
+        x: randomBetween(0, cssWidth),
+        y: randomBetween(0, cssHeight),
         radius: randomBetween(1, 3.2),
         alphaMin: randomBetween(0.18, 0.4),
         alphaMax: randomBetween(0.65, 1),
@@ -50,11 +51,7 @@ function createStarField(targetCanvas, count = 90) {
   }
 
   function draw(time) {
-    const rect = targetCanvas.getBoundingClientRect();
-    const width = rect.width;
-    const height = rect.height;
-
-    ctx.clearRect(0, 0, width, height);
+    ctx.clearRect(0, 0, cssWidth, cssHeight);
 
     for (const star of stars) {
       const alphaRange = star.alphaMax - star.alphaMin;
@@ -89,7 +86,6 @@ function createStarField(targetCanvas, count = 90) {
   }
 
   window.addEventListener("resize", handleResize);
-  init();
 
   window.addEventListener("beforeunload", () => {
     if (animationFrameId !== null) {
@@ -97,6 +93,8 @@ function createStarField(targetCanvas, count = 90) {
     }
     window.clearTimeout(resizeTimer);
   });
+
+  init();
 }
 
 if (document.readyState === "loading") {
