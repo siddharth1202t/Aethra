@@ -11,6 +11,7 @@ import { writeSecurityLog } from "./security-logger.js";
 import { detectBotBehavior } from "./bot-detection.js";
 
 const auth = getAuth(app);
+const VERIFY_EMAIL_PAGE = "verify-email.html";
 
 /* ---------------- DOM ---------------- */
 
@@ -47,58 +48,74 @@ function goTo(page) {
 
 /* ---------------- UI HELPERS ---------------- */
 
-function setFormError(message = "", type = "error") {
-  if (!formError) return;
+function setFormMessage(message = "", type = "error") {
+  if (!formError) {
+    return;
+  }
 
   const safeMessage = String(message || "").trim();
   formError.textContent = safeMessage;
   formError.classList.toggle("show", Boolean(safeMessage));
+  formError.classList.remove("form-error--danger", "form-error--success");
 
   if (!safeMessage) {
-    formError.style.background = "";
-    formError.style.borderColor = "";
-    formError.style.color = "";
     return;
   }
 
-  if (type === "success") {
-    formError.style.background = "rgba(125, 255, 179, 0.12)";
-    formError.style.borderColor = "rgba(125, 255, 179, 0.2)";
-    formError.style.color = "#d8ffe8";
-  } else {
-    formError.style.background = "rgba(255, 102, 102, 0.12)";
-    formError.style.borderColor = "rgba(255, 102, 102, 0.2)";
-    formError.style.color = "#ffd0d0";
-  }
+  formError.classList.add(
+    type === "success" ? "form-error--success" : "form-error--danger"
+  );
+}
+
+function setFormError(message = "") {
+  setFormMessage(message, "error");
+}
+
+function setFormSuccess(message = "") {
+  setFormMessage(message, "success");
 }
 
 function setFieldError(element, message = "") {
-  if (!element) return;
+  if (!element) {
+    return;
+  }
+
   element.textContent = String(message || "").trim();
 }
 
 function clearFieldState(input) {
-  if (!input) return;
+  if (!input) {
+    return;
+  }
+
   input.classList.remove("input-invalid", "input-valid");
   input.removeAttribute("aria-invalid");
 }
 
 function markFieldValid(input) {
-  if (!input) return;
+  if (!input) {
+    return;
+  }
+
   input.classList.remove("input-invalid");
   input.classList.add("input-valid");
   input.setAttribute("aria-invalid", "false");
 }
 
 function markFieldInvalid(input) {
-  if (!input) return;
+  if (!input) {
+    return;
+  }
+
   input.classList.remove("input-valid");
   input.classList.add("input-invalid");
   input.setAttribute("aria-invalid", "true");
 }
 
 function setBusyState(isBusy) {
-  if (!signupBtn) return;
+  if (!signupBtn) {
+    return;
+  }
 
   if (!signupBtn.dataset.originalText) {
     signupBtn.dataset.originalText = signupBtn.textContent || "Create Account";
@@ -120,7 +137,7 @@ function clearAllErrors() {
   setFieldError(passwordError);
   setFieldError(confirmPasswordError);
   setFieldError(captchaError);
-  setFormError("");
+  setFormMessage("");
 
   clearFieldState(nameInput);
   clearFieldState(emailInput);
@@ -148,15 +165,17 @@ function fireAndForgetSecurityLog(payload) {
 
 async function fetchContainmentState() {
   try {
-    const res = await fetch("/api/security-containment-state", {
+    const response = await fetch("/api/security-containment-state", {
       method: "GET",
       headers: { "Content-Type": "application/json" },
       cache: "no-store"
     });
 
-    if (!res.ok) return null;
+    if (!response.ok) {
+      return null;
+    }
 
-    const data = await res.json().catch(() => null);
+    const data = await response.json().catch(() => null);
     return data && typeof data === "object" ? data : null;
   } catch (error) {
     console.warn("Containment state fetch failed:", error);
@@ -175,7 +194,7 @@ function isReadOnlyMode(state) {
 /* ---------------- CAPTCHA ---------------- */
 
 async function verifyTurnstileToken(token) {
-  const res = await fetch("/api/verify-turnstile", {
+  const response = await fetch("/api/verify-turnstile", {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
@@ -183,9 +202,9 @@ async function verifyTurnstileToken(token) {
     body: JSON.stringify({ token })
   });
 
-  const data = await res.json().catch(() => ({}));
+  const data = await response.json().catch(() => ({}));
 
-  if (!res.ok || !data.success) {
+  if (!response.ok || !data.success) {
     throw new Error(data?.message || "Captcha verification failed.");
   }
 }
@@ -197,7 +216,9 @@ function getTurnstileToken() {
       ? window.aethraTurnstile.getToken()
       : "";
 
-  if (managerToken) return managerToken;
+  if (managerToken) {
+    return managerToken;
+  }
 
   const hiddenTokenInput = document.getElementById("turnstileToken");
   return hiddenTokenInput?.value || "";
@@ -213,7 +234,9 @@ function resetTurnstile() {
   }
 
   const hiddenTokenInput = document.getElementById("turnstileToken");
-  if (hiddenTokenInput) hiddenTokenInput.value = "";
+  if (hiddenTokenInput) {
+    hiddenTokenInput.value = "";
+  }
 }
 
 async function ensureTurnstileReady(timeout = 12000) {
@@ -228,7 +251,7 @@ async function ensureTurnstileReady(timeout = 12000) {
       return true;
     }
 
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    await new Promise((resolve) => window.setTimeout(resolve, 150));
   }
 
   throw new Error("Turnstile manager did not initialize.");
@@ -263,7 +286,10 @@ function hasNumber(value) {
 
 function validateName() {
   const name = sanitizeUsername(nameInput?.value || "");
-  if (nameInput) nameInput.value = name;
+
+  if (nameInput) {
+    nameInput.value = name;
+  }
 
   if (!name) {
     setFieldError(nameError, "Please enter a username.");
@@ -284,7 +310,10 @@ function validateName() {
 
 function validateEmail() {
   const email = normalizeEmail(emailInput?.value || "");
-  if (emailInput) emailInput.value = email;
+
+  if (emailInput) {
+    emailInput.value = email;
+  }
 
   if (!email) {
     setFieldError(emailError, "Please enter your email.");
@@ -411,9 +440,11 @@ function mapSignupError(error) {
 }
 
 async function handleEmailSignup() {
-  if (isSubmitting) return;
-  isSubmitting = true;
+  if (isSubmitting) {
+    return;
+  }
 
+  isSubmitting = true;
   clearAllErrors();
   setBusyState(true);
 
@@ -471,7 +502,7 @@ async function handleEmailSignup() {
       }
     });
 
-    goTo("verify-email.html");
+    goTo(VERIFY_EMAIL_PAGE);
   } catch (error) {
     console.error("Signup failed:", error);
 
@@ -513,15 +544,22 @@ confirmPasswordInput?.addEventListener("focus", () => {
 });
 
 nameInput?.addEventListener("input", () => {
-  if (touchedFields.name) validateName();
+  if (touchedFields.name) {
+    validateName();
+  }
 });
 
 emailInput?.addEventListener("input", () => {
-  if (touchedFields.email) validateEmail();
+  if (touchedFields.email) {
+    validateEmail();
+  }
 });
 
 passwordInput?.addEventListener("input", () => {
-  if (touchedFields.password) validatePassword();
+  if (touchedFields.password) {
+    validatePassword();
+  }
+
   if (touchedFields.confirmPassword || confirmPasswordInput?.value) {
     validateConfirmPassword();
   }
@@ -556,11 +594,14 @@ confirmPasswordInput?.addEventListener("blur", () => {
 /* ---------------- EVENTS ---------------- */
 
 if (signupForm) {
-  signupForm.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    e.stopPropagation();
+  signupForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
 
-    if (isSubmitting) return;
+    if (isSubmitting) {
+      return;
+    }
+
     await handleEmailSignup();
   });
 } else {
