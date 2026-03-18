@@ -32,6 +32,13 @@ const formError = document.getElementById("formError");
 let isSubmitting = false;
 let containmentState = null;
 
+const touchedFields = {
+  name: false,
+  email: false,
+  password: false,
+  confirmPassword: false
+};
+
 /* ---------------- NAVIGATION ---------------- */
 
 function goTo(page) {
@@ -257,7 +264,13 @@ function validateName() {
   const name = sanitizeUsername(nameInput?.value || "");
   if (nameInput) nameInput.value = name;
 
-  if (!name || name.length < 3 || name.length > 20) {
+  if (!name) {
+    setFieldError(nameError, "Please enter a username.");
+    markFieldInvalid(nameInput);
+    return false;
+  }
+
+  if (name.length < 3 || name.length > 20) {
     setFieldError(nameError, "Username must be 3-20 characters.");
     markFieldInvalid(nameInput);
     return false;
@@ -272,7 +285,13 @@ function validateEmail() {
   const email = normalizeEmail(emailInput?.value || "");
   if (emailInput) emailInput.value = email;
 
-  if (!email || !isValidEmail(email)) {
+  if (!email) {
+    setFieldError(emailError, "Please enter your email.");
+    markFieldInvalid(emailInput);
+    return false;
+  }
+
+  if (!isValidEmail(email)) {
     setFieldError(emailError, "Please enter a valid email.");
     markFieldInvalid(emailInput);
     return false;
@@ -398,6 +417,11 @@ async function handleEmailSignup() {
   setBusyState(true);
 
   try {
+    touchedFields.name = true;
+    touchedFields.email = true;
+    touchedFields.password = true;
+    touchedFields.confirmPassword = true;
+
     if (
       !validateName() ||
       !validateEmail() ||
@@ -470,26 +494,68 @@ async function handleEmailSignup() {
 
 /* ---------------- LIVE VALIDATION ---------------- */
 
-nameInput?.addEventListener("blur", validateName);
-emailInput?.addEventListener("blur", validateEmail);
-passwordInput?.addEventListener("blur", validatePassword);
-confirmPasswordInput?.addEventListener("blur", validateConfirmPassword);
+nameInput?.addEventListener("focus", () => {
+  touchedFields.name = true;
+});
+
+emailInput?.addEventListener("focus", () => {
+  touchedFields.email = true;
+});
+
+passwordInput?.addEventListener("focus", () => {
+  touchedFields.password = true;
+});
+
+confirmPasswordInput?.addEventListener("focus", () => {
+  touchedFields.confirmPassword = true;
+});
 
 nameInput?.addEventListener("input", () => {
-  if (nameError?.textContent) validateName();
+  if (touchedFields.name) {
+    validateName();
+  }
 });
 
 emailInput?.addEventListener("input", () => {
-  if (emailError?.textContent) validateEmail();
+  if (touchedFields.email) {
+    validateEmail();
+  }
 });
 
 passwordInput?.addEventListener("input", () => {
-  if (passwordError?.textContent) validatePassword();
-  if (confirmPasswordInput?.value) validateConfirmPassword();
+  if (touchedFields.password) {
+    validatePassword();
+  }
+
+  if (touchedFields.confirmPassword || confirmPasswordInput?.value) {
+    validateConfirmPassword();
+  }
 });
 
 confirmPasswordInput?.addEventListener("input", () => {
-  if (confirmPasswordError?.textContent) validateConfirmPassword();
+  if (touchedFields.confirmPassword) {
+    validateConfirmPassword();
+  }
+});
+
+nameInput?.addEventListener("blur", () => {
+  touchedFields.name = true;
+  validateName();
+});
+
+emailInput?.addEventListener("blur", () => {
+  touchedFields.email = true;
+  validateEmail();
+});
+
+passwordInput?.addEventListener("blur", () => {
+  touchedFields.password = true;
+  validatePassword();
+});
+
+confirmPasswordInput?.addEventListener("blur", () => {
+  touchedFields.confirmPassword = true;
+  validateConfirmPassword();
 });
 
 /* ---------------- EVENTS ---------------- */
@@ -524,7 +590,14 @@ if (signupForm) {
 
 async function initSignupPage() {
   try {
-    if (!signupForm || !signupBtn || !nameInput || !emailInput || !passwordInput || !confirmPasswordInput) {
+    if (
+      !signupForm ||
+      !signupBtn ||
+      !nameInput ||
+      !emailInput ||
+      !passwordInput ||
+      !confirmPasswordInput
+    ) {
       throw new Error("Required signup elements are missing.");
     }
 
