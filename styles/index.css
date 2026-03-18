@@ -31,22 +31,38 @@ body {
     linear-gradient(135deg, var(--bg-1), var(--bg-2) 45%, var(--bg-3) 75%, #0b0218);
 }
 
+body.modal-open {
+  overflow: hidden;
+}
+
 a {
   color: inherit;
   text-decoration: none;
 }
 
-.hero {
+.hero,
+.characters-section,
+.footer {
   position: relative;
-  overflow: hidden;
+  z-index: 1;
+}
+
+.hero {
   min-height: 100vh;
+  overflow: hidden;
   padding: 20px 24px 24px;
 }
 
-.stars-canvas,
-.aurora,
-.particles,
-.petals-layer {
+.stars-canvas {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.aurora {
   position: absolute;
   inset: 0;
   pointer-events: none;
@@ -94,57 +110,6 @@ a {
 
   50% {
     transform: translate(20px, -24px) scale(1.06);
-  }
-}
-
-.particle {
-  position: absolute;
-  border-radius: 50%;
-  background: rgba(155, 214, 255, 0.7);
-  box-shadow: 0 0 16px rgba(155, 214, 255, 0.9);
-  animation: floatUp linear infinite;
-}
-
-@keyframes floatUp {
-  0% {
-    transform: translateY(40px) scale(0.7);
-    opacity: 0;
-  }
-
-  20% {
-    opacity: 1;
-  }
-
-  100% {
-    transform: translateY(-120vh) scale(1.1);
-    opacity: 0;
-  }
-}
-
-.petal {
-  position: absolute;
-  width: 16px;
-  height: 10px;
-  border-radius: 70% 30% 70% 30%;
-  opacity: 0.85;
-  background: linear-gradient(135deg, rgba(255, 214, 236, 0.95), rgba(255, 183, 221, 0.85));
-  box-shadow: 0 0 8px rgba(255, 194, 223, 0.35);
-  animation: petalFall linear infinite;
-}
-
-@keyframes petalFall {
-  0% {
-    transform: translate3d(0, -10vh, 0) rotate(0deg);
-    opacity: 0;
-  }
-
-  10% {
-    opacity: 0.95;
-  }
-
-  100% {
-    transform: translate3d(120px, 115vh, 0) rotate(360deg);
-    opacity: 0;
   }
 }
 
@@ -305,24 +270,6 @@ a {
   background: radial-gradient(circle at top, rgba(138, 108, 255, 0.12), transparent 40%);
 }
 
-.hero-card::after {
-  content: "";
-  position: absolute;
-  width: 280px;
-  height: 280px;
-  left: var(--mx, 50%);
-  top: var(--my, 50%);
-  transform: translate(-50%, -50%);
-  opacity: 0;
-  pointer-events: none;
-  background: radial-gradient(circle, rgba(93, 228, 255, 0.16), rgba(138, 108, 255, 0.14), transparent 68%);
-  transition: opacity 0.25s ease;
-}
-
-.hero-card:hover::after {
-  opacity: 1;
-}
-
 .badge {
   display: inline-flex;
   align-items: center;
@@ -398,8 +345,6 @@ h1 {
 }
 
 .btn-primary {
-  position: relative;
-  overflow: hidden;
   color: #fff;
   background: linear-gradient(135deg, #6c47ff, #8a6cff, #5de4ff, #6c47ff);
   background-size: 300% 300%;
@@ -424,21 +369,6 @@ h1 {
 .btn-primary:hover {
   transform: translateY(-3px) scale(1.02);
   box-shadow: 0 16px 40px rgba(123, 97, 255, 0.55);
-}
-
-.btn-primary::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: -130%;
-  width: 80%;
-  height: 100%;
-  background: linear-gradient(120deg, transparent, rgba(255, 255, 255, 0.22), transparent);
-  transition: left 0.7s ease;
-}
-
-.btn-primary:hover::before {
-  left: 140%;
 }
 
 .btn-secondary {
@@ -485,8 +415,6 @@ h1 {
 }
 
 .characters-section {
-  position: relative;
-  z-index: 10;
   max-width: 1280px;
   margin: 0 auto;
   padding: 36px 24px 90px;
@@ -529,6 +457,11 @@ h1 {
   backdrop-filter: blur(16px);
   box-shadow: 0 10px 35px rgba(0, 0, 0, 0.2);
   transition: transform 0.28s ease, box-shadow 0.28s ease;
+}
+
+.char-card:hover {
+  transform: translateY(-6px);
+  box-shadow: 0 16px 42px rgba(122, 98, 255, 0.18);
 }
 
 .char-card img {
@@ -574,8 +507,6 @@ h1 {
 }
 
 .footer {
-  position: relative;
-  z-index: 10;
   padding: 0 24px 30px;
   font-size: 0.95rem;
   text-align: center;
