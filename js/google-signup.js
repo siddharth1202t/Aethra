@@ -27,6 +27,7 @@ const ALLOWED_GOOGLE_AUTH_HOSTS = new Set([
 ]);
 
 let googleInProgress = false;
+let eventsBound = false;
 
 function isAllowedGoogleAuthHost() {
   return ALLOWED_GOOGLE_AUTH_HOSTS.has(window.location.hostname);
@@ -60,8 +61,16 @@ function withTimeout(promise, ms, message) {
   });
 }
 
+function getGoogleButton() {
+  return document.getElementById("googleSignInBtn");
+}
+
+function getFormErrorElement() {
+  return document.getElementById("formError");
+}
+
 function setFormMessage(message = "", type = "error") {
-  const formError = document.getElementById("formError");
+  const formError = getFormErrorElement();
   if (!formError) {
     return;
   }
@@ -84,8 +93,12 @@ function setFormError(message = "") {
   setFormMessage(message, "error");
 }
 
+function clearFormError() {
+  setFormMessage("");
+}
+
 function setBusyState(isBusy) {
-  const googleBtn = document.getElementById("googleSignInBtn");
+  const googleBtn = getGoogleButton();
   if (!googleBtn) {
     return;
   }
@@ -200,11 +213,9 @@ function mapGoogleError(error) {
 
 async function handleRedirectResultIfAny() {
   try {
-    console.log("[Google Signup] handleRedirectResultIfAny:start");
     const result = await getRedirectResult(auth);
 
     if (!result?.user) {
-      console.log("[Google Signup] handleRedirectResultIfAny:no redirect result");
       return false;
     }
 
@@ -227,7 +238,6 @@ async function handleRedirectResultIfAny() {
     }
 
     await ensureUserProfile(user);
-    console.log("[Google Signup] handleRedirectResultIfAny:profile ok");
 
     fireAndForgetSecurityLog({
       type: "google_signup_success",
@@ -288,9 +298,8 @@ async function handleGoogleSignup() {
   let securityContext = {};
 
   try {
-    setFormError("");
+    clearFormError();
     setBusyState(true);
-    console.log("[Google Signup] clicked");
 
     if (!isAllowedGoogleAuthHost()) {
       setFormError(
@@ -306,7 +315,6 @@ async function handleGoogleSignup() {
         email: "google-signup"
       });
 
-      console.log("[Google Signup] using redirect");
       await signInWithRedirect(auth, provider);
       return;
     }
@@ -314,13 +322,11 @@ async function handleGoogleSignup() {
     let credential;
 
     try {
-      console.log("[Google Signup] starting popup");
       credential = await withTimeout(
         signInWithPopup(auth, provider),
         90000,
         "Google sign-up timed out."
       );
-      console.log("[Google Signup] popup success");
     } catch (popupError) {
       console.error("[Google Signup] popup failed:", popupError);
 
@@ -334,7 +340,6 @@ async function handleGoogleSignup() {
           email: "google-signup"
         });
 
-        console.log("[Google Signup] falling back to redirect");
         await signInWithRedirect(auth, provider);
         return;
       }
@@ -362,7 +367,6 @@ async function handleGoogleSignup() {
     }
 
     await ensureUserProfile(user);
-    console.log("[Google Signup] ensureUserProfile passed");
 
     fireAndForgetSecurityLog({
       type: "google_signup_success",
@@ -402,19 +406,33 @@ async function handleGoogleSignup() {
   }
 }
 
-window.addEventListener("DOMContentLoaded", async () => {
-  const btn = document.getElementById("googleSignInBtn");
+function bindEvents() {
+  if (eventsBound) {
+    return;
+  }
 
+  const btn = getGoogleButton();
   if (!btn) {
     console.error("[Google Signup] button not found");
     return;
   }
 
   btn.addEventListener("click", handleGoogleSignup);
+  eventsBound = true;
+}
 
+async function initGoogleSignup() {
   try {
+    bindEvents();
     await handleRedirectResultIfAny();
   } catch (error) {
-    console.error("[Google Signup] redirect init failed:", error);
+    console.error("[Google Signup] init failed:", error);
+    setFormError("Google sign-up could not be initialized. Please refresh.");
   }
-});
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", initGoogleSignup, { once: true });
+} else {
+  initGoogleSignup();
+}
