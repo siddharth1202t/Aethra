@@ -2,7 +2,10 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+  />
   <title>Aethra Signup</title>
   <style>
     * {
@@ -423,7 +426,7 @@
 
   <div class="page">
     <div class="side-character">
-      <img src="images/character-left.png" alt="Akira">
+      <img src="images/character-left.png" alt="Akira" loading="lazy">
       <div class="side-label">
         <h3>AKIRA</h3>
         <p>Step into a world where every choice shapes your connection.</p>
@@ -446,60 +449,90 @@
             <label for="name">Username</label>
             <input
               id="name"
+              name="name"
               type="text"
               placeholder="Choose a username"
               required
-              autocomplete="username"
+              minlength="3"
               maxlength="30"
-              spellcheck="false">
-            <small id="nameError" class="error-text"></small>
+              autocomplete="username"
+              autocapitalize="off"
+              spellcheck="false"
+              aria-describedby="nameError"
+            />
+            <small id="nameError" class="error-text" aria-live="polite"></small>
           </div>
 
           <div class="field">
             <label for="email">Email</label>
             <input
               id="email"
+              name="email"
               type="email"
               placeholder="Enter your email"
               required
+              maxlength="120"
               autocomplete="email"
               inputmode="email"
-              spellcheck="false">
-            <small id="emailError" class="error-text"></small>
+              autocapitalize="off"
+              spellcheck="false"
+              aria-describedby="emailError"
+            />
+            <small id="emailError" class="error-text" aria-live="polite"></small>
           </div>
 
           <div class="field">
             <label for="password">Password</label>
             <input
               id="password"
+              name="password"
               type="password"
               placeholder="Create a password"
               required
+              minlength="8"
+              maxlength="128"
               autocomplete="new-password"
-              spellcheck="false">
-            <small id="passwordError" class="error-text"></small>
-            <small class="field-hint">Use at least 8 characters, 1 uppercase letter, and 1 number.</small>
+              spellcheck="false"
+              aria-describedby="passwordError passwordHint"
+            />
+            <small id="passwordError" class="error-text" aria-live="polite"></small>
+            <small id="passwordHint" class="field-hint">
+              Use at least 8 characters, 1 uppercase letter, and 1 number.
+            </small>
           </div>
 
           <div class="field">
             <label for="confirmPassword">Confirm Password</label>
             <input
               id="confirmPassword"
+              name="confirmPassword"
               type="password"
               placeholder="Confirm your password"
               required
-              autocomplete="new-password"
-              spellcheck="false">
-            <small id="confirmPasswordError" class="error-text"></small>
+              minlength="8"
+              maxlength="128"
+              autocomplete="off"
+              spellcheck="false"
+              aria-describedby="confirmPasswordError"
+            />
+            <small id="confirmPasswordError" class="error-text" aria-live="polite"></small>
           </div>
 
           <div class="captcha-wrap">
             <div id="turnstile-container"></div>
           </div>
-          <input type="hidden" id="turnstileToken" name="turnstileToken" value="">
-          <small id="captchaError" class="error-text"></small>
 
-          <button class="signup-btn" type="submit">Create Account</button>
+          <input
+            type="hidden"
+            id="turnstileToken"
+            name="turnstileToken"
+            value=""
+          />
+          <small id="captchaError" class="error-text" aria-live="polite"></small>
+
+          <button class="signup-btn" id="createAccountBtn" type="submit">
+            Create Account
+          </button>
         </form>
 
         <div class="auth-divider">
@@ -507,7 +540,13 @@
         </div>
 
         <button type="button" id="googleSignInBtn" class="google-btn">
-          <img src="https://www.svgrepo.com/show/475656/google-color.svg" alt="Google" width="20" height="20">
+          <img
+            src="https://www.svgrepo.com/show/475656/google-color.svg"
+            alt="Google"
+            width="20"
+            height="20"
+            loading="lazy"
+          >
           Continue with Google
         </button>
 
@@ -518,7 +557,7 @@
     </div>
 
     <div class="side-character">
-      <img src="images/character-right.png" alt="Luna">
+      <img src="images/character-right.png" alt="Luna" loading="lazy">
       <div class="side-label">
         <h3>LUNA</h3>
         <p>Warm, elegant, and ready to welcome you into Aethra.</p>
@@ -526,7 +565,11 @@
     </div>
   </div>
 
-  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit" async defer></script>
+  <script
+    src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit"
+    async
+    defer
+  ></script>
 
   <script>
     window.AETHRA_TURNSTILE_SITEKEY = "0x4AAAAAACqA_Z98nhvcobbI";
