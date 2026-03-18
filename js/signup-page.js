@@ -3,13 +3,17 @@ const starsContainer = document.getElementById("stars");
 function createStars(count = 90) {
   if (!starsContainer) return;
 
+  // Prevent duplicate stars if script runs again
+  if (starsContainer.childElementCount > 0) return;
+
   const fragment = document.createDocumentFragment();
 
-  for (let i = 0; i < count; i += 1) {
+  for (let i = 0; i < count; i++) {
     const star = document.createElement("div");
     star.className = "star";
 
     const size = Math.random() * 2.2 + 1;
+
     star.style.width = `${size}px`;
     star.style.height = `${size}px`;
     star.style.left = `${Math.random() * 100}vw`;
@@ -23,4 +27,9 @@ function createStars(count = 90) {
   starsContainer.appendChild(fragment);
 }
 
-createStars();
+// Run safely after DOM is ready
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", () => createStars(), { once: true });
+} else {
+  createStars();
+}
