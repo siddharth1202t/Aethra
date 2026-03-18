@@ -40,48 +40,39 @@ function safeSessionId() {
   }
 }
 
-function onMouseMove() {
-  behaviorState.mouseMoves += 1;
-  ensureFirstInteraction();
-}
-
-function onKeyDown() {
-  behaviorState.keyPresses += 1;
-  ensureFirstInteraction();
-}
-
-function onClick() {
-  behaviorState.clicks += 1;
-  ensureFirstInteraction();
-}
-
-function onTouchStart() {
-  behaviorState.touches += 1;
-  ensureFirstInteraction();
-}
-
-function onScroll() {
-  behaviorState.scrolls += 1;
-  ensureFirstInteraction();
-}
-
-function onVisibilityChange() {
-  behaviorState.visibilityChanges += 1;
-}
-
 function initBotDetection() {
   if (behaviorState.initialized) return;
 
   behaviorState.sessionId = safeSessionId();
 
-  window.addEventListener("mousemove", onMouseMove, { passive: true });
-  window.addEventListener("keydown", onKeyDown, { passive: true });
-  window.addEventListener("click", onClick, { passive: true });
-  window.addEventListener("touchstart", onTouchStart, { passive: true });
-  window.addEventListener("scroll", onScroll, { passive: true });
-  document.addEventListener("visibilitychange", onVisibilityChange, {
-    passive: true
-  });
+  window.addEventListener("mousemove", () => {
+    behaviorState.mouseMoves += 1;
+    ensureFirstInteraction();
+  }, { passive: true });
+
+  window.addEventListener("keydown", () => {
+    behaviorState.keyPresses += 1;
+    ensureFirstInteraction();
+  }, { passive: true });
+
+  window.addEventListener("click", () => {
+    behaviorState.clicks += 1;
+    ensureFirstInteraction();
+  }, { passive: true });
+
+  window.addEventListener("touchstart", () => {
+    behaviorState.touches += 1;
+    ensureFirstInteraction();
+  }, { passive: true });
+
+  window.addEventListener("scroll", () => {
+    behaviorState.scrolls += 1;
+    ensureFirstInteraction();
+  }, { passive: true });
+
+  document.addEventListener("visibilitychange", () => {
+    behaviorState.visibilityChanges += 1;
+  }, { passive: true });
 
   behaviorState.initialized = true;
 }
