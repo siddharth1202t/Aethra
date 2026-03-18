@@ -1,12 +1,22 @@
 const canvas = document.getElementById("starsCanvas");
 
 function createStarField(targetCanvas, count = 90) {
-  if (!targetCanvas) return;
+  if (!targetCanvas) {
+    return;
+  }
 
   const ctx = targetCanvas.getContext("2d");
-  if (!ctx) return;
+  if (!ctx) {
+    return;
+  }
 
   const stars = [];
+  let animationFrameId = null;
+  let resizeTimer = null;
+
+  function randomBetween(min, max) {
+    return Math.random() * (max - min) + min;
+  }
 
   function resizeCanvas() {
     const dpr = window.devicePixelRatio || 1;
@@ -17,10 +27,6 @@ function createStarField(targetCanvas, count = 90) {
 
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.scale(dpr, dpr);
-  }
-
-  function randomBetween(min, max) {
-    return Math.random() * (max - min) + min;
   }
 
   function buildStars() {
@@ -65,23 +71,30 @@ function createStarField(targetCanvas, count = 90) {
     }
 
     ctx.shadowBlur = 0;
-    window.requestAnimationFrame(draw);
+    animationFrameId = window.requestAnimationFrame(draw);
   }
 
-  function init() {
-    resizeCanvas();
-    buildStars();
-    window.requestAnimationFrame(draw);
-  }
-
-  let resizeTimer = null;
-
-  window.addEventListener("resize", () => {
+  function handleResize() {
     window.clearTimeout(resizeTimer);
     resizeTimer = window.setTimeout(() => {
       resizeCanvas();
       buildStars();
     }, 120);
+  }
+
+  function init() {
+    resizeCanvas();
+    buildStars();
+    animationFrameId = window.requestAnimationFrame(draw);
+  }
+
+  window.addEventListener("resize", handleResize);
+
+  window.addEventListener("beforeunload", () => {
+    if (animationFrameId !== null) {
+      window.cancelAnimationFrame(animationFrameId);
+    }
+    window.clearTimeout(resizeTimer);
   });
 
   init();
