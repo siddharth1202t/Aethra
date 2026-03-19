@@ -1,6 +1,8 @@
+import crypto from "node:crypto";
+import { getFirestore } from "firebase-admin/firestore";
+
 import { createActorContext } from "./_actor-context.js";
 import { evaluateRisk } from "./_risk-engine.js";
-
 import { trackBotBehavior } from "./_bot-detection.js";
 import { trackApiAbuse } from "./_api-abuse-protection.js";
 import { checkApiRateLimit } from "./_rate-limit.js";
@@ -8,7 +10,6 @@ import { validateFreshRequest } from "./_request-freshness.js";
 import { evaluateThreat } from "./_threat-intelligence.js";
 import { evaluateContainment } from "./_security-containment.js";
 import { evaluateAdaptiveThreatMode } from "./_adaptive-threat-mode.js";
-import { getFirestore } from "firebase-admin/firestore";
 
 function safeString(value, maxLength = 200) {
   return String(value || "")
@@ -64,16 +65,8 @@ function getRequestTimestamp(body = {}) {
   return 0;
 }
 
-function normalizeHash(value = "", maxLength = 64) {
-  return safeString(value || "", maxLength)
-    .toLowerCase()
-    .replace(/[^a-f0-9]/g, "")
-    .slice(0, maxLength);
-}
-
 function sha256Hex(input = "") {
   try {
-    const crypto = require("node:crypto");
     return crypto.createHash("sha256").update(String(input || "")).digest("hex");
   } catch {
     return "";
@@ -164,7 +157,12 @@ async function readSecurityStateDoc(docId) {
   }
 }
 
-async function getSecurityStateSummary({ userId = "", email = "", ip = "", sessionId = "" } = {}) {
+async function getSecurityStateSummary({
+  userId = "",
+  email = "",
+  ip = "",
+  sessionId = ""
+} = {}) {
   const safeUserId = safeString(userId || "", 128).replace(/[^a-zA-Z0-9._:@/-]/g, "");
   const safeSessionId = safeString(sessionId || "", 128).replace(/[^a-zA-Z0-9._:@/-]/g, "");
   const emailHash = deriveEmailHash(email || "");
@@ -206,16 +204,18 @@ async function getSecurityStateSummary({ userId = "", email = "", ip = "", sessi
       safeInt(doc.currentRiskScore, 0, 0, 100)
     );
 
-    if (safeString(doc.currentRiskLevel || "", 20).toLowerCase() === "critical") {
+    const docRiskLevel = safeString(doc.currentRiskLevel || "", 20).toLowerCase();
+
+    if (docRiskLevel === "critical") {
       merged.currentRiskLevel = "critical";
     } else if (
       merged.currentRiskLevel !== "critical" &&
-      safeString(doc.currentRiskLevel || "", 20).toLowerCase() === "high"
+      docRiskLevel === "high"
     ) {
       merged.currentRiskLevel = "high";
     } else if (
       !["critical", "high"].includes(merged.currentRiskLevel) &&
-      safeString(doc.currentRiskLevel || "", 20).toLowerCase() === "medium"
+      docRiskLevel === "medium"
     ) {
       merged.currentRiskLevel = "medium";
     }
@@ -343,7 +343,6 @@ export async function runSecurityOrchestrator({
   const routeSensitivity = inferRouteSensitivity(actor.route, containmentConfig);
 
   let botResult = null;
-
   try {
     botResult = await trackBotBehavior(behavior, req, {
       ip: actor.ip,
@@ -355,21 +354,19 @@ export async function runSecurityOrchestrator({
   }
 
   let abuseResult = null;
-
   try {
     abuseResult = await trackApiAbuse({
       ip: actor.ip,
       sessionId: actor.sessionId,
       userId: actor.userId,
       route: actor.route,
-      success: safeBoolean(abuseSuccess) ? true : false
+      success: safeBoolean(abuseSuccess)
     });
   } catch (error) {
     console.error("Abuse analysis failed:", error);
   }
 
   let rateLimitResult = null;
-
   if (rateLimitConfig) {
     try {
       rateLimitResult = await checkApiRateLimit({
@@ -384,7 +381,6 @@ export async function runSecurityOrchestrator({
   }
 
   let freshnessResult = null;
-
   if (freshnessConfig) {
     try {
       freshnessResult = await validateFreshRequest({
@@ -401,25 +397,7 @@ export async function runSecurityOrchestrator({
     }
   }
 
-  let threatResult = null;
-
-  try {
-    threatResult = await evaluateThreat({
-      ip: actor.ip,
-      sessionId: actor.sessionId,
-      userId: actor.userId,
-      route: actor.route,
-      botResult,
-      abuseResult,
-      rateLimitResult,
-      freshnessResult
-    });
-  } catch (error) {
-    console.error("Threat intelligence failed:", error);
-  }
-
   let securityState = null;
-
   try {
     securityState = await getSecurityStateSummary({
       userId: actor.userId,
@@ -429,6 +407,24 @@ export async function runSecurityOrchestrator({
     });
   } catch (error) {
     console.error("Security state read failed:", error);
+  }
+
+  let threatResult = null;
+  try {
+    threatResult = await evaluateThreat({
+      ip: actor.ip,
+      sessionId: actor.sessionId,
+      userId: actor.userId,
+      route: actor.route,
+      routeSensitivity,
+      botResult,
+      abuseResult,
+      rateLimitResult,
+      freshnessResult,
+      securityState
+    });
+  } catch (error) {
+    console.error("Threat intelligence failed:", error);
   }
 
   const risk = evaluateRisk({
@@ -442,7 +438,6 @@ export async function runSecurityOrchestrator({
   });
 
   let containmentResult = null;
-
   try {
     containmentResult = await evaluateContainment({
       route: actor.route,
@@ -455,7 +450,6 @@ export async function runSecurityOrchestrator({
   }
 
   let adaptiveModeResult = null;
-
   try {
     adaptiveModeResult = await evaluateAdaptiveThreatMode({
       risk,
