@@ -11,8 +11,17 @@ import { writeSecurityLog } from "./security-logger.js";
 import { detectBotBehavior } from "./bot-detection.js";
 
 const auth = getAuth(app);
+
 const VERIFY_EMAIL_PAGE = "verify-email.html";
 const TURNSTILE_MANAGER_TIMEOUT_MS = 10000;
+const REQUEST_TIMEOUT_MS = 10000;
+const SUBMIT_COOLDOWN_MS = 2500;
+
+const USERNAME_MIN_LENGTH = 3;
+const USERNAME_MAX_LENGTH = 20;
+const EMAIL_MAX_LENGTH = 120;
+const PASSWORD_MIN_LENGTH = 10;
+const PASSWORD_MAX_LENGTH = 128;
 
 /* ---------------- DOM ---------------- */
 
@@ -33,6 +42,7 @@ const formError = document.getElementById("formError");
 
 let isSubmitting = false;
 let containmentState = null;
+let lastSubmitAt = 0;
 
 const touchedFields = {
   name: false,
@@ -54,7 +64,7 @@ function setFormMessage(message = "", type = "error") {
     return;
   }
 
-  const safeMessage = String(message || "").trim();
+  const safeMessage = String(message || "").trim().slice(0, 300);
   formError.textContent = safeMessage;
   formError.classList.toggle("show", Boolean(safeMessage));
   formError.classList.remove("form-error--danger", "form-error--success");
@@ -81,7 +91,7 @@ function setFieldError(element, message = "") {
     return;
   }
 
-  element.textContent = String(message || "").trim();
+  element.textContent = String(message || "").trim().slice(0, 200);
 }
 
 function clearFieldState(input) {
@@ -146,6 +156,36 @@ function clearAllErrors() {
   clearFieldState(confirmPasswordInput);
 }
 
+function clearSensitiveInputs({ keepEmail = true, keepName = true } = {}) {
+  if (!keepName && nameInput) {
+    nameInput.value = "";
+  }
+
+  if (!keepEmail && emailInput) {
+    emailInput.value = "";
+  }
+
+  if (passwordInput) {
+    passwordInput.value = "";
+  }
+
+  if (confirmPasswordInput) {
+    confirmPasswordInput.value = "";
+  }
+}
+
+function now() {
+  return Date.now();
+}
+
+function shouldThrottleSubmission() {
+  return now() - lastSubmitAt < SUBMIT_COOLDOWN_MS;
+}
+
+function recordSubmissionAttempt() {
+  lastSubmitAt = now();
+}
+
 /* ---------------- SECURITY LOGGING ---------------- */
 
 async function safeSecurityLog(payload) {
@@ -162,21 +202,43 @@ function fireAndForgetSecurityLog(payload) {
   });
 }
 
+/* ---------------- FETCH HELPERS ---------------- */
+
+async function fetchJson(url, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+      headers: {
+        "Content-Type": "application/json",
+        ...(options.headers || {})
+      },
+      cache: options.cache || "no-store"
+    });
+
+    const data = await response.json().catch(() => ({}));
+    return { response, data };
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
+
 /* ---------------- CONTAINMENT STATE ---------------- */
 
 async function fetchContainmentState() {
   try {
-    const response = await fetch("/api/security-containment-state", {
-      method: "GET",
-      headers: { "Content-Type": "application/json" },
-      cache: "no-store"
-    });
+    const { response, data } = await fetchJson(
+      "/api/security-containment-state",
+      { method: "GET" }
+    );
 
     if (!response.ok) {
       return null;
     }
 
-    const data = await response.json().catch(() => null);
     return data && typeof data === "object" ? data : null;
   } catch (error) {
     console.warn("Containment state fetch failed:", error);
@@ -194,20 +256,25 @@ function isReadOnlyMode(state) {
 
 /* ---------------- CAPTCHA ---------------- */
 
-async function verifyTurnstileToken(token) {
-  const response = await fetch("/api/verify-turnstile", {
+async function verifyTurnstileToken(token, securityContext = {}) {
+  const { response, data } = await fetchJson("/api/verify-turnstile", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({ token })
+    body: JSON.stringify({
+      token,
+      context: {
+        behavior: securityContext.behavior || {},
+        language: securityContext.language || "",
+        timezone:
+          Intl.DateTimeFormat?.().resolvedOptions?.().timeZone || "unknown"
+      }
+    })
   });
-
-  const data = await response.json().catch(() => ({}));
 
   if (!response.ok || !data.success) {
     throw new Error(data?.message || "Captcha verification failed.");
   }
+
+  return data;
 }
 
 function getTurnstileManager() {
@@ -243,9 +310,9 @@ function resetTurnstile() {
 }
 
 async function waitForTurnstileManager(timeout = TURNSTILE_MANAGER_TIMEOUT_MS) {
-  const start = Date.now();
+  const start = now();
 
-  while (Date.now() - start < timeout) {
+  while (now() - start < timeout) {
     const manager = getTurnstileManager();
 
     if (manager && typeof manager.getToken === "function") {
@@ -271,8 +338,8 @@ async function ensureTurnstileRendered() {
 async function getVerifiedTurnstileToken() {
   setFieldError(captchaError, "");
 
-  const manager = await ensureTurnstileRendered();
-  let token = getTurnstileToken();
+  await ensureTurnstileRendered();
+  const token = getTurnstileToken();
 
   if (token) {
     return token;
@@ -297,19 +364,29 @@ async function getVerifiedTurnstileToken() {
 /* ---------------- VALIDATION ---------------- */
 
 function normalizeEmail(email) {
-  return String(email || "").trim().toLowerCase();
+  return String(email || "").trim().toLowerCase().slice(0, EMAIL_MAX_LENGTH);
 }
 
 function sanitizeUsername(value) {
   return String(value || "")
+    .normalize("NFKC")
     .trim()
-    .replace(/[^a-zA-Z0-9._ ]/g, "")
+    .replace(/[^\w. ]/g, "")
     .replace(/\s+/g, " ")
+    .replace(/\.+/g, ".")
     .trim()
-    .slice(0, 30);
+    .slice(0, USERNAME_MAX_LENGTH);
+}
+
+function sanitizePassword(value) {
+  return String(value || "").slice(0, PASSWORD_MAX_LENGTH);
 }
 
 function isValidEmail(email) {
+  if (!email || email.length > EMAIL_MAX_LENGTH) {
+    return false;
+  }
+
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
@@ -317,8 +394,20 @@ function hasUppercase(value) {
   return /[A-Z]/.test(value);
 }
 
+function hasLowercase(value) {
+  return /[a-z]/.test(value);
+}
+
 function hasNumber(value) {
   return /\d/.test(value);
+}
+
+function hasSpecialCharacter(value) {
+  return /[^A-Za-z0-9]/.test(value);
+}
+
+function hasSuspiciousLength(value, max) {
+  return String(value || "").length > max;
 }
 
 function validateName() {
@@ -334,8 +423,11 @@ function validateName() {
     return false;
   }
 
-  if (name.length < 3 || name.length > 20) {
-    setFieldError(nameError, "Username must be 3-20 characters.");
+  if (name.length < USERNAME_MIN_LENGTH || name.length > USERNAME_MAX_LENGTH) {
+    setFieldError(
+      nameError,
+      `Username must be ${USERNAME_MIN_LENGTH}-${USERNAME_MAX_LENGTH} characters.`
+    );
     markFieldInvalid(nameInput);
     return false;
   }
@@ -370,7 +462,11 @@ function validateEmail() {
 }
 
 function validatePassword() {
-  const password = passwordInput?.value || "";
+  const password = sanitizePassword(passwordInput?.value || "");
+
+  if (passwordInput && passwordInput.value !== password) {
+    passwordInput.value = password;
+  }
 
   if (!password) {
     setFieldError(passwordError, "Please enter a password.");
@@ -378,10 +474,24 @@ function validatePassword() {
     return false;
   }
 
-  if (password.length < 8 || !hasUppercase(password) || !hasNumber(password)) {
+  if (password.length < PASSWORD_MIN_LENGTH) {
     setFieldError(
       passwordError,
-      "Password must be 8+ chars with uppercase & number."
+      `Password must be at least ${PASSWORD_MIN_LENGTH} characters.`
+    );
+    markFieldInvalid(passwordInput);
+    return false;
+  }
+
+  if (
+    !hasUppercase(password) ||
+    !hasLowercase(password) ||
+    !hasNumber(password) ||
+    !hasSpecialCharacter(password)
+  ) {
+    setFieldError(
+      passwordError,
+      "Password must include uppercase, lowercase, number, and special character."
     );
     markFieldInvalid(passwordInput);
     return false;
@@ -413,6 +523,39 @@ function validateConfirmPassword() {
   return true;
 }
 
+function validateInputLengths() {
+  if (hasSuspiciousLength(nameInput?.value || "", 100)) {
+    setFieldError(nameError, "Username is too long.");
+    markFieldInvalid(nameInput);
+    return false;
+  }
+
+  if (hasSuspiciousLength(emailInput?.value || "", 200)) {
+    setFieldError(emailError, "Email is too long.");
+    markFieldInvalid(emailInput);
+    return false;
+  }
+
+  if (hasSuspiciousLength(passwordInput?.value || "", PASSWORD_MAX_LENGTH)) {
+    setFieldError(passwordError, "Password is too long.");
+    markFieldInvalid(passwordInput);
+    return false;
+  }
+
+  if (
+    hasSuspiciousLength(
+      confirmPasswordInput?.value || "",
+      PASSWORD_MAX_LENGTH
+    )
+  ) {
+    setFieldError(confirmPasswordError, "Password is too long.");
+    markFieldInvalid(confirmPasswordInput);
+    return false;
+  }
+
+  return true;
+}
+
 /* ---------------- SECURITY CONTEXT ---------------- */
 
 function getClientSecurityContext() {
@@ -428,27 +571,26 @@ function getClientSecurityContext() {
   return {
     behavior,
     userAgent: navigator.userAgent || "",
-    language: navigator.language || ""
+    language: navigator.language || "",
+    timezone: Intl.DateTimeFormat?.().resolvedOptions?.().timeZone || "unknown",
+    platform: navigator.platform || "",
+    webdriver: navigator.webdriver === true
   };
 }
 
 /* ---------------- SIGNUP FLOW ---------------- */
 
 async function precheckSensitiveAction() {
-  const token = await getVerifiedTurnstileToken();
   const securityContext = getClientSecurityContext();
+  const token = await getVerifiedTurnstileToken();
 
-  await verifyTurnstileToken(token);
+  await verifyTurnstileToken(token, securityContext);
 
-  return {
-    token,
-    securityContext
-  };
+  return { token, securityContext };
 }
 
 function mapSignupError(error) {
   const code = error?.code || "";
-  const message = error?.message || "";
 
   switch (code) {
     case "auth/email-already-in-use":
@@ -462,9 +604,9 @@ function mapSignupError(error) {
       return "Please enter a valid email.";
 
     case "auth/weak-password":
-      setFieldError(passwordError, "Password is too weak.");
+      setFieldError(passwordError, "Password does not meet requirements.");
       markFieldInvalid(passwordInput);
-      return "Password is too weak.";
+      return "Password does not meet requirements.";
 
     case "auth/network-request-failed":
       return "Network error. Please check your connection.";
@@ -472,8 +614,11 @@ function mapSignupError(error) {
     case "auth/too-many-requests":
       return "Too many attempts. Please wait and try again.";
 
+    case "auth/operation-not-allowed":
+      return "Account registration is temporarily unavailable.";
+
     default:
-      return message || "Signup failed. Please try again.";
+      return "Signup failed. Please try again.";
   }
 }
 
@@ -482,7 +627,14 @@ async function handleEmailSignup() {
     return;
   }
 
+  if (shouldThrottleSubmission()) {
+    setFormError("Please wait a moment before trying again.");
+    return;
+  }
+
+  recordSubmissionAttempt();
   isSubmitting = true;
+
   clearAllErrors();
   setBusyState(true);
 
@@ -493,12 +645,23 @@ async function handleEmailSignup() {
     touchedFields.confirmPassword = true;
 
     const isValid =
+      validateInputLengths() &&
       validateName() &&
       validateEmail() &&
       validatePassword() &&
       validateConfirmPassword();
 
     if (!isValid) {
+      fireAndForgetSecurityLog({
+        type: "signup_validation_failed",
+        message: "Client-side signup validation failed",
+        email: normalizeEmail(emailInput?.value || ""),
+        metadata: {
+          hasName: Boolean(nameInput?.value),
+          hasEmail: Boolean(emailInput?.value),
+          passwordLength: (passwordInput?.value || "").length
+        }
+      });
       return;
     }
 
@@ -507,14 +670,30 @@ async function handleEmailSignup() {
       isReadOnlyMode(containmentState)
     ) {
       setFormError("Account registration is temporarily disabled.");
+      fireAndForgetSecurityLog({
+        type: "signup_blocked_containment",
+        message: "Signup blocked due to containment state",
+        email: normalizeEmail(emailInput?.value || "")
+      });
       return;
     }
 
     const email = normalizeEmail(emailInput?.value || "");
-    const password = passwordInput?.value || "";
+    const password = sanitizePassword(passwordInput?.value || "");
     const name = sanitizeUsername(nameInput?.value || "");
 
     const { securityContext } = await precheckSensitiveAction();
+
+    if (securityContext.webdriver) {
+      fireAndForgetSecurityLog({
+        type: "signup_suspicious_automation_signal",
+        message: "Navigator webdriver detected during signup attempt",
+        email,
+        metadata: {
+          behavior: securityContext.behavior || {}
+        }
+      });
+    }
 
     const credential = await createUserWithEmailAndPassword(
       auth,
@@ -535,27 +714,34 @@ async function handleEmailSignup() {
       userId: user.uid,
       metadata: {
         behavior: securityContext.behavior || {},
-        profileResult: profileResult || {}
+        profileResult: profileResult || {},
+        timezone: securityContext.timezone,
+        platform: securityContext.platform
       }
     });
 
+    clearSensitiveInputs({ keepEmail: true, keepName: true });
     setFormSuccess("Account created. Redirecting...");
     goTo(VERIFY_EMAIL_PAGE);
   } catch (error) {
     console.error("Signup failed:", error);
 
     const email = normalizeEmail(emailInput?.value || "");
+    const securityContext = getClientSecurityContext();
 
     fireAndForgetSecurityLog({
       type: "signup_failed",
-      message: error?.message || "Signup failed",
+      message: error?.code || "signup_failed",
       email,
       metadata: {
-        code: error?.code || "unknown"
+        code: error?.code || "unknown",
+        behavior: securityContext.behavior || {},
+        webdriver: securityContext.webdriver === true
       }
     });
 
     setFormError(mapSignupError(error));
+    clearSensitiveInputs({ keepEmail: true, keepName: true });
     resetTurnstile();
   } finally {
     setBusyState(false);
