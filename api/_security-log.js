@@ -196,6 +196,8 @@ export default async function handler(req, res) {
         ? body.behavior
         : {};
     const sessionId = safeString(body.sessionId || "", 120);
+    const requestHost = getRequestHost(req);
+    const refererOrigin = getRefererOrigin(req);
 
     if (!isHostAllowed(req)) {
       await writeSecurityLog({
@@ -206,8 +208,8 @@ export default async function handler(req, res) {
         metadata: {
           source: "server_enforced",
           blockedReason: "forbidden_host",
-          host: getRequestHost(req),
-          refererOrigin: getRefererOrigin(req)
+          host: requestHost,
+          refererOrigin
         }
       });
 
@@ -223,9 +225,9 @@ export default async function handler(req, res) {
       rateLimit: {
         key: `security-log:${safeString(
           req?.headers?.["x-forwarded-for"] ||
-          req?.headers?.["x-real-ip"] ||
-          req?.socket?.remoteAddress ||
-          "unknown",
+            req?.headers?.["x-real-ip"] ||
+            req?.socket?.remoteAddress ||
+            "unknown",
           100
         )}`,
         limit: 20,
@@ -252,9 +254,10 @@ export default async function handler(req, res) {
           source: "server_enforced",
           blockedReason: "forbidden_origin",
           requestOrigin: origin,
-          refererOrigin: getRefererOrigin(req),
+          refererOrigin,
           requestUserAgent: security.requestUserAgent,
-          host: getRequestHost(req)
+          host: requestHost,
+          sessionId
         }
       });
 
@@ -274,7 +277,8 @@ export default async function handler(req, res) {
           source: "server_enforced",
           action: security.rateLimitResult.recommendedAction,
           remainingMs: security.rateLimitResult.remainingMs || 0,
-          violations: security.rateLimitResult.violations || 0
+          violations: security.rateLimitResult.violations || 0,
+          sessionId
         }
       });
 
@@ -298,7 +302,8 @@ export default async function handler(req, res) {
           abuseAnalysis: security.abuseAnalysis,
           botAnalysis: security.botAnalysis,
           combinedRisk: security.combinedRisk,
-          finalAction: security.finalAction
+          finalAction: security.finalAction,
+          sessionId
         })
       });
 
@@ -321,7 +326,8 @@ export default async function handler(req, res) {
           abuseAnalysis: security.abuseAnalysis,
           botAnalysis: security.botAnalysis,
           combinedRisk: security.combinedRisk,
-          finalAction: security.finalAction
+          finalAction: security.finalAction,
+          sessionId
         })
       });
 
@@ -344,7 +350,8 @@ export default async function handler(req, res) {
           abuseAnalysis: security.abuseAnalysis,
           botAnalysis: security.botAnalysis,
           combinedRisk: security.combinedRisk,
-          finalAction: security.finalAction
+          finalAction: security.finalAction,
+          sessionId
         })
       });
     }
@@ -383,7 +390,8 @@ export default async function handler(req, res) {
           source: "server_enforced",
           freshnessCode: safeString(freshRequestResult.code || "", 100),
           ageMs: safeNumber(freshRequestResult.ageMs, 0),
-          requestUserAgent: security.requestUserAgent
+          requestUserAgent: security.requestUserAgent,
+          sessionId
         }
       });
 
@@ -409,8 +417,9 @@ export default async function handler(req, res) {
         ageMs: safeNumber(freshRequestResult.ageMs, 0),
         requestOrigin: origin,
         requestUserAgent: security.requestUserAgent,
-        requestHost: getRequestHost(req),
-        refererOrigin: getRefererOrigin(req),
+        requestHost,
+        refererOrigin,
+        sessionId,
         sessionIdPresent: Boolean(sessionId),
         noncePresent: Boolean(safeString(body.nonce || "", 200)),
         metadata,
