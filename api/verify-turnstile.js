@@ -53,6 +53,15 @@ function normalizeHostname(hostname = "") {
   return safeString(hostname, 200).trim().toLowerCase();
 }
 
+function normalizeEmail(email = "") {
+  const normalized = safeString(email || "", 200).trim().toLowerCase();
+  if (!normalized) {
+    return "";
+  }
+
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized) ? normalized : "";
+}
+
 function isExpectedHostname(hostname = "") {
   return ALLOWED_HOSTNAMES.has(normalizeHostname(hostname));
 }
@@ -172,19 +181,26 @@ function getClientBehavior(body) {
   return {};
 }
 
-async function logAndBlockOrigin(req, actor) {
+async function logAndBlockOrigin({
+  actor,
+  ip,
+  requestHost,
+  refererOrigin,
+  sessionId
+}) {
   await writeSecurityLog({
     type: "forbidden_turnstile_origin",
     level: "warning",
     message: "Blocked request from forbidden origin on verify-turnstile API",
-    ip: actor.ip,
+    ip,
     route: ROUTE,
     metadata: {
       source: "server_enforced",
       origin: actor.origin,
-      refererOrigin: getRefererOrigin(req),
-      host: getRequestHost(req),
-      requestUserAgent: actor.userAgent
+      refererOrigin,
+      host: requestHost,
+      requestUserAgent: actor.userAgent,
+      sessionId
     }
   });
 }
@@ -213,6 +229,8 @@ export default async function handler(req, res) {
     const token = safeString(body?.token || "", MAX_TOKEN_LENGTH).trim();
     const behavior = getClientBehavior(body);
     const clientContext = sanitizeClientContext(body?.context);
+    const email = normalizeEmail(body?.email || "");
+    const sessionId = safeString(body?.sessionId || "", 120);
 
     const actor = createActorContext({
       req,
@@ -235,7 +253,8 @@ export default async function handler(req, res) {
           source: "server_enforced",
           host: requestHost,
           origin: actor.origin,
-          refererOrigin
+          refererOrigin,
+          sessionId
         }
       });
 
@@ -245,7 +264,13 @@ export default async function handler(req, res) {
     }
 
     if (!isOriginAllowed(actor.origin)) {
-      await logAndBlockOrigin(req, actor);
+      await logAndBlockOrigin({
+        actor,
+        ip: actor.ip,
+        requestHost,
+        refererOrigin,
+        sessionId
+      });
 
       return res.status(403).json(
         buildBlockedResponse("Forbidden origin.", { action: "block" })
@@ -259,8 +284,9 @@ export default async function handler(req, res) {
       route: ROUTE,
       context: {
         ip: actor.ip,
-        sessionId: actor.sessionId,
-        userId: actor.userId
+        sessionId: actor.sessionId || sessionId,
+        userId: actor.userId,
+        email
       },
       rateLimitConfig: {
         key: `verify-turnstile:${actor.ip}`,
@@ -273,6 +299,8 @@ export default async function handler(req, res) {
     const ip = security.actor.ip;
     const securityAction = pickSecurityAction(security);
     const secret = getTurnstileSecret();
+    const resolvedSessionId = actor.sessionId || sessionId;
+
     const verificationFingerprint = createVerificationFingerprint({
       ip,
       token,
@@ -297,7 +325,8 @@ export default async function handler(req, res) {
           violations: security.signals.rateLimitResult.violations || 0,
           riskScore: security.risk.riskScore,
           riskLevel: security.risk.level,
-          fingerprint: verificationFingerprint
+          fingerprint: verificationFingerprint,
+          sessionId: resolvedSessionId
         }
       });
 
@@ -326,7 +355,8 @@ export default async function handler(req, res) {
           abuseResult: security.signals.abuseResult,
           threatResult: security.signals.threatResult,
           clientContext,
-          fingerprint: verificationFingerprint
+          fingerprint: verificationFingerprint,
+          sessionId: resolvedSessionId
         })
       });
 
@@ -352,7 +382,8 @@ export default async function handler(req, res) {
           abuseResult: security.signals.abuseResult,
           threatResult: security.signals.threatResult,
           clientContext,
-          fingerprint: verificationFingerprint
+          fingerprint: verificationFingerprint,
+          sessionId: resolvedSessionId
         })
       });
     }
@@ -369,7 +400,8 @@ export default async function handler(req, res) {
           hasToken: Boolean(token),
           hasSecret: Boolean(secret),
           riskScore: security.risk.riskScore,
-          fingerprint: verificationFingerprint
+          fingerprint: verificationFingerprint,
+          sessionId: resolvedSessionId
         }
       });
 
@@ -413,7 +445,8 @@ export default async function handler(req, res) {
           source: "server_enforced",
           error: safeString(error?.message || "Unknown upstream error", 300),
           riskScore: security.risk.riskScore,
-          fingerprint: verificationFingerprint
+          fingerprint: verificationFingerprint,
+          sessionId: resolvedSessionId
         }
       });
 
@@ -437,7 +470,8 @@ export default async function handler(req, res) {
           source: "server_enforced",
           status: response.status,
           riskScore: security.risk.riskScore,
-          fingerprint: verificationFingerprint
+          fingerprint: verificationFingerprint,
+          sessionId: resolvedSessionId
         }
       });
 
@@ -458,7 +492,8 @@ export default async function handler(req, res) {
         metadata: {
           source: "server_enforced",
           riskScore: security.risk.riskScore,
-          fingerprint: verificationFingerprint
+          fingerprint: verificationFingerprint,
+          sessionId: resolvedSessionId
         }
       });
 
@@ -485,7 +520,8 @@ export default async function handler(req, res) {
           threatLevel: security.signals.threatResult?.level || "low",
           riskLevel: security.risk.level,
           clientContext,
-          fingerprint: verificationFingerprint
+          fingerprint: verificationFingerprint,
+          sessionId: resolvedSessionId
         }
       });
 
@@ -503,7 +539,8 @@ export default async function handler(req, res) {
           source: "server_enforced",
           hostname: normalizeHostname(data.hostname),
           riskScore: security.risk.riskScore,
-          fingerprint: verificationFingerprint
+          fingerprint: verificationFingerprint,
+          sessionId: resolvedSessionId
         }
       });
 
