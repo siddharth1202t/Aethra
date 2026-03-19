@@ -462,7 +462,8 @@ export async function runSecurityOrchestrator({
       threatResult,
       abuseResult,
       botResult,
-      securityState
+      securityState,
+      routeSensitivity
     });
   } catch (error) {
     console.error("Adaptive threat mode evaluation failed:", error);
