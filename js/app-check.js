@@ -5,9 +5,10 @@ import {
 import { app } from "./firestore-config.js";
 
 const APP_CHECK_SITE_KEY = "6Lfv_oosAAAAAKl9IR-Hg29NU2JY7u1VJ-GG22mx";
+const APP_CHECK_FLAG = "__AETHRA_APP_CHECK_INITIALIZED__";
 
 function initAppCheck() {
-  if (window.__AETHRA_APP_CHECK_INITIALIZED__) {
+  if (window[APP_CHECK_FLAG]) {
     return;
   }
 
@@ -17,12 +18,12 @@ function initAppCheck() {
       isTokenAutoRefreshEnabled: true
     });
 
-    window.__AETHRA_APP_CHECK_INITIALIZED__ = true;
+    window[APP_CHECK_FLAG] = true;
   } catch (error) {
     const message = String(error?.message || "").toLowerCase();
 
     if (message.includes("already exists")) {
-      window.__AETHRA_APP_CHECK_INITIALIZED__ = true;
+      window[APP_CHECK_FLAG] = true;
       return;
     }
 
