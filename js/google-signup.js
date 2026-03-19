@@ -5,7 +5,9 @@ import {
   getRedirectResult,
   GoogleAuthProvider,
   signOut,
-  onAuthStateChanged
+  onAuthStateChanged,
+  setPersistence,
+  browserLocalPersistence
 } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
 
 import { app } from "./firestore-config.js";
@@ -30,6 +32,7 @@ const ALLOWED_GOOGLE_AUTH_HOSTS = new Set([
 let googleInProgress = false;
 let eventsBound = false;
 let authFallbackHandled = false;
+let persistenceReadyPromise = null;
 
 function isAllowedGoogleAuthHost() {
   return ALLOWED_GOOGLE_AUTH_HOSTS.has(window.location.hostname);
@@ -187,6 +190,18 @@ async function callLoginAttemptApi(email, action, extra = {}) {
   return data;
 }
 
+async function ensureAuthPersistence() {
+  if (!persistenceReadyPromise) {
+    persistenceReadyPromise = setPersistence(auth, browserLocalPersistence)
+      .catch((error) => {
+        console.error("Failed to set auth persistence:", error);
+        return null;
+      });
+  }
+
+  return persistenceReadyPromise;
+}
+
 function mapGoogleError(error) {
   const code = error?.code || "";
   const message = String(error?.message || "");
@@ -213,6 +228,15 @@ function mapGoogleError(error) {
     default:
       return message || "Google signup failed. Please try again.";
   }
+}
+
+function redirectSignedInUser(user) {
+  if (!user) {
+    return false;
+  }
+
+  goTo(HOME_PAGE);
+  return true;
 }
 
 async function handleRedirectResultIfAny() {
@@ -254,8 +278,7 @@ async function handleRedirectResultIfAny() {
     });
 
     authFallbackHandled = true;
-    goTo(HOME_PAGE);
-    return true;
+    return redirectSignedInUser(user);
   } catch (error) {
     const code = error?.code || "";
     const message = String(error?.message || "").toLowerCase();
@@ -294,10 +317,10 @@ async function handleRedirectResultIfAny() {
 
 async function handleAuthenticatedUserFallback() {
   return new Promise((resolve) => {
-    let resolved = false;
+    let settled = false;
 
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
-      if (resolved || authFallbackHandled) {
+      if (settled || authFallbackHandled) {
         return;
       }
 
@@ -305,7 +328,7 @@ async function handleAuthenticatedUserFallback() {
         return;
       }
 
-      resolved = true;
+      settled = true;
       authFallbackHandled = true;
       unsubscribe();
 
@@ -342,8 +365,7 @@ async function handleAuthenticatedUserFallback() {
           }
         });
 
-        goTo(HOME_PAGE);
-        resolve(true);
+        resolve(redirectSignedInUser(user));
       } catch (error) {
         console.error("[Google Signup] auth-state fallback failed:", error);
         setFormError(mapGoogleError(error));
@@ -352,14 +374,14 @@ async function handleAuthenticatedUserFallback() {
     });
 
     window.setTimeout(() => {
-      if (resolved) {
+      if (settled) {
         return;
       }
 
-      resolved = true;
+      settled = true;
       unsubscribe();
       resolve(false);
-    }, 4000);
+    }, 5000);
   });
 }
 
@@ -383,6 +405,8 @@ async function handleGoogleSignup() {
       );
       return;
     }
+
+    await ensureAuthPersistence();
 
     if (isMobileDevice()) {
       fireAndForgetSecurityLog({
@@ -454,7 +478,7 @@ async function handleGoogleSignup() {
       }
     });
 
-    goTo(HOME_PAGE);
+    redirectSignedInUser(user);
   } catch (error) {
     console.error("[Google Signup] failed:", error);
 
@@ -500,6 +524,12 @@ function bindEvents() {
 async function initGoogleSignup() {
   try {
     bindEvents();
+    await ensureAuthPersistence();
+
+    if (auth.currentUser) {
+      redirectSignedInUser(auth.currentUser);
+      return;
+    }
 
     const handledRedirect = await handleRedirectResultIfAny();
 
@@ -513,7 +543,9 @@ async function initGoogleSignup() {
 }
 
 if (document.readyState === "loading") {
-  document.addEventListener("DOMContentLoaded", initGoogleSignup, { once: true });
+  document.addEventListener("DOMContentLoaded", initGoogleSignup, {
+    once: true
+  });
 } else {
   initGoogleSignup();
 }
