@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { initializeApp, cert, getApps } from "firebase-admin/app";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
 
@@ -14,11 +15,14 @@ const ALLOWED_LEVELS = new Set([
 const MAX_TYPE_LENGTH = 60;
 const MAX_MESSAGE_LENGTH = 500;
 const MAX_EMAIL_LENGTH = 200;
+const MAX_EMAIL_HASH_LENGTH = 64;
 const MAX_USER_ID_LENGTH = 128;
 const MAX_IP_LENGTH = 100;
 const MAX_ROUTE_LENGTH = 150;
+const MAX_ROUTE_GROUP_LENGTH = 80;
 const MAX_SOURCE_LENGTH = 50;
 const MAX_EVENT_ID_LENGTH = 80;
+const MAX_FINGERPRINT_LENGTH = 64;
 const MAX_METADATA_STRING_LENGTH = 1000;
 const MAX_METADATA_KEY_LENGTH = 100;
 const MAX_METADATA_ITEMS = 30;
@@ -61,6 +65,13 @@ function normalizeEmail(value = "") {
   return email;
 }
 
+function normalizeEmailHash(value = "") {
+  return safeString(value || "", MAX_EMAIL_HASH_LENGTH)
+    .toLowerCase()
+    .replace(/[^a-f0-9]/g, "")
+    .slice(0, MAX_EMAIL_HASH_LENGTH);
+}
+
 function normalizeUserId(value = "") {
   return safeString(value || "", MAX_USER_ID_LENGTH).replace(/[^a-zA-Z0-9._:@/-]/g, "");
 }
@@ -88,15 +99,37 @@ function normalizeRoute(value = "") {
     .split("?")[0]
     .split("#")[0]
     .replace(/\/{2,}/g, "/")
-    .replace(/[^a-zA-Z0-9/_-]/g, "")
+    .replace(/[^a-zA-Z0-9/_:-]/g, "")
     .toLowerCase()
     .slice(0, MAX_ROUTE_LENGTH);
 
   return cleaned || "unknown-route";
 }
 
+function getRouteGroup(route = "") {
+  const normalized = normalizeRoute(route);
+
+  if (!normalized || normalized === "unknown-route") {
+    return "unknown";
+  }
+
+  const segments = normalized.split("/").filter(Boolean);
+  if (!segments.length) {
+    return "root";
+  }
+
+  return safeString(segments.slice(0, 2).join("/"), MAX_ROUTE_GROUP_LENGTH);
+}
+
 function normalizeEventId(value = "") {
   return safeString(value || "", MAX_EVENT_ID_LENGTH).replace(/[^a-zA-Z0-9._:-]/g, "");
+}
+
+function normalizeFingerprint(value = "") {
+  return safeString(value || "", MAX_FINGERPRINT_LENGTH)
+    .toLowerCase()
+    .replace(/[^a-f0-9]/g, "")
+    .slice(0, MAX_FINGERPRINT_LENGTH);
 }
 
 function sanitizeMetadata(value, depth = 0) {
@@ -157,7 +190,59 @@ function hasFirebaseAdminEnv() {
 
 function createEventId() {
   return normalizeEventId(
-    `sec_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`
+    `sec_${Date.now()}_${crypto.randomBytes(6).toString("hex")}`
+  );
+}
+
+function sha256Hex(input = "") {
+  return crypto
+    .createHash("sha256")
+    .update(String(input || ""))
+    .digest("hex");
+}
+
+function deriveEmailHash(email = "", providedHash = "") {
+  const normalizedProvided = normalizeEmailHash(providedHash);
+  if (normalizedProvided) {
+    return normalizedProvided;
+  }
+
+  const normalizedEmail = normalizeEmail(email);
+  if (!normalizedEmail) {
+    return "";
+  }
+
+  return sha256Hex(normalizedEmail).slice(0, MAX_EMAIL_HASH_LENGTH);
+}
+
+function deriveIpHash(ip = "") {
+  const normalizedIp = normalizeIp(ip);
+  if (!normalizedIp || normalizedIp === "unknown") {
+    return "";
+  }
+
+  return sha256Hex(normalizedIp).slice(0, 32);
+}
+
+function buildEventFingerprint({
+  type = "",
+  userId = "",
+  emailHash = "",
+  ipHash = "",
+  route = "",
+  source = ""
+}) {
+  return normalizeFingerprint(
+    sha256Hex(
+      [
+        safeString(type, 60),
+        normalizeUserId(userId),
+        normalizeEmailHash(emailHash),
+        safeString(ipHash, 64),
+        normalizeRoute(route),
+        safeString(source, 50)
+      ].join("|")
+    ).slice(0, MAX_FINGERPRINT_LENGTH)
   );
 }
 
@@ -189,7 +274,9 @@ function getAdminDb() {
         credential: cert({
           projectId: getRequiredEnv("FIREBASE_PROJECT_ID"),
           clientEmail: getRequiredEnv("FIREBASE_CLIENT_EMAIL"),
-          privateKey: String(process.env.FIREBASE_PRIVATE_KEY || "").replace(/\\n/g, "\n").trim()
+          privateKey: String(process.env.FIREBASE_PRIVATE_KEY || "")
+            .replace(/\\n/g, "\n")
+            .trim()
         })
       });
     }
@@ -214,10 +301,15 @@ export async function writeSecurityLog(data = {}) {
     const type = safeString(data.type || "unknown", MAX_TYPE_LENGTH).toLowerCase();
     const level = safeLevel(data.level);
     const message = safeString(data.message || "", MAX_MESSAGE_LENGTH);
+
     const email = normalizeEmail(data.email || "");
+    const emailHash = deriveEmailHash(email, data.emailHash || "");
     const userId = normalizeUserId(data.userId || "");
     const ip = normalizeIp(data.ip || "unknown");
+    const ipHash = deriveIpHash(ip);
+
     const route = normalizeRoute(data.route || "unknown-route");
+    const routeGroup = getRouteGroup(route);
 
     const metadataInput = isPlainObject(data.metadata) ? data.metadata : {};
     const metadata = sanitizeMetadata(metadataInput);
@@ -235,6 +327,17 @@ export async function writeSecurityLog(data = {}) {
       100
     );
 
+    const fingerprint =
+      normalizeFingerprint(data.fingerprint || "") ||
+      buildEventFingerprint({
+        type,
+        userId,
+        emailHash,
+        ipHash,
+        route,
+        source
+      });
+
     const log = {
       eventId,
       type,
@@ -242,10 +345,14 @@ export async function writeSecurityLog(data = {}) {
       severityScore,
       message,
       email,
+      emailHash,
       userId,
       ip,
+      ipHash,
       route,
+      routeGroup,
       source,
+      fingerprint,
       metadata,
       createdAt: FieldValue.serverTimestamp(),
       createdAtMs: Date.now()
