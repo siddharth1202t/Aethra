@@ -239,6 +239,40 @@ function mapGoogleError(error) {
   }
 }
 
+async function processAuthenticatedGoogleUser(user, actionLabel, successMessage) {
+  const securityContext = getClientSecurityContext();
+
+  const checkResult = await callLoginAttemptApi(
+    normalizeEmail(user?.email || "google-signup"),
+    "check",
+    {
+      actionLabel,
+      ...securityContext
+    }
+  );
+
+  if (checkResult?.isLocked) {
+    throw new Error(
+      `This account is temporarily locked. Please try again in ${formatRemainingMinutes(checkResult.remainingMs)}.`
+    );
+  }
+
+  await ensureUserProfile(user);
+
+  fireAndForgetSecurityLog({
+    type: "google_signup_success",
+    message: successMessage,
+    email: user.email || "",
+    userId: user.uid,
+    metadata: {
+      behavior: securityContext.behavior || {}
+    }
+  });
+
+  authFallbackHandled = true;
+  return redirectSignedInUser(user);
+}
+
 async function handleRedirectResultIfAny() {
   try {
     const result = await getRedirectResult(auth);
@@ -247,38 +281,11 @@ async function handleRedirectResultIfAny() {
       return false;
     }
 
-    const user = result.user;
-    const securityContext = getClientSecurityContext();
-
-    const checkResult = await callLoginAttemptApi(
-      normalizeEmail(user?.email || "google-signup"),
-      "check",
-      {
-        actionLabel: "google_signup_redirect",
-        ...securityContext
-      }
+    return await processAuthenticatedGoogleUser(
+      result.user,
+      "google_signup_redirect",
+      "User signed up with Google via redirect"
     );
-
-    if (checkResult?.isLocked) {
-      throw new Error(
-        `This account is temporarily locked. Please try again in ${formatRemainingMinutes(checkResult.remainingMs)}.`
-      );
-    }
-
-    await ensureUserProfile(user);
-
-    fireAndForgetSecurityLog({
-      type: "google_signup_success",
-      message: "User signed up with Google via redirect",
-      email: user.email || "",
-      userId: user.uid,
-      metadata: {
-        behavior: securityContext.behavior || {}
-      }
-    });
-
-    authFallbackHandled = true;
-    return redirectSignedInUser(user);
   } catch (error) {
     const code = error?.code || "";
     const message = String(error?.message || "").toLowerCase();
@@ -329,43 +336,15 @@ async function handleAuthenticatedUserFallback() {
       }
 
       settled = true;
-      authFallbackHandled = true;
       unsubscribe();
 
       try {
-        const securityContext = getClientSecurityContext();
-
-        const checkResult = await callLoginAttemptApi(
-          normalizeEmail(user?.email || "google-signup"),
-          "check",
-          {
-            actionLabel: "google_signup_auth_state",
-            ...securityContext
-          }
+        const handled = await processAuthenticatedGoogleUser(
+          user,
+          "google_signup_auth_state",
+          "User signed up with Google via auth state fallback"
         );
-
-        if (checkResult?.isLocked) {
-          await signOut(auth);
-          setFormError(
-            `This account is temporarily locked. Please try again in ${formatRemainingMinutes(checkResult.remainingMs)}.`
-          );
-          resolve(true);
-          return;
-        }
-
-        await ensureUserProfile(user);
-
-        fireAndForgetSecurityLog({
-          type: "google_signup_success",
-          message: "User signed up with Google via auth state fallback",
-          email: user.email || "",
-          userId: user.uid,
-          metadata: {
-            behavior: securityContext.behavior || {}
-          }
-        });
-
-        resolve(redirectSignedInUser(user));
+        resolve(handled);
       } catch (error) {
         console.error("[Google Signup] auth-state fallback failed:", error);
         setFormError(mapGoogleError(error));
@@ -381,7 +360,7 @@ async function handleAuthenticatedUserFallback() {
       settled = true;
       unsubscribe();
       resolve(false);
-    }, 5000);
+    }, 8000);
   });
 }
 
@@ -393,7 +372,6 @@ async function handleGoogleSignup() {
   googleInProgress = true;
 
   let signedInUser = null;
-  let securityContext = {};
 
   try {
     clearFormError();
@@ -449,36 +427,12 @@ async function handleGoogleSignup() {
 
     const user = credential.user;
     signedInUser = user;
-    securityContext = getClientSecurityContext();
 
-    const checkResult = await callLoginAttemptApi(
-      normalizeEmail(user?.email || "google-signup"),
-      "check",
-      {
-        actionLabel: "google_signup",
-        ...securityContext
-      }
+    await processAuthenticatedGoogleUser(
+      user,
+      "google_signup",
+      "User signed up with Google"
     );
-
-    if (checkResult?.isLocked) {
-      throw new Error(
-        `This account is temporarily locked. Please try again in ${formatRemainingMinutes(checkResult.remainingMs)}.`
-      );
-    }
-
-    await ensureUserProfile(user);
-
-    fireAndForgetSecurityLog({
-      type: "google_signup_success",
-      message: "User signed up with Google",
-      email: user.email || "",
-      userId: user.uid,
-      metadata: {
-        behavior: securityContext.behavior || {}
-      }
-    });
-
-    redirectSignedInUser(user);
   } catch (error) {
     console.error("[Google Signup] failed:", error);
 
@@ -493,10 +447,7 @@ async function handleGoogleSignup() {
     fireAndForgetSecurityLog({
       type: "google_signup_failed",
       message: error?.message || "Google signup failed",
-      email: signedInUser?.email || "google-signup",
-      metadata: {
-        behavior: securityContext.behavior || {}
-      }
+      email: signedInUser?.email || "google-signup"
     });
 
     setFormError(mapGoogleError(error));
@@ -525,11 +476,6 @@ async function initGoogleSignup() {
   try {
     bindEvents();
     await ensureAuthPersistence();
-
-    if (auth.currentUser) {
-      redirectSignedInUser(auth.currentUser);
-      return;
-    }
 
     const handledRedirect = await handleRedirectResultIfAny();
 
