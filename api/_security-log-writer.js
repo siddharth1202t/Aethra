@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { initializeApp, cert, getApps } from "firebase-admin/app";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
+import { updateSecurityState } from "./_security-state-manager.js";
 
 let adminDb = null;
 let adminInitFailed = false;
@@ -359,6 +360,24 @@ export async function writeSecurityLog(data = {}) {
     };
 
     await db.collection("securityLogs").doc(eventId).set(log, { merge: false });
+
+    await updateSecurityState(db, {
+      type,
+      level,
+      userId,
+      emailHash,
+      ipHash,
+      sessionId: safeString(
+        metadataInput?.sessionId ||
+        metadata?.sessionId ||
+        metadataInput?.client?.sessionId ||
+        "",
+        128
+      ),
+      routeGroup,
+      source
+    });
+
     return true;
   } catch (error) {
     console.error("writeSecurityLog failed:", error);
