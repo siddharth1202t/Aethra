@@ -2,132 +2,61 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>Verify Your Email - Aethra</title>
-  <style>
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-      font-family: "Segoe UI", Arial, sans-serif;
-    }
-
-    :root {
-      --bg-1: #070014;
-      --bg-2: #100423;
-      --bg-3: #1a0a38;
-      --text: #f5f2ff;
-      --muted: rgba(231, 226, 255, 0.72);
-      --shadow: 0 20px 80px rgba(0, 0, 0, 0.35);
-    }
-
-    body {
-      min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 24px;
-      color: var(--text);
-      background:
-        radial-gradient(circle at 15% 20%, rgba(127, 90, 255, 0.22), transparent 22%),
-        radial-gradient(circle at 85% 25%, rgba(93, 228, 255, 0.14), transparent 20%),
-        radial-gradient(circle at 50% 85%, rgba(167, 92, 255, 0.14), transparent 24%),
-        linear-gradient(135deg, var(--bg-1), var(--bg-2) 45%, var(--bg-3) 75%, #0b0218);
-    }
-
-    .card {
-      width: min(520px, 100%);
-      padding: 34px 28px;
-      border-radius: 28px;
-      background: linear-gradient(180deg, rgba(255,255,255,0.07), rgba(255,255,255,0.04));
-      border: 1px solid rgba(255,255,255,0.1);
-      backdrop-filter: blur(18px);
-      box-shadow: var(--shadow);
-      text-align: center;
-      visibility: hidden;
-    }
-
-    h1 {
-      font-size: 2rem;
-      margin-bottom: 12px;
-    }
-
-    p {
-      color: var(--muted);
-      line-height: 1.7;
-      margin-bottom: 18px;
-    }
-
-    .msg {
-      display: none;
-      margin-bottom: 14px;
-      padding: 12px 14px;
-      border-radius: 12px;
-      font-size: 0.92rem;
-      line-height: 1.5;
-    }
-
-    .msg.show {
-      display: block;
-    }
-
-    .msg.error {
-      background: rgba(255, 102, 102, 0.12);
-      border: 1px solid rgba(255, 102, 102, 0.2);
-      color: #ffd0d0;
-    }
-
-    .msg.success {
-      background: rgba(125, 255, 179, 0.12);
-      border: 1px solid rgba(125, 255, 179, 0.2);
-      color: #d4ffe6;
-    }
-
-    .btn {
-      width: 100%;
-      padding: 14px 16px;
-      border: none;
-      border-radius: 16px;
-      color: white;
-      font-weight: 700;
-      cursor: pointer;
-      margin-top: 10px;
-      background: linear-gradient(135deg, #7b61ff, #9a7cff);
-      box-shadow: 0 10px 35px rgba(123, 97, 255, 0.35);
-      transition: 0.2s ease;
-    }
-
-    .btn:hover:not(:disabled) {
-      transform: translateY(-2px);
-    }
-
-    .secondary {
-      background: rgba(255,255,255,0.06);
-      border: 1px solid rgba(255,255,255,0.1);
-      box-shadow: none;
-    }
-
-    .btn:disabled {
-      opacity: 0.7;
-      cursor: not-allowed;
-      transform: none;
-    }
-  </style>
+  <meta
+    name="description"
+    content="Verify your email to continue into Aethra and unlock your premium AI character experience."
+  />
+  <link rel="icon" type="image/png" href="/images/favicon.png?v=5" />
+  <link rel="shortcut icon" href="/images/favicon.png?v=5" />
+  <link rel="apple-touch-icon" href="/images/favicon.png?v=5" />
+  <link rel="stylesheet" href="styles/verify-email.css?v=1" />
 </head>
 <body>
-  <div class="card" id="verifyCard">
-    <h1>Verify your email</h1>
-    <p>
-      We sent a verification email to your inbox. Please verify your email address before entering Aethra.
-    </p>
+  <canvas
+    class="stars-canvas"
+    id="starsCanvas"
+    data-scene="auth"
+    aria-hidden="true"
+  ></canvas>
 
-    <div id="messageBox" class="msg" aria-live="polite"></div>
-
-    <button id="resendBtn" class="btn" type="button">Resend Verification Email</button>
-    <button id="refreshBtn" class="btn secondary" type="button">I Have Verified My Email</button>
-    <button id="logoutBtn" class="btn secondary" type="button">Logout</button>
+  <div class="aurora" aria-hidden="true">
+    <div class="blob one"></div>
+    <div class="blob two"></div>
+    <div class="blob three"></div>
   </div>
 
+  <main class="page">
+    <section class="card" id="verifyCard" aria-labelledby="verifyTitle">
+      <div class="badge">Account security</div>
+
+      <h1 id="verifyTitle">Verify your email</h1>
+
+      <p class="subtext">
+        We sent a verification email to your inbox. Please verify your email
+        address before entering Aethra.
+      </p>
+
+      <div id="messageBox" class="msg" aria-live="polite"></div>
+
+      <div class="actions">
+        <button id="resendBtn" class="btn btn-primary" type="button">
+          Resend Verification Email
+        </button>
+
+        <button id="refreshBtn" class="btn btn-secondary" type="button">
+          I Have Verified My Email
+        </button>
+
+        <button id="logoutBtn" class="btn btn-secondary" type="button">
+          Logout
+        </button>
+      </div>
+    </section>
+  </main>
+
+  <script src="js/stars-canvas.js?v=3" defer></script>
   <script type="module" src="js/app-check.js"></script>
   <script type="module" src="js/verify-email.js"></script>
 </body>
