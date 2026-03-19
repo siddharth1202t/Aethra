@@ -61,8 +61,8 @@ function getLevel(score) {
   return "low";
 }
 
-function getAction(score, hasHardBlock = false) {
-  if (hasHardBlock || score >= 95) return "block";
+function getAction(score, hardBlockSignals = 0) {
+  if (safeInt(hardBlockSignals, 0, 0, 100) >= 2 || score >= 95) return "block";
   if (score >= 75) return "challenge";
   if (score >= 45) return "throttle";
   return "allow";
@@ -167,12 +167,31 @@ function normalizeThreatResult(threatResult = null) {
   };
 }
 
+function normalizeSecurityState(securityState = null) {
+  if (!securityState || typeof securityState !== "object") return null;
+
+  return {
+    currentRiskScore: safeInt(securityState.currentRiskScore, 0, 0, 100),
+    currentRiskLevel: normalizeLevel(securityState.currentRiskLevel || "low"),
+    failedLoginCount: safeInt(securityState.failedLoginCount, 0, 0, 100000),
+    failedSignupCount: safeInt(securityState.failedSignupCount, 0, 0, 100000),
+    failedPasswordResetCount: safeInt(securityState.failedPasswordResetCount, 0, 0, 100000),
+    captchaFailureCount: safeInt(securityState.captchaFailureCount, 0, 0, 100000),
+    suspiciousEventCount: safeInt(securityState.suspiciousEventCount, 0, 0, 100000),
+    rateLimitHitCount: safeInt(securityState.rateLimitHitCount, 0, 0, 100000),
+    lockoutCount: safeInt(securityState.lockoutCount, 0, 0, 100000),
+    successfulAuthCount: safeInt(securityState.successfulAuthCount, 0, 0, 100000)
+  };
+}
+
 export function evaluateRisk(inputs = {}) {
   const botResult = normalizeBotResult(inputs.botResult);
   const abuseResult = normalizeAbuseResult(inputs.abuseResult);
   const rateLimitResult = normalizeRateLimitResult(inputs.rateLimitResult);
   const freshnessResult = normalizeFreshnessResult(inputs.freshnessResult);
   const threatResult = normalizeThreatResult(inputs.threatResult);
+  const securityState = normalizeSecurityState(inputs.securityState);
+  const routeSensitivity = normalizeRouteSensitivity(inputs.routeSensitivity || "normal");
 
   const state = {
     score: 0,
@@ -180,46 +199,52 @@ export function evaluateRisk(inputs = {}) {
     hardBlockSignals: 0
   };
 
+  if (routeSensitivity === "critical") {
+    addWeightedScore(state, 8, "route:critical");
+  } else if (routeSensitivity === "high") {
+    addWeightedScore(state, 4, "route:high");
+  }
+
   if (botResult) {
-    if (botResult.riskScore >= 70) addWeightedScore(state, 20, "bot_high_risk");
-    else if (botResult.riskScore >= 40) addWeightedScore(state, 10, "bot_medium_risk");
+    if (botResult.riskScore >= 70) addWeightedScore(state, 20, "bot:high_risk");
+    else if (botResult.riskScore >= 40) addWeightedScore(state, 10, "bot:medium_risk");
 
     if (botResult.escalatedAction === "block") {
-      addWeightedScore(state, 20, "bot_escalated_block");
+      addWeightedScore(state, 20, "bot:escalated_block");
     } else if (botResult.escalatedAction === "challenge") {
-      addWeightedScore(state, 10, "bot_escalated_challenge");
+      addWeightedScore(state, 10, "bot:escalated_challenge");
     }
 
     if (botResult.telemetryQualityScore <= 30) {
-      addWeightedScore(state, 10, "bot_low_telemetry_quality");
+      addWeightedScore(state, 10, "bot:low_telemetry_quality");
     }
 
     if (botResult.distributed.suspicionScore >= 120) {
-      addWeightedScore(state, 25, "bot_distributed_suspicion_high");
+      addWeightedScore(state, 25, "bot:distributed_suspicion_high");
     } else if (botResult.distributed.suspicionScore >= 60) {
-      addWeightedScore(state, 12, "bot_distributed_suspicion_medium");
+      addWeightedScore(state, 12, "bot:distributed_suspicion_medium");
     }
 
     if (botResult.distributed.recentHardBlocks >= 2) {
-      addWeightedScore(state, 15, "bot_recent_hard_blocks");
+      addWeightedScore(state, 15, "bot:recent_hard_blocks");
     }
 
     if (botResult.distributed.recentChallenges >= 3) {
-      addWeightedScore(state, 8, "bot_recent_challenges");
+      addWeightedScore(state, 8, "bot:recent_challenges");
     }
 
     if (botResult.distributed.sensitiveRouteHits >= 5) {
-      addWeightedScore(state, 10, "bot_sensitive_route_targeting");
+      addWeightedScore(state, 10, "bot:sensitive_route_targeting");
     }
 
     if (botResult.hardBlockSignals > 0) {
       state.hardBlockSignals += botResult.hardBlockSignals;
-      addWeightedScore(state, 35, "bot_hard_block_signal");
+      addWeightedScore(state, 35, "bot:hard_block_signal");
     }
 
     if (botResult.distributed.hardBlockCount >= 2) {
       state.hardBlockSignals += 1;
-      addWeightedScore(state, 20, "bot_distributed_hard_block_history");
+      addWeightedScore(state, 20, "bot:distributed_hard_block_history");
     }
 
     for (const reason of botResult.reasons) {
@@ -228,29 +253,29 @@ export function evaluateRisk(inputs = {}) {
   }
 
   if (abuseResult) {
-    if (abuseResult.abuseScore >= 70) addWeightedScore(state, 22, "abuse_high_score");
-    else if (abuseResult.abuseScore >= 40) addWeightedScore(state, 10, "abuse_medium_score");
+    if (abuseResult.abuseScore >= 70) addWeightedScore(state, 22, "abuse:high_score");
+    else if (abuseResult.abuseScore >= 40) addWeightedScore(state, 10, "abuse:medium_score");
 
     if (abuseResult.penaltyActive) {
-      addWeightedScore(state, 18, "abuse_penalty_active");
+      addWeightedScore(state, 18, "abuse:penalty_active");
     }
 
     if (abuseResult.snapshot.weightedFailures >= 12) {
-      addWeightedScore(state, 15, "abuse_heavy_failures");
+      addWeightedScore(state, 15, "abuse:heavy_failures");
     } else if (abuseResult.snapshot.weightedFailures >= 6) {
-      addWeightedScore(state, 8, "abuse_repeated_failures");
+      addWeightedScore(state, 8, "abuse:repeated_failures");
     }
 
     if (abuseResult.snapshot.uniqueRoutes >= 4) {
-      addWeightedScore(state, 10, "abuse_multi_route_probing");
+      addWeightedScore(state, 10, "abuse:multi_route_probing");
     }
 
     if (abuseResult.snapshot.criticalRouteTouchesRecent >= 2) {
-      addWeightedScore(state, 20, "abuse_critical_route_targeting");
+      addWeightedScore(state, 20, "abuse:critical_route_targeting");
     }
 
     if (abuseResult.snapshot.penaltyCount >= 3) {
-      addWeightedScore(state, 10, "abuse_repeat_penalties");
+      addWeightedScore(state, 10, "abuse:repeat_penalties");
     }
 
     for (const reason of abuseResult.reasons) {
@@ -260,31 +285,31 @@ export function evaluateRisk(inputs = {}) {
 
   if (rateLimitResult) {
     if (!rateLimitResult.allowed) {
-      addWeightedScore(state, 15, "rate_limit_exceeded");
+      addWeightedScore(state, 15, "rate:limit_exceeded");
     }
 
     if (rateLimitResult.penaltyActive) {
-      addWeightedScore(state, 15, "rate_limit_penalty_active");
+      addWeightedScore(state, 15, "rate:penalty_active");
     }
 
     if (rateLimitResult.violations >= 4) {
-      addWeightedScore(state, 18, "rate_limit_repeat_violations");
+      addWeightedScore(state, 18, "rate:repeat_violations");
     } else if (rateLimitResult.violations >= 2) {
-      addWeightedScore(state, 8, "rate_limit_multiple_violations");
+      addWeightedScore(state, 8, "rate:multiple_violations");
     }
 
     if (rateLimitResult.burstCount >= 10) {
-      addWeightedScore(state, 15, "rate_limit_burst_pattern");
+      addWeightedScore(state, 15, "rate:burst_pattern");
     }
 
     if (rateLimitResult.routeSensitivity === "critical") {
-      addWeightedScore(state, 10, "rate_limit_critical_route_pressure");
+      addWeightedScore(state, 10, "rate:critical_route_pressure");
     }
   }
 
   if (freshnessResult) {
     if (!freshnessResult.ok) {
-      addWeightedScore(state, 20, `freshness_${freshnessResult.code || "failed"}`);
+      addWeightedScore(state, 20, `freshness:${freshnessResult.code || "failed"}`);
 
       if (
         freshnessResult.code === "replayed_nonce" ||
@@ -296,58 +321,99 @@ export function evaluateRisk(inputs = {}) {
   }
 
   if (threatResult) {
-    if (threatResult.threatScore >= 80) addWeightedScore(state, 25, "threat_memory_high");
-    else if (threatResult.threatScore >= 50) addWeightedScore(state, 12, "threat_memory_medium");
+    if (threatResult.threatScore >= 80) addWeightedScore(state, 25, "memory:high");
+    else if (threatResult.threatScore >= 50) addWeightedScore(state, 12, "memory:medium");
 
     if (threatResult.action === "block") {
-      addWeightedScore(state, 20, "threat_memory_block_action");
+      addWeightedScore(state, 20, "memory:block_action");
     } else if (threatResult.action === "challenge") {
-      addWeightedScore(state, 8, "threat_memory_challenge_action");
+      addWeightedScore(state, 8, "memory:challenge_action");
     }
 
     if (threatResult.events.freshnessFailures >= 3) {
-      addWeightedScore(state, 10, "threat_repeat_freshness_failures");
+      addWeightedScore(state, 10, "memory:repeat_freshness_failures");
     }
 
     if (threatResult.events.botEvents >= 5) {
-      addWeightedScore(state, 10, "threat_repeat_bot_events");
+      addWeightedScore(state, 10, "memory:repeat_bot_events");
     }
 
     if (threatResult.events.abuseEvents >= 5) {
-      addWeightedScore(state, 10, "threat_repeat_abuse_events");
+      addWeightedScore(state, 10, "memory:repeat_abuse_events");
     }
 
     if (threatResult.events.blockEvents >= 3) {
-      addWeightedScore(state, 12, "threat_repeat_block_events");
+      addWeightedScore(state, 12, "memory:repeat_block_events");
     }
 
     if (threatResult.events.hardBlockSignals >= 2) {
       state.hardBlockSignals += 1;
-      addWeightedScore(state, 15, "threat_hard_block_memory");
+      addWeightedScore(state, 15, "memory:hard_block_signals");
     }
 
     if (threatResult.events.criticalRouteHits >= 5) {
-      addWeightedScore(state, 15, "threat_critical_route_pressure");
+      addWeightedScore(state, 15, "memory:critical_route_pressure");
+    }
+  }
+
+  if (securityState) {
+    if (securityState.currentRiskScore >= 75) {
+      addWeightedScore(state, 20, "state:high_risk_score");
+    } else if (securityState.currentRiskScore >= 45) {
+      addWeightedScore(state, 10, "state:medium_risk_score");
+    }
+
+    if (securityState.failedLoginCount >= 5) {
+      addWeightedScore(state, 12, "state:repeat_failed_logins");
+    }
+
+    if (securityState.failedSignupCount >= 3) {
+      addWeightedScore(state, 8, "state:repeat_failed_signups");
+    }
+
+    if (securityState.failedPasswordResetCount >= 3) {
+      addWeightedScore(state, 8, "state:repeat_failed_password_resets");
+    }
+
+    if (securityState.captchaFailureCount >= 5) {
+      addWeightedScore(state, 12, "state:repeat_captcha_failures");
+    }
+
+    if (securityState.suspiciousEventCount >= 5) {
+      addWeightedScore(state, 15, "state:suspicious_event_history");
+    }
+
+    if (securityState.rateLimitHitCount >= 4) {
+      addWeightedScore(state, 10, "state:rate_limit_history");
+    }
+
+    if (securityState.lockoutCount >= 2) {
+      addWeightedScore(state, 18, "state:lockout_history");
+    }
+
+    if (securityState.currentRiskLevel === "critical") {
+      state.hardBlockSignals += 1;
+      addWeightedScore(state, 15, "state:critical_risk_level");
     }
   }
 
   if (botResult && abuseResult) {
     if (botResult.riskScore >= 40 && abuseResult.abuseScore >= 40) {
-      addWeightedScore(state, 15, "cross_signal_bot_plus_abuse");
+      addWeightedScore(state, 15, "cross:bot_plus_abuse");
     }
 
     if (
       botResult.distributed.sensitiveRouteHits >= 5 &&
       abuseResult.snapshot.criticalRouteTouchesRecent >= 2
     ) {
-      addWeightedScore(state, 20, "cross_signal_sensitive_route_attack");
+      addWeightedScore(state, 20, "cross:sensitive_route_attack");
     }
 
     if (
       botResult.escalatedAction === "block" &&
       abuseResult.penaltyActive
     ) {
-      addWeightedScore(state, 15, "cross_signal_bot_block_plus_abuse_penalty");
+      addWeightedScore(state, 15, "cross:bot_block_plus_abuse_penalty");
     }
   }
 
@@ -356,14 +422,32 @@ export function evaluateRisk(inputs = {}) {
       abuseResult.snapshot.burstCount >= 8 &&
       rateLimitResult.burstCount >= 8
     ) {
-      addWeightedScore(state, 12, "cross_signal_burst_alignment");
+      addWeightedScore(state, 12, "cross:burst_alignment");
     }
 
     if (
       abuseResult.snapshot.criticalRouteTouchesRecent >= 2 &&
       rateLimitResult.routeSensitivity === "critical"
     ) {
-      addWeightedScore(state, 12, "cross_signal_critical_route_alignment");
+      addWeightedScore(state, 12, "cross:critical_route_alignment");
+    }
+  }
+
+  if (securityState && botResult) {
+    if (
+      securityState.suspiciousEventCount >= 5 &&
+      botResult.riskScore >= 40
+    ) {
+      addWeightedScore(state, 12, "cross:state_plus_bot");
+    }
+  }
+
+  if (securityState && threatResult) {
+    if (
+      securityState.lockoutCount >= 2 &&
+      threatResult.events.blockEvents >= 2
+    ) {
+      addWeightedScore(state, 15, "cross:state_plus_memory_blocks");
     }
   }
 
@@ -371,14 +455,15 @@ export function evaluateRisk(inputs = {}) {
   state.reasons = state.reasons.slice(0, MAX_REASONS);
 
   const level = getLevel(state.score);
-  const action = getAction(state.score, state.hardBlockSignals > 0);
+  const action = getAction(state.score, state.hardBlockSignals);
 
   let containmentAction = "none";
 
   if (action === "block") {
-    containmentAction = level === "critical"
-      ? "freeze_sensitive_route"
-      : "temporary_containment";
+    containmentAction =
+      level === "critical"
+        ? "freeze_sensitive_route"
+        : "temporary_containment";
   } else if (action === "challenge") {
     containmentAction = "step_up_verification";
   } else if (action === "throttle") {
