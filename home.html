@@ -2,468 +2,38 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>Aethra Home</title>
+  <meta
+    name="description"
+    content="Welcome back to Aethra — your premium world of living AI characters, evolving emotions, and immersive conversations."
+  />
   <link rel="icon" type="image/png" href="/images/favicon.png?v=5" />
   <link rel="shortcut icon" href="/images/favicon.png?v=5" />
   <link rel="apple-touch-icon" href="/images/favicon.png?v=5" />
-  <style>
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-      font-family: "Segoe UI", Arial, sans-serif;
-    }
-
-    :root {
-      --bg-1: #070014;
-      --bg-2: #100423;
-      --bg-3: #1a0a38;
-      --text: #f5f2ff;
-      --muted: rgba(231, 226, 255, 0.72);
-      --accent: #8a6cff;
-      --accent-2: #5de4ff;
-      --card: rgba(255, 255, 255, 0.06);
-      --border: rgba(255, 255, 255, 0.1);
-      --shadow: 0 20px 80px rgba(0, 0, 0, 0.35);
-    }
-
-    html, body {
-      min-height: 100%;
-    }
-
-    body {
-      color: var(--text);
-      background:
-        radial-gradient(circle at 15% 20%, rgba(127, 90, 255, 0.22), transparent 22%),
-        radial-gradient(circle at 85% 25%, rgba(93, 228, 255, 0.14), transparent 20%),
-        radial-gradient(circle at 50% 85%, rgba(167, 92, 255, 0.14), transparent 24%),
-        linear-gradient(135deg, var(--bg-1), var(--bg-2) 45%, var(--bg-3) 75%, #0b0218);
-      overflow-x: hidden;
-      position: relative;
-    }
-
-    .stars {
-      position: fixed;
-      inset: 0;
-      overflow: hidden;
-      pointer-events: none;
-      z-index: 0;
-    }
-
-    .star {
-      position: absolute;
-      border-radius: 50%;
-      background: rgba(255,255,255,0.9);
-      box-shadow: 0 0 10px rgba(255,255,255,0.8);
-      animation: twinkle linear infinite;
-    }
-
-    @keyframes twinkle {
-      0%, 100% {
-        opacity: 0.25;
-        transform: scale(0.8);
-      }
-      50% {
-        opacity: 1;
-        transform: scale(1.5);
-      }
-    }
-
-    .shell {
-      position: relative;
-      z-index: 2;
-      max-width: 1280px;
-      margin: 0 auto;
-      padding: 24px;
-      visibility: hidden;
-    }
-
-    .topbar {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 16px;
-      padding: 16px 20px;
-      border-radius: 22px;
-      background: rgba(255,255,255,0.04);
-      border: 1px solid var(--border);
-      backdrop-filter: blur(16px);
-      box-shadow: var(--shadow);
-      margin-bottom: 24px;
-    }
-
-    .brand {
-      display: flex;
-      align-items: center;
-      gap: 14px;
-    }
-
-    .brand-logo {
-      width: 52px;
-      height: 52px;
-      border-radius: 18px;
-      overflow: hidden;
-      border: 1px solid rgba(255,255,255,0.1);
-      background: rgba(255,255,255,0.05);
-      box-shadow: 0 0 24px rgba(138,108,255,0.25);
-      flex-shrink: 0;
-    }
-
-    .brand-logo img {
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-      display: block;
-    }
-
-    .brand-text h1 {
-      font-size: 1.2rem;
-      margin-bottom: 4px;
-    }
-
-    .brand-text p {
-      color: var(--muted);
-      font-size: 0.92rem;
-    }
-
-    .top-actions {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      flex-wrap: wrap;
-    }
-
-    .user-pill {
-      padding: 10px 14px;
-      border-radius: 999px;
-      background: rgba(138,108,255,0.12);
-      border: 1px solid rgba(255,255,255,0.08);
-      color: #ddd4ff;
-      font-size: 0.92rem;
-    }
-
-    .logout-btn {
-      border: none;
-      border-radius: 14px;
-      padding: 12px 18px;
-      font-weight: 700;
-      color: white;
-      cursor: pointer;
-      background: linear-gradient(135deg, #7b61ff, #9a7cff);
-      box-shadow: 0 10px 30px rgba(123, 97, 255, 0.35);
-      transition: 0.25s ease;
-    }
-
-    .logout-btn:hover {
-      transform: translateY(-2px);
-      box-shadow: 0 16px 38px rgba(123, 97, 255, 0.5);
-    }
-
-    .logout-btn:disabled {
-      opacity: 0.7;
-      cursor: not-allowed;
-      transform: none;
-    }
-
-    .hero {
-      display: grid;
-      grid-template-columns: 1.25fr 0.75fr;
-      gap: 24px;
-      margin-bottom: 24px;
-    }
-
-    .hero-card,
-    .side-panel,
-    .section-card,
-    .character-card {
-      background: var(--card);
-      border: 1px solid var(--border);
-      backdrop-filter: blur(18px);
-      box-shadow: var(--shadow);
-    }
-
-    .hero-card {
-      border-radius: 30px;
-      padding: 34px;
-      position: relative;
-      overflow: hidden;
-    }
-
-    .hero-card::before {
-      content: "";
-      position: absolute;
-      inset: 0;
-      background: radial-gradient(circle at top right, rgba(138,108,255,0.16), transparent 35%);
-      pointer-events: none;
-    }
-
-    .badge {
-      display: inline-flex;
-      padding: 9px 14px;
-      border-radius: 999px;
-      background: rgba(138,108,255,0.12);
-      border: 1px solid rgba(255,255,255,0.08);
-      color: #ddd4ff;
-      font-size: 0.88rem;
-      margin-bottom: 16px;
-    }
-
-    .hero-card h2 {
-      font-size: 3rem;
-      line-height: 1.1;
-      margin-bottom: 14px;
-      max-width: 700px;
-    }
-
-    .hero-card p {
-      color: var(--muted);
-      font-size: 1.05rem;
-      line-height: 1.8;
-      max-width: 700px;
-      margin-bottom: 24px;
-    }
-
-    .hero-buttons {
-      display: flex;
-      gap: 14px;
-      flex-wrap: wrap;
-      margin-bottom: 28px;
-    }
-
-    .primary-btn,
-    .secondary-btn,
-    .chat-btn {
-      border: none;
-      border-radius: 16px;
-      padding: 14px 20px;
-      font-weight: 700;
-      cursor: pointer;
-      transition: 0.25s ease;
-    }
-
-    .primary-btn {
-      color: white;
-      background: linear-gradient(135deg, #6d5cff, #56d6ff);
-      box-shadow: 0 10px 32px rgba(90, 150, 255, 0.28);
-    }
-
-    .primary-btn:hover,
-    .chat-btn:hover {
-      transform: translateY(-2px);
-    }
-
-    .secondary-btn {
-      color: white;
-      background: rgba(255,255,255,0.06);
-      border: 1px solid rgba(255,255,255,0.1);
-    }
-
-    .stats {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 14px;
-    }
-
-    .stat-box {
-      padding: 18px;
-      border-radius: 20px;
-      background: rgba(255,255,255,0.04);
-      border: 1px solid rgba(255,255,255,0.08);
-    }
-
-    .stat-box h3 {
-      font-size: 1.5rem;
-      margin-bottom: 8px;
-    }
-
-    .stat-box p {
-      font-size: 0.92rem;
-      line-height: 1.6;
-      color: var(--muted);
-      margin: 0;
-    }
-
-    .side-panel {
-      border-radius: 30px;
-      padding: 24px;
-      display: flex;
-      flex-direction: column;
-      gap: 18px;
-    }
-
-    .panel-title {
-      font-size: 1.15rem;
-      margin-bottom: 4px;
-    }
-
-    .panel-sub {
-      color: var(--muted);
-      font-size: 0.95rem;
-      line-height: 1.6;
-    }
-
-    .mini-card {
-      padding: 18px;
-      border-radius: 20px;
-      background: rgba(255,255,255,0.04);
-      border: 1px solid rgba(255,255,255,0.08);
-    }
-
-    .mini-card h4 {
-      margin-bottom: 8px;
-      font-size: 1rem;
-    }
-
-    .mini-card p {
-      color: var(--muted);
-      line-height: 1.6;
-      font-size: 0.92rem;
-    }
-
-    .section-card {
-      border-radius: 28px;
-      padding: 28px;
-      margin-bottom: 24px;
-    }
-
-    .section-head {
-      display: flex;
-      justify-content: space-between;
-      align-items: flex-start;
-      gap: 16px;
-      margin-bottom: 22px;
-      flex-wrap: wrap;
-    }
-
-    .section-head h3 {
-      font-size: 1.8rem;
-      margin-bottom: 6px;
-    }
-
-    .section-head p {
-      color: var(--muted);
-      line-height: 1.6;
-    }
-
-    .quick-grid {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 16px;
-    }
-
-    .quick-box {
-      padding: 20px;
-      border-radius: 22px;
-      background: rgba(255,255,255,0.04);
-      border: 1px solid rgba(255,255,255,0.08);
-    }
-
-    .quick-box h4 {
-      margin-bottom: 8px;
-      font-size: 1.05rem;
-    }
-
-    .quick-box p {
-      color: var(--muted);
-      line-height: 1.65;
-      font-size: 0.93rem;
-    }
-
-    @media (max-width: 1100px) {
-      .hero {
-        grid-template-columns: 1fr;
-      }
-
-      .quick-grid {
-        grid-template-columns: repeat(2, 1fr);
-      }
-    }
-
-    @media (max-width: 760px) {
-      .shell {
-        padding: 16px;
-      }
-
-      .topbar {
-        padding: 14px 16px;
-        border-radius: 18px;
-      }
-
-      .brand-text h1 {
-        font-size: 1rem;
-      }
-
-      .hero-card {
-        padding: 24px 20px;
-        border-radius: 22px;
-      }
-
-      .hero-card h2 {
-        font-size: 2.1rem;
-      }
-
-      .stats {
-        grid-template-columns: 1fr;
-      }
-
-      .section-card {
-        padding: 22px 18px;
-        border-radius: 22px;
-      }
-
-      .quick-grid {
-        grid-template-columns: 1fr;
-      }
-
-      .top-actions {
-        width: 100%;
-        justify-content: space-between;
-      }
-    }
-
-    @media (max-width: 520px) {
-      .topbar {
-        flex-direction: column;
-        align-items: flex-start;
-      }
-
-      .top-actions {
-        width: 100%;
-        flex-direction: column;
-        align-items: stretch;
-      }
-
-      .logout-btn,
-      .user-pill {
-        width: 100%;
-        text-align: center;
-      }
-
-      .hero-card h2 {
-        font-size: 1.75rem;
-      }
-
-      .hero-buttons {
-        flex-direction: column;
-      }
-
-      .primary-btn,
-      .secondary-btn {
-        width: 100%;
-      }
-    }
-  </style>
+  <link rel="stylesheet" href="styles/home.css?v=1" />
 </head>
 <body>
-  <canvas class="stars-canvas" id="starsCanvas" data-scene="home" aria-hidden="true"></canvas>
+  <canvas
+    class="stars-canvas"
+    id="starsCanvas"
+    data-scene="home"
+    aria-hidden="true"
+  ></canvas>
+
+  <div class="aurora" aria-hidden="true">
+    <div class="blob one"></div>
+    <div class="blob two"></div>
+    <div class="blob three"></div>
+  </div>
 
   <div class="shell">
     <header class="topbar">
       <div class="brand">
-        <div class="brand-logo">
-          <img src="images/logo.png" alt="Aethra Logo">
-        </div>
+        <a href="index.html" class="brand-logo" aria-label="Aethra home">
+          <img src="images/logo.png" alt="Aethra Logo" />
+        </a>
+
         <div class="brand-text">
           <h1>Aethra</h1>
           <p>Living AI characters, evolving emotions, unforgettable stories.</p>
@@ -471,27 +41,35 @@
       </div>
 
       <div class="top-actions">
-        <div class="user-pill">Logged in as <span id="userRole">User</span></div>
+        <div class="user-pill">
+          Logged in as <span id="userRole">User</span>
+        </div>
 
         <button
-          class="logout-btn"
+          class="logout-btn dev-btn"
           id="devBtn"
           type="button"
-          style="display:none; background:linear-gradient(135deg,#ff7a18,#ff3d3d);">
+          style="display:none;"
+        >
           Developer
         </button>
 
-        <button class="logout-btn" id="logoutBtn" type="button">Logout</button>
+        <button class="logout-btn" id="logoutBtn" type="button">
+          Logout
+        </button>
       </div>
     </header>
 
     <section class="hero">
       <div class="hero-card">
         <div class="badge">Your private AI universe</div>
+
         <h2>Welcome back, <span id="heroUsername">Explorer</span>.</h2>
+
         <p>
-          Step deeper into Aethra — a world where characters feel alive, remember your presence,
-          and grow through every conversation. Choose your next companion and continue your story.
+          Step deeper into Aethra — a world where characters feel alive,
+          remember your presence, and grow through every conversation. Choose
+          your next companion and continue your story.
         </p>
 
         <div class="hero-buttons">
@@ -502,15 +80,23 @@
         <div class="stats">
           <div class="stat-box">
             <h3>4+</h3>
-            <p>Distinct anime-inspired personalities with unique moods and chemistry.</p>
+            <p>
+              Distinct anime-inspired personalities with unique moods and chemistry.
+            </p>
           </div>
+
           <div class="stat-box">
             <h3>24/7</h3>
-            <p>Characters designed to feel present whenever you return to Aethra.</p>
+            <p>
+              Characters designed to feel present whenever you return to Aethra.
+            </p>
           </div>
+
           <div class="stat-box">
             <h3>Real Depth</h3>
-            <p>Memory, emotion, and storytelling built to make each bond feel meaningful.</p>
+            <p>
+              Memory, emotion, and storytelling built to make each bond feel meaningful.
+            </p>
           </div>
         </div>
       </div>
@@ -518,22 +104,34 @@
       <aside class="side-panel">
         <div>
           <h3 class="panel-title">Your Aethra World</h3>
-          <p class="panel-sub">Every conversation shapes a deeper bond. Pick a companion and continue your journey.</p>
+          <p class="panel-sub">
+            Every conversation shapes a deeper bond. Pick a companion and continue
+            your journey.
+          </p>
         </div>
 
         <div class="mini-card">
           <h4>Recommended Start</h4>
-          <p>Begin with a warm and emotionally rich character to experience Aethra’s full atmosphere.</p>
+          <p>
+            Begin with a warm and emotionally rich character to experience Aethra’s
+            atmosphere at its best.
+          </p>
         </div>
 
         <div class="mini-card">
           <h4>Today's Mood</h4>
-          <p>Soft, mysterious, and immersive. A perfect time to explore thoughtful and emotional conversations.</p>
+          <p>
+            Soft, mysterious, and immersive. A perfect time to explore thoughtful
+            and emotional conversations.
+          </p>
         </div>
 
         <div class="mini-card">
           <h4>Featured Experience</h4>
-          <p>Discover characters with distinct personalities, evolving chemistry, and memorable story energy.</p>
+          <p>
+            Discover characters with distinct personalities, evolving chemistry,
+            and memorable story energy.
+          </p>
         </div>
       </aside>
     </section>
@@ -542,24 +140,36 @@
       <div class="section-head">
         <div>
           <h3>Why People Choose Aethra</h3>
-          <p>Aethra is built to feel immersive, personal, and emotionally engaging from the very first chat.</p>
+          <p>
+            Aethra is designed to feel immersive, personal, and emotionally
+            engaging from the very first chat.
+          </p>
         </div>
       </div>
 
       <div class="quick-grid">
         <div class="quick-box">
           <h4>Living Personalities</h4>
-          <p>Each character feels distinct, with their own tone, emotional style, and presence.</p>
+          <p>
+            Each character feels distinct, with their own tone, emotional style,
+            and presence.
+          </p>
         </div>
 
         <div class="quick-box">
           <h4>Deeper Conversations</h4>
-          <p>Go beyond simple replies and explore connections that feel richer and more memorable.</p>
+          <p>
+            Go beyond simple replies and explore connections that feel richer and
+            more memorable.
+          </p>
         </div>
 
         <div class="quick-box">
           <h4>Immersive Atmosphere</h4>
-          <p>Aethra combines elegant design and character-driven emotion to create a world worth returning to.</p>
+          <p>
+            Aethra combines elegant design and character-driven emotion to create
+            a world worth returning to.
+          </p>
         </div>
       </div>
     </section>
