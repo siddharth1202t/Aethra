@@ -6,7 +6,7 @@ import {
 import { app } from "./firestore-config.js";
 
 const auth = getAuth(app);
-const AUTH_SETTLE_TIMEOUT_MS = 6000;
+const AUTH_SETTLE_TIMEOUT_MS = 15000;
 
 function safeString(value, maxLength = 300) {
   return String(value || "").trim().slice(0, maxLength);
