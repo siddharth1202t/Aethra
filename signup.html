@@ -7,30 +7,45 @@
     content="width=device-width, initial-scale=1.0, viewport-fit=cover"
   />
   <title>Aethra Signup</title>
+  <meta
+    name="description"
+    content="Create your Aethra account and enter a premium world of living AI characters, emotional memory, and evolving relationships."
+  />
   <link rel="stylesheet" href="styles/signup.css" />
   <link rel="icon" type="image/png" href="/images/favicon.png?v=5" />
   <link rel="shortcut icon" href="/images/favicon.png?v=5" />
   <link rel="apple-touch-icon" href="/images/favicon.png?v=5" />
 </head>
 <body>
-  <canvas class="stars-canvas" id="starsCanvas" data-scene="auth" aria-hidden="true"></canvas>
+  <canvas
+    class="stars-canvas"
+    id="starsCanvas"
+    data-scene="auth"
+    aria-hidden="true"
+  ></canvas>
 
   <div class="page">
     <div class="side-character">
-      <img src="images/character-left.png" alt="Akira" loading="lazy" />
+      <img
+        src="images/character-left.png"
+        alt="Akira"
+        loading="lazy"
+        decoding="async"
+      />
       <div class="side-label">
         <h3>AKIRA</h3>
         <p>Step into a world where every choice shapes your connection.</p>
       </div>
     </div>
 
-    <div class="center-wrap">
-      <div class="signup-card">
+    <main class="center-wrap">
+      <section class="signup-card" aria-labelledby="signupTitle">
         <a href="index.html" class="back-link">← Back to Aethra</a>
         <div class="badge">Create your account</div>
-        <h1>Join Aethra</h1>
+        <h1 id="signupTitle">Join Aethra</h1>
         <p class="subtext">
-          Create your profile and begin exploring a world of living AI characters.
+          Create your profile and begin exploring a world of living AI
+          characters with evolving emotion, memory, and presence.
         </p>
 
         <form id="signupForm" novalidate>
@@ -137,6 +152,7 @@
             width="20"
             height="20"
             loading="lazy"
+            decoding="async"
           />
           <span>Continue with Google</span>
         </button>
@@ -144,11 +160,16 @@
         <div class="bottom-text">
           Already have an account? <a href="login.html">Login</a>
         </div>
-      </div>
-    </div>
+      </section>
+    </main>
 
     <div class="side-character">
-      <img src="images/character-right.png" alt="Luna" loading="lazy" />
+      <img
+        src="images/character-right.png"
+        alt="Luna"
+        loading="lazy"
+        decoding="async"
+      />
       <div class="side-label">
         <h3>LUNA</h3>
         <p>Warm, elegant, and ready to welcome you into Aethra.</p>
