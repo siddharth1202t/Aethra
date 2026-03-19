@@ -8,6 +8,7 @@ import { validateFreshRequest } from "./_request-freshness.js";
 import { evaluateThreat } from "./_threat-intelligence.js";
 import { evaluateContainment } from "./_security-containment.js";
 import { evaluateAdaptiveThreatMode } from "./_adaptive-threat-mode.js";
+import { getFirestore } from "firebase-admin/firestore";
 
 function safeString(value, maxLength = 200) {
   return String(value || "")
@@ -20,20 +21,38 @@ function safeBoolean(value) {
   return value === true;
 }
 
+function safeInt(value, fallback = 0, min = 0, max = 1_000_000) {
+  const num = Math.floor(Number(value));
+  if (!Number.isFinite(num)) return fallback;
+  return Math.min(max, Math.max(min, num));
+}
+
 function normalizeAction(value = "allow") {
   const normalized = safeString(value || "allow", 20).toLowerCase();
-  if (normalized === "block" || normalized === "challenge" || normalized === "throttle") {
+  if (
+    normalized === "block" ||
+    normalized === "challenge" ||
+    normalized === "throttle"
+  ) {
     return normalized;
   }
   return "allow";
 }
 
+function normalizeRouteSensitivity(value = "normal") {
+  const normalized = safeString(value || "normal", 20).toLowerCase();
+  if (
+    normalized === "critical" ||
+    normalized === "high" ||
+    normalized === "normal"
+  ) {
+    return normalized;
+  }
+  return "normal";
+}
+
 function getRequestTimestamp(body = {}) {
-  const candidates = [
-    body?.requestAt,
-    body?.eventAt,
-    body?.timestamp
-  ];
+  const candidates = [body?.requestAt, body?.eventAt, body?.timestamp];
 
   for (const value of candidates) {
     const num = Number(value);
@@ -45,6 +64,175 @@ function getRequestTimestamp(body = {}) {
   return 0;
 }
 
+function normalizeHash(value = "", maxLength = 64) {
+  return safeString(value || "", maxLength)
+    .toLowerCase()
+    .replace(/[^a-f0-9]/g, "")
+    .slice(0, maxLength);
+}
+
+function sha256Hex(input = "") {
+  try {
+    const crypto = require("node:crypto");
+    return crypto.createHash("sha256").update(String(input || "")).digest("hex");
+  } catch {
+    return "";
+  }
+}
+
+function deriveIpHash(ip = "") {
+  const normalizedIp = safeString(ip || "", 100);
+  if (!normalizedIp || normalizedIp === "unknown") {
+    return "";
+  }
+
+  return sha256Hex(normalizedIp).slice(0, 32);
+}
+
+function deriveEmailHash(email = "") {
+  const normalizedEmail = safeString(email || "", 200).toLowerCase();
+  if (!normalizedEmail) {
+    return "";
+  }
+
+  return sha256Hex(normalizedEmail).slice(0, 64);
+}
+
+function buildSafeSignalBundle({
+  botResult = null,
+  abuseResult = null,
+  rateLimitResult = null,
+  freshnessResult = null,
+  threatResult = null,
+  containmentResult = null,
+  adaptiveModeResult = null,
+  securityState = null
+} = {}) {
+  return {
+    botResult: botResult || null,
+    abuseResult: abuseResult || null,
+    rateLimitResult: rateLimitResult || null,
+    freshnessResult: freshnessResult || null,
+    threatResult: threatResult || null,
+    containmentResult: containmentResult || null,
+    adaptiveModeResult: adaptiveModeResult || null,
+    securityState: securityState || null
+  };
+}
+
+function inferRouteSensitivity(route = "", config = {}) {
+  if (config?.routeSensitivity) {
+    return normalizeRouteSensitivity(config.routeSensitivity);
+  }
+
+  const normalizedRoute = safeString(route || "", 150).toLowerCase();
+
+  if (
+    normalizedRoute.includes("login") ||
+    normalizedRoute.includes("signup") ||
+    normalizedRoute.includes("verify-turnstile") ||
+    normalizedRoute.includes("security-log") ||
+    normalizedRoute.includes("password") ||
+    safeBoolean(config?.isAdminRoute)
+  ) {
+    return "critical";
+  }
+
+  if (
+    safeBoolean(config?.isWriteAction) ||
+    normalizedRoute.includes("chat") ||
+    normalizedRoute.includes("profile")
+  ) {
+    return "high";
+  }
+
+  return "normal";
+}
+
+async function readSecurityStateDoc(docId) {
+  if (!docId) {
+    return null;
+  }
+
+  try {
+    const db = getFirestore();
+    const snap = await db.doc(`securityState/${docId}`).get();
+    return snap.exists ? snap.data() || null : null;
+  } catch (error) {
+    console.error("Security state read failed:", error);
+    return null;
+  }
+}
+
+async function getSecurityStateSummary({ userId = "", email = "", ip = "", sessionId = "" } = {}) {
+  const safeUserId = safeString(userId || "", 128).replace(/[^a-zA-Z0-9._:@/-]/g, "");
+  const safeSessionId = safeString(sessionId || "", 128).replace(/[^a-zA-Z0-9._:@/-]/g, "");
+  const emailHash = deriveEmailHash(email || "");
+  const ipHash = deriveIpHash(ip || "");
+
+  const targets = [
+    safeUserId ? `user_${safeUserId}` : "",
+    emailHash ? `email_${emailHash}` : "",
+    ipHash ? `ip_${ipHash}` : "",
+    safeSessionId ? `session_${safeSessionId}` : ""
+  ].filter(Boolean);
+
+  if (!targets.length) {
+    return null;
+  }
+
+  const docs = await Promise.all(targets.map((docId) => readSecurityStateDoc(docId)));
+
+  const merged = {
+    currentRiskScore: 0,
+    currentRiskLevel: "low",
+    failedLoginCount: 0,
+    failedSignupCount: 0,
+    failedPasswordResetCount: 0,
+    captchaFailureCount: 0,
+    suspiciousEventCount: 0,
+    rateLimitHitCount: 0,
+    lockoutCount: 0,
+    successfulAuthCount: 0
+  };
+
+  for (const doc of docs) {
+    if (!doc || typeof doc !== "object") {
+      continue;
+    }
+
+    merged.currentRiskScore = Math.max(
+      merged.currentRiskScore,
+      safeInt(doc.currentRiskScore, 0, 0, 100)
+    );
+
+    if (safeString(doc.currentRiskLevel || "", 20).toLowerCase() === "critical") {
+      merged.currentRiskLevel = "critical";
+    } else if (
+      merged.currentRiskLevel !== "critical" &&
+      safeString(doc.currentRiskLevel || "", 20).toLowerCase() === "high"
+    ) {
+      merged.currentRiskLevel = "high";
+    } else if (
+      !["critical", "high"].includes(merged.currentRiskLevel) &&
+      safeString(doc.currentRiskLevel || "", 20).toLowerCase() === "medium"
+    ) {
+      merged.currentRiskLevel = "medium";
+    }
+
+    merged.failedLoginCount += safeInt(doc.failedLoginCount, 0, 0, 100000);
+    merged.failedSignupCount += safeInt(doc.failedSignupCount, 0, 0, 100000);
+    merged.failedPasswordResetCount += safeInt(doc.failedPasswordResetCount, 0, 0, 100000);
+    merged.captchaFailureCount += safeInt(doc.captchaFailureCount, 0, 0, 100000);
+    merged.suspiciousEventCount += safeInt(doc.suspiciousEventCount, 0, 0, 100000);
+    merged.rateLimitHitCount += safeInt(doc.rateLimitHitCount, 0, 0, 100000);
+    merged.lockoutCount += safeInt(doc.lockoutCount, 0, 0, 100000);
+    merged.successfulAuthCount += safeInt(doc.successfulAuthCount, 0, 0, 100000);
+  }
+
+  return merged;
+}
+
 function pickFinalAction({
   containment,
   risk,
@@ -53,8 +241,13 @@ function pickFinalAction({
 }) {
   const riskAction = normalizeAction(risk?.action || "allow");
   const containmentAction = normalizeAction(containment?.action || "allow");
-  const rateLimitAction = normalizeAction(rateLimitResult?.recommendedAction || "allow");
-  const adaptiveMode = safeString(adaptiveModeResult?.mode || "normal", 20).toLowerCase();
+  const rateLimitAction = normalizeAction(
+    rateLimitResult?.recommendedAction || "allow"
+  );
+  const adaptiveMode = safeString(
+    adaptiveModeResult?.mode || "normal",
+    20
+  ).toLowerCase();
 
   if (containment?.blocked) {
     return "block";
@@ -118,31 +311,14 @@ function pickFinalContainmentAction({
     return "step_up_verification";
   }
 
-  if (adaptiveModeResult?.mode === "elevated" && risk?.containmentAction === "none") {
+  if (
+    adaptiveModeResult?.mode === "elevated" &&
+    risk?.containmentAction === "none"
+  ) {
     return "slow_down_actor";
   }
 
   return safeString(risk?.containmentAction || "none", 50);
-}
-
-function buildSafeSignalBundle({
-  botResult = null,
-  abuseResult = null,
-  rateLimitResult = null,
-  freshnessResult = null,
-  threatResult = null,
-  containmentResult = null,
-  adaptiveModeResult = null
-} = {}) {
-  return {
-    botResult: botResult || null,
-    abuseResult: abuseResult || null,
-    rateLimitResult: rateLimitResult || null,
-    freshnessResult: freshnessResult || null,
-    threatResult: threatResult || null,
-    containmentResult: containmentResult || null,
-    adaptiveModeResult: adaptiveModeResult || null
-  };
 }
 
 export async function runSecurityOrchestrator({
@@ -163,6 +339,8 @@ export async function runSecurityOrchestrator({
     context,
     route
   });
+
+  const routeSensitivity = inferRouteSensitivity(actor.route, containmentConfig);
 
   let botResult = null;
 
@@ -240,12 +418,27 @@ export async function runSecurityOrchestrator({
     console.error("Threat intelligence failed:", error);
   }
 
+  let securityState = null;
+
+  try {
+    securityState = await getSecurityStateSummary({
+      userId: actor.userId,
+      email: context?.email || body?.email || "",
+      ip: actor.ip,
+      sessionId: actor.sessionId
+    });
+  } catch (error) {
+    console.error("Security state read failed:", error);
+  }
+
   const risk = evaluateRisk({
     botResult,
     abuseResult,
     rateLimitResult,
     freshnessResult,
-    threatResult
+    threatResult,
+    securityState,
+    routeSensitivity
   });
 
   let containmentResult = null;
@@ -268,7 +461,8 @@ export async function runSecurityOrchestrator({
       risk,
       threatResult,
       abuseResult,
-      botResult
+      botResult,
+      securityState
     });
   } catch (error) {
     console.error("Adaptive threat mode evaluation failed:", error);
@@ -291,6 +485,7 @@ export async function runSecurityOrchestrator({
     actor,
     risk: {
       ...risk,
+      routeSensitivity,
       finalAction,
       finalContainmentAction
     },
@@ -301,7 +496,8 @@ export async function runSecurityOrchestrator({
       freshnessResult,
       threatResult,
       containmentResult,
-      adaptiveModeResult
+      adaptiveModeResult,
+      securityState
     })
   };
 }
