@@ -7,17 +7,31 @@
     content="width=device-width, initial-scale=1.0, viewport-fit=cover"
   />
   <title>Aethra Login</title>
+  <meta
+    name="description"
+    content="Login to Aethra and continue your journey with living AI characters, emotional memory, and evolving relationships."
+  />
   <link rel="icon" type="image/png" href="/images/favicon.png?v=5" />
   <link rel="shortcut icon" href="/images/favicon.png?v=5" />
   <link rel="apple-touch-icon" href="/images/favicon.png?v=5" />
   <link rel="stylesheet" href="styles/login.css" />
 </head>
 <body>
-  <canvas class="stars-canvas" id="starsCanvas" data-scene="auth" aria-hidden="true"></canvas>
+  <canvas
+    class="stars-canvas"
+    id="starsCanvas"
+    data-scene="auth"
+    aria-hidden="true"
+  ></canvas>
 
   <div class="page">
     <div class="side-character">
-      <img src="images/character-left.png" alt="Akira" loading="lazy" />
+      <img
+        src="images/character-left.png"
+        alt="Akira"
+        loading="lazy"
+        decoding="async"
+      />
       <div class="side-label">
         <h3>AKIRA</h3>
         <p>Mysterious, analytical, and always watching the world quietly.</p>
@@ -72,7 +86,9 @@
           </div>
 
           <div class="forgot-row">
-            <button type="button" id="forgotPasswordBtn" class="forgot-btn">Forgot password?</button>
+            <button type="button" id="forgotPasswordBtn" class="forgot-btn">
+              Forgot password?
+            </button>
           </div>
 
           <div class="captcha-wrap">
@@ -103,6 +119,7 @@
             width="20"
             height="20"
             loading="lazy"
+            decoding="async"
           />
           <span>Continue with Google</span>
         </button>
@@ -114,7 +131,12 @@
     </div>
 
     <div class="side-character">
-      <img src="images/character-right.png" alt="Luna" loading="lazy" />
+      <img
+        src="images/character-right.png"
+        alt="Luna"
+        loading="lazy"
+        decoding="async"
+      />
       <div class="side-label">
         <h3>LUNA</h3>
         <p>Warm, supportive, and emotionally aware in every conversation.</p>
