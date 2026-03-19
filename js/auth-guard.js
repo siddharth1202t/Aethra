@@ -187,8 +187,7 @@ function createSingleRunGuard(handler, onError) {
 export function requireAuth(callback) {
   return createSingleRunGuard(async (user) => {
     if (!user) {
-      handleUnauthedState();
-      return true;
+      return false;
     }
 
     const result = await resolveVerifiedUser(user);
@@ -215,8 +214,7 @@ export function requireDeveloper(callback) {
   return createSingleRunGuard(
     async (user) => {
       if (!user) {
-        handleUnauthedState();
-        return true;
+        return false;
       }
 
       const result = await resolveVerifiedUser(user);
