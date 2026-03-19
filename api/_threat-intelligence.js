@@ -10,6 +10,8 @@ const MAX_ROUTE_LENGTH = 150;
 const MAX_REASON_LENGTH = 100;
 const MAX_REASON_HISTORY = 50;
 
+const ALLOWED_ROUTE_SENSITIVITY = new Set(["normal", "high", "critical"]);
+
 function safeString(value, maxLength = 300) {
   return String(value || "")
     .replace(/[\u0000-\u001F\u007F]/g, "")
@@ -76,7 +78,7 @@ function normalizeRoute(value = "") {
     .split("?")[0]
     .split("#")[0]
     .replace(/\/{2,}/g, "/")
-    .replace(/[^a-zA-Z0-9/_-]/g, "")
+    .replace(/[^a-zA-Z0-9/_:-]/g, "")
     .toLowerCase()
     .slice(0, MAX_ROUTE_LENGTH);
 
@@ -85,10 +87,35 @@ function normalizeRoute(value = "") {
 
 function normalizeAction(value = "") {
   const normalized = safeString(value || "allow", 20).toLowerCase();
-  if (normalized === "block" || normalized === "challenge" || normalized === "throttle") {
+  if (
+    normalized === "block" ||
+    normalized === "challenge" ||
+    normalized === "throttle"
+  ) {
     return normalized;
   }
   return "allow";
+}
+
+function normalizeRouteSensitivity(value = "normal") {
+  const normalized = safeString(value || "normal", 20).toLowerCase();
+  return ALLOWED_ROUTE_SENSITIVITY.has(normalized) ? normalized : "normal";
+}
+
+function normalizeSecurityState(securityState = null) {
+  if (!securityState || typeof securityState !== "object") return null;
+
+  return {
+    currentRiskScore: safeInt(securityState.currentRiskScore, 0, 0, 100),
+    currentRiskLevel: safeString(securityState.currentRiskLevel || "low", 20).toLowerCase(),
+    failedLoginCount: safeInt(securityState.failedLoginCount, 0, 0, 100000),
+    failedSignupCount: safeInt(securityState.failedSignupCount, 0, 0, 100000),
+    failedPasswordResetCount: safeInt(securityState.failedPasswordResetCount, 0, 0, 100000),
+    captchaFailureCount: safeInt(securityState.captchaFailureCount, 0, 0, 100000),
+    suspiciousEventCount: safeInt(securityState.suspiciousEventCount, 0, 0, 100000),
+    rateLimitHitCount: safeInt(securityState.rateLimitHitCount, 0, 0, 100000),
+    lockoutCount: safeInt(securityState.lockoutCount, 0, 0, 100000)
+  };
 }
 
 function buildThreatKey({ ip = "", sessionId = "", userId = "" } = {}) {
@@ -113,6 +140,7 @@ function createEmptyThreatRecord(now) {
     challengeEvents: 0,
     blockEvents: 0,
     criticalRouteHits: 0,
+    repeatedStateRiskHits: 0,
 
     lastRoute: "unknown-route",
     reasonHistory: []
@@ -139,6 +167,7 @@ function normalizeThreatRecord(raw, now) {
     challengeEvents: safeInt(record.challengeEvents, 0, 0, 100000),
     blockEvents: safeInt(record.blockEvents, 0, 0, 100000),
     criticalRouteHits: safeInt(record.criticalRouteHits, 0, 0, 100000),
+    repeatedStateRiskHits: safeInt(record.repeatedStateRiskHits, 0, 0, 100000),
 
     lastRoute: normalizeRoute(record.lastRoute || "unknown-route"),
     reasonHistory: Array.isArray(record.reasonHistory)
@@ -218,7 +247,10 @@ function decayThreatScore(record, now) {
     return;
   }
 
-  record.threatScore = Math.max(0, safeInt(record.threatScore, 0, 0, 100) - steps * 6);
+  record.threatScore = Math.max(
+    0,
+    safeInt(record.threatScore, 0, 0, 100) - steps * 6
+  );
   record.lastDecayAt = now;
 }
 
@@ -230,10 +262,29 @@ function getThreatLevel(score) {
 }
 
 function getThreatAction(score, hardBlockSignals = 0) {
-  if (hardBlockSignals > 0 || score >= 95) return "block";
+  if (safeInt(hardBlockSignals, 0, 0, 100000) >= 2 || score >= 95) return "block";
   if (score >= 75) return "challenge";
   if (score >= 45) return "throttle";
   return "allow";
+}
+
+function isCriticalRoute(route = "", routeSensitivity = "normal") {
+  const safeRoute = normalizeRoute(route);
+  const normalizedSensitivity = normalizeRouteSensitivity(routeSensitivity);
+
+  if (normalizedSensitivity === "critical") {
+    return true;
+  }
+
+  return (
+    safeRoute.includes("admin") ||
+    safeRoute.includes("developer") ||
+    safeRoute.includes("login") ||
+    safeRoute.includes("signup") ||
+    safeRoute.includes("verify-turnstile") ||
+    safeRoute.includes("security-log") ||
+    safeRoute.includes("password")
+  );
 }
 
 export async function evaluateThreat({
@@ -241,11 +292,13 @@ export async function evaluateThreat({
   sessionId = "",
   userId = "",
   route = "",
+  routeSensitivity = "normal",
   botResult = null,
   abuseResult = null,
   rateLimitResult = null,
   freshnessResult = null,
-  riskResult = null
+  riskResult = null,
+  securityState = null
 } = {}) {
   const now = Date.now();
   const redisKey = buildThreatKey({ ip, sessionId, userId });
@@ -256,6 +309,9 @@ export async function evaluateThreat({
   }
 
   decayThreatScore(record, now);
+
+  const normalizedSecurityState = normalizeSecurityState(securityState);
+  const normalizedRouteSensitivity = normalizeRouteSensitivity(routeSensitivity);
 
   let scoreIncrease = 0;
   const safeRoute = normalizeRoute(route);
@@ -305,7 +361,9 @@ export async function evaluateThreat({
       pushReason(record, "abuse_penalty_active");
     }
 
-    if (safeInt(abuseResult?.snapshot?.criticalRouteTouchesRecent, 0, 0, 100000) >= 2) {
+    if (
+      safeInt(abuseResult?.snapshot?.criticalRouteTouchesRecent, 0, 0, 100000) >= 2
+    ) {
       record.criticalRouteHits += 1;
       scoreIncrease += 15;
       pushReason(record, "abuse_critical_route_targeting");
@@ -329,12 +387,21 @@ export async function evaluateThreat({
       scoreIncrease += 10;
       pushReason(record, "rate_limit_repeat_violations");
     }
+
+    if (normalizeRouteSensitivity(rateLimitResult.routeSensitivity || "normal") === "critical") {
+      record.criticalRouteHits += 1;
+      scoreIncrease += 8;
+      pushReason(record, "rate_limit_critical_route_pressure");
+    }
   }
 
   if (freshnessResult && typeof freshnessResult === "object" && !freshnessResult.ok) {
     record.freshnessFailures += 1;
     scoreIncrease += 20;
-    pushReason(record, `freshness_${safeString(freshnessResult.code || "failed", 60)}`);
+    pushReason(
+      record,
+      `freshness_${safeString(freshnessResult.code || "failed", 60)}`
+    );
 
     if (
       freshnessResult.code === "replayed_nonce" ||
@@ -345,9 +412,9 @@ export async function evaluateThreat({
   }
 
   if (riskResult && typeof riskResult === "object") {
-    const normalizedRiskAction = normalizeAction(riskResult.action || "");
+    const normalizedRiskAction = normalizeAction(riskResult.finalAction || riskResult.action || "");
 
-    if (normalizedRiskAction === "challenge") {
+    if (normalizedRiskAction === "challenge" || normalizedRiskAction === "throttle") {
       record.challengeEvents += 1;
     }
 
@@ -373,8 +440,16 @@ export async function evaluateThreat({
     pushReason(record, "cross_signal_bot_plus_abuse");
   }
 
-  if (safeRoute.includes("admin") || safeRoute.includes("developer")) {
+  if (isCriticalRoute(safeRoute, normalizedRouteSensitivity)) {
     record.criticalRouteHits += 1;
+  }
+
+  if (normalizedRouteSensitivity === "critical") {
+    scoreIncrease += 8;
+    pushReason(record, "route_critical");
+  } else if (normalizedRouteSensitivity === "high") {
+    scoreIncrease += 4;
+    pushReason(record, "route_high");
   }
 
   if (record.criticalRouteHits >= 5) {
@@ -392,7 +467,55 @@ export async function evaluateThreat({
     pushReason(record, "repeat_block_events");
   }
 
-  record.threatScore = Math.min(100, safeInt(record.threatScore, 0, 0, 100) + scoreIncrease);
+  if (normalizedSecurityState) {
+    if (
+      normalizedSecurityState.currentRiskScore >= 75 ||
+      normalizedSecurityState.currentRiskLevel === "critical"
+    ) {
+      record.repeatedStateRiskHits += 2;
+      scoreIncrease += 15;
+      pushReason(record, "state_high_risk_memory");
+    } else if (
+      normalizedSecurityState.currentRiskScore >= 45 ||
+      normalizedSecurityState.currentRiskLevel === "high"
+    ) {
+      record.repeatedStateRiskHits += 1;
+      scoreIncrease += 8;
+      pushReason(record, "state_medium_risk_memory");
+    }
+
+    if (
+      normalizedSecurityState.lockoutCount >= 2 ||
+      normalizedSecurityState.suspiciousEventCount >= 5
+    ) {
+      scoreIncrease += 12;
+      pushReason(record, "state_repeat_suspicious_activity");
+    }
+
+    if (
+      normalizedSecurityState.failedLoginCount >= 5 ||
+      normalizedSecurityState.captchaFailureCount >= 5 ||
+      normalizedSecurityState.rateLimitHitCount >= 4
+    ) {
+      scoreIncrease += 10;
+      pushReason(record, "state_attack_history");
+    }
+
+    if (normalizedSecurityState.lockoutCount >= 3) {
+      record.hardBlockSignals += 1;
+      pushReason(record, "state_repeat_lockouts");
+    }
+  }
+
+  if (record.repeatedStateRiskHits >= 3) {
+    scoreIncrease += 10;
+    pushReason(record, "repeat_state_risk_pressure");
+  }
+
+  record.threatScore = Math.min(
+    100,
+    safeInt(record.threatScore, 0, 0, 100) + scoreIncrease
+  );
   record.highestThreatScore = Math.max(
     safeInt(record.highestThreatScore, 0, 0, 100),
     record.threatScore
@@ -418,7 +541,8 @@ export async function evaluateThreat({
       hardBlockSignals: safeInt(record.hardBlockSignals, 0, 0, 100000),
       challengeEvents: safeInt(record.challengeEvents, 0, 0, 100000),
       blockEvents: safeInt(record.blockEvents, 0, 0, 100000),
-      criticalRouteHits: safeInt(record.criticalRouteHits, 0, 0, 100000)
+      criticalRouteHits: safeInt(record.criticalRouteHits, 0, 0, 100000),
+      repeatedStateRiskHits: safeInt(record.repeatedStateRiskHits, 0, 0, 100000)
     },
     clientKeyPreview: safeString(redisKey.replace(/^threat:/, ""), 24),
     lastRoute: record.lastRoute,
@@ -458,7 +582,8 @@ export async function getThreatSnapshot({
       rateLimitEvents: safeInt(record.rateLimitEvents, 0, 0, 100000),
       freshnessFailures: safeInt(record.freshnessFailures, 0, 0, 100000),
       hardBlockSignals: safeInt(record.hardBlockSignals, 0, 0, 100000),
-      blockEvents: safeInt(record.blockEvents, 0, 0, 100000)
+      blockEvents: safeInt(record.blockEvents, 0, 0, 100000),
+      repeatedStateRiskHits: safeInt(record.repeatedStateRiskHits, 0, 0, 100000)
     }
   };
 }
