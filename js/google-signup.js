@@ -4,7 +4,8 @@ import {
   signInWithRedirect,
   getRedirectResult,
   GoogleAuthProvider,
-  signOut
+  signOut,
+  onAuthStateChanged
 } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
 
 import { app } from "./firestore-config.js";
@@ -28,6 +29,7 @@ const ALLOWED_GOOGLE_AUTH_HOSTS = new Set([
 
 let googleInProgress = false;
 let eventsBound = false;
+let authFallbackHandled = false;
 
 function isAllowedGoogleAuthHost() {
   return ALLOWED_GOOGLE_AUTH_HOSTS.has(window.location.hostname);
@@ -111,6 +113,8 @@ function setBusyState(isBusy) {
   googleBtn.textContent = isBusy
     ? "Please wait..."
     : googleBtn.dataset.originalText;
+
+  googleBtn.classList.toggle("is-loading", Boolean(isBusy));
 }
 
 async function safeSecurityLog(payload) {
@@ -249,6 +253,7 @@ async function handleRedirectResultIfAny() {
       }
     });
 
+    authFallbackHandled = true;
     goTo(HOME_PAGE);
     return true;
   } catch (error) {
@@ -285,6 +290,77 @@ async function handleRedirectResultIfAny() {
     setFormError(mapGoogleError(error));
     return false;
   }
+}
+
+async function handleAuthenticatedUserFallback() {
+  return new Promise((resolve) => {
+    let resolved = false;
+
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      if (resolved || authFallbackHandled) {
+        return;
+      }
+
+      if (!user) {
+        return;
+      }
+
+      resolved = true;
+      authFallbackHandled = true;
+      unsubscribe();
+
+      try {
+        const securityContext = getClientSecurityContext();
+
+        const checkResult = await callLoginAttemptApi(
+          normalizeEmail(user?.email || "google-signup"),
+          "check",
+          {
+            actionLabel: "google_signup_auth_state",
+            ...securityContext
+          }
+        );
+
+        if (checkResult?.isLocked) {
+          await signOut(auth);
+          setFormError(
+            `This account is temporarily locked. Please try again in ${formatRemainingMinutes(checkResult.remainingMs)}.`
+          );
+          resolve(true);
+          return;
+        }
+
+        await ensureUserProfile(user);
+
+        fireAndForgetSecurityLog({
+          type: "google_signup_success",
+          message: "User signed up with Google via auth state fallback",
+          email: user.email || "",
+          userId: user.uid,
+          metadata: {
+            behavior: securityContext.behavior || {}
+          }
+        });
+
+        goTo(HOME_PAGE);
+        resolve(true);
+      } catch (error) {
+        console.error("[Google Signup] auth-state fallback failed:", error);
+        setFormError(mapGoogleError(error));
+        resolve(true);
+      }
+    });
+
+    window.setTimeout(() => {
+      if (resolved) {
+        return;
+      }
+
+      resolved = true;
+      unsubscribe();
+      resolve(false);
+    }, 4000);
+  });
 }
 
 async function handleGoogleSignup() {
@@ -424,7 +500,12 @@ function bindEvents() {
 async function initGoogleSignup() {
   try {
     bindEvents();
-    await handleRedirectResultIfAny();
+
+    const handledRedirect = await handleRedirectResultIfAny();
+
+    if (!handledRedirect) {
+      await handleAuthenticatedUserFallback();
+    }
   } catch (error) {
     console.error("[Google Signup] init failed:", error);
     setFormError("Google sign-up could not be initialized. Please refresh.");
