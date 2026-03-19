@@ -6,7 +6,8 @@ import {
   signInWithRedirect,
   getRedirectResult,
   sendPasswordResetEmail,
-  signOut
+  signOut,
+  onAuthStateChanged
 } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
 
 import { app } from "./firestore-config.js";
@@ -34,8 +35,11 @@ const ALLOWED_GOOGLE_AUTH_HOSTS = new Set([
 ]);
 
 const form = document.getElementById("loginForm");
-const googleBtn = document.getElementById("googleLoginBtn");
-const loginBtn = document.getElementById("loginBtn") || document.querySelector(".login-btn");
+const googleBtn =
+  document.getElementById("googleLoginBtn") ||
+  document.getElementById("googleSignInBtn");
+const loginBtn =
+  document.getElementById("loginBtn") || document.querySelector(".login-btn");
 const forgotPasswordBtn = document.getElementById("forgotPasswordBtn");
 
 const emailInput = document.getElementById("email");
@@ -54,6 +58,9 @@ const touchedFields = {
 let isSubmitting = false;
 let containmentState = null;
 let eventsBound = false;
+let authFallbackHandled = false;
+
+/* ---------------- BASIC HELPERS ---------------- */
 
 function safeString(value, maxLength = 500) {
   return String(value || "").trim().slice(0, maxLength);
@@ -63,8 +70,53 @@ function goTo(page) {
   window.location.replace(page);
 }
 
+function redirectToHome() {
+  goTo(HOME_PAGE);
+}
+
+function redirectToVerifyEmail() {
+  goTo(VERIFY_EMAIL_PAGE);
+}
+
+function redirectSignedInUser(user) {
+  if (!user) {
+    return false;
+  }
+
+  if (!user.emailVerified) {
+    redirectToVerifyEmail();
+    return true;
+  }
+
+  redirectToHome();
+  return true;
+}
+
+function normalizeEmail(email) {
+  return String(email || "").trim().toLowerCase();
+}
+
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+function isMobileDevice() {
+  return /Android|iPhone|iPad|iPod|Opera Mini|IEMobile|WPDesktop/i.test(
+    navigator.userAgent
+  );
+}
+
 function isAllowedGoogleAuthHost() {
   return ALLOWED_GOOGLE_AUTH_HOSTS.has(window.location.hostname);
+}
+
+function isLockedMessage(message) {
+  return String(message || "").toLowerCase().includes("temporarily locked");
+}
+
+function formatRemainingMinutes(ms) {
+  const minutes = Math.ceil(Number(ms || 0) / 60000);
+  return minutes <= 1 ? "1 minute" : `${minutes} minutes`;
 }
 
 function withTimeout(promise, ms, message) {
@@ -85,6 +137,146 @@ function withTimeout(promise, ms, message) {
   });
 }
 
+/* ---------------- UI HELPERS ---------------- */
+
+function setButtonsDisabled(disabled) {
+  if (loginBtn) loginBtn.disabled = disabled;
+  if (googleBtn) googleBtn.disabled = disabled;
+  if (forgotPasswordBtn) forgotPasswordBtn.disabled = disabled;
+}
+
+function setTemporaryCooldown(button, ms = 3000) {
+  if (!button) {
+    return;
+  }
+
+  const originalText = button.dataset.originalText || button.textContent;
+  button.dataset.originalText = originalText;
+  button.disabled = true;
+  button.textContent = "Please wait...";
+  button.classList.add("is-loading");
+
+  window.setTimeout(() => {
+    button.disabled = false;
+    button.textContent = originalText;
+    button.classList.remove("is-loading");
+  }, ms);
+}
+
+function setLoading(button, loadingText = "Please wait...") {
+  if (!button) {
+    return;
+  }
+
+  if (!button.dataset.originalText) {
+    button.dataset.originalText = button.textContent;
+  }
+
+  button.disabled = true;
+  button.textContent = loadingText;
+  button.classList.add("is-loading");
+}
+
+function clearLoading(button) {
+  if (!button) {
+    return;
+  }
+
+  button.disabled = false;
+  button.textContent = button.dataset.originalText || button.textContent;
+  button.classList.remove("is-loading");
+}
+
+function clearFieldState(input, errorEl) {
+  if (!input || !errorEl) {
+    return;
+  }
+
+  errorEl.textContent = "";
+  input.classList.remove("input-invalid", "input-valid");
+  input.removeAttribute("aria-invalid");
+}
+
+function setFieldError(input, errorEl, message) {
+  if (!input || !errorEl) {
+    return;
+  }
+
+  errorEl.textContent = String(message || "").trim();
+  input.classList.add("input-invalid");
+  input.classList.remove("input-valid");
+  input.setAttribute("aria-invalid", "true");
+}
+
+function setFieldValid(input, errorEl) {
+  if (!input || !errorEl) {
+    return;
+  }
+
+  errorEl.textContent = "";
+  input.classList.remove("input-invalid");
+  input.classList.add("input-valid");
+  input.setAttribute("aria-invalid", "false");
+}
+
+function setFormMessage(message = "", type = "error") {
+  if (!formError) {
+    return;
+  }
+
+  const safeMessage = String(message || "").trim();
+
+  if (!safeMessage) {
+    formError.textContent = "";
+    formError.classList.remove(
+      "show",
+      "form-error--success",
+      "form-error--danger"
+    );
+    return;
+  }
+
+  formError.textContent = safeMessage;
+  formError.classList.add("show");
+  formError.classList.remove("form-error--success", "form-error--danger");
+  formError.classList.add(
+    type === "success" ? "form-error--success" : "form-error--danger"
+  );
+}
+
+function showFormError(message) {
+  setFormMessage(message, "error");
+}
+
+function showFormSuccess(message) {
+  setFormMessage(message, "success");
+}
+
+function clearFormError() {
+  setFormMessage("");
+}
+
+function showCaptchaError(message) {
+  if (captchaError) {
+    captchaError.textContent = String(message || "").trim();
+  }
+}
+
+function clearCaptchaError() {
+  if (captchaError) {
+    captchaError.textContent = "";
+  }
+}
+
+function clearAllErrors() {
+  clearFieldState(emailInput, emailError);
+  clearFieldState(passwordInput, passwordError);
+  clearCaptchaError();
+  clearFormError();
+}
+
+/* ---------------- SECURITY LOGGING ---------------- */
+
 async function safeSecurityLog(payload) {
   try {
     await writeSecurityLog(payload);
@@ -98,6 +290,8 @@ function fireAndForgetSecurityLog(payload) {
     console.warn("Async security log failed:", error);
   });
 }
+
+/* ---------------- SECURITY / API ---------------- */
 
 async function fetchContainmentState() {
   try {
@@ -141,7 +335,9 @@ async function verifyTurnstileToken(token, behavior = {}) {
   const data = await response.json().catch(() => ({}));
 
   if (!response.ok || !data.success) {
-    throw new Error(data?.message || "Captcha verification failed. Please try again.");
+    throw new Error(
+      data?.message || "Captcha verification failed. Please try again."
+    );
   }
 
   return data;
@@ -167,6 +363,31 @@ async function callLoginAttemptApi(email, action, extra = {}) {
   }
 
   return data;
+}
+
+function getClientSecurityContext() {
+  let behavior = {};
+
+  try {
+    behavior =
+      typeof getSecurityBehaviorPayload === "function"
+        ? getSecurityBehaviorPayload()
+        : {};
+  } catch (error) {
+    console.warn("Security behavior payload failed:", error);
+    behavior = {};
+  }
+
+  return {
+    behavior,
+    userAgent: navigator.userAgent || "",
+    language: navigator.language || "",
+    platform: navigator.platform || "",
+    screen: {
+      width: window.screen?.width || 0,
+      height: window.screen?.height || 0
+    }
+  };
 }
 
 /* ---------------- TURNSTILE MANAGER ---------------- */
@@ -331,16 +552,14 @@ function resetTurnstile() {
 
 function triggerTurnstileRender() {
   const manager = getTurnstileManager();
+
   if (manager && typeof manager.ensureRendered === "function") {
     manager.ensureRendered();
   }
 }
 
 function bindTurnstileLazyRender() {
-  const interactionElements = [
-    emailInput,
-    passwordInput
-  ].filter(Boolean);
+  const interactionElements = [emailInput, passwordInput].filter(Boolean);
 
   interactionElements.forEach((element) => {
     element.addEventListener(
@@ -364,7 +583,9 @@ function bindTurnstileLazyRender() {
   forgotPasswordBtn?.addEventListener("pointerdown", triggerTurnstileRender);
 }
 
-async function ensureCaptchaSolved(message = "Please complete the captcha first.") {
+async function ensureCaptchaSolved(
+  message = "Please complete the captcha first."
+) {
   triggerTurnstileRender();
 
   const token = getTurnstileToken();
@@ -385,154 +606,7 @@ async function ensureCaptchaSolved(message = "Please complete the captcha first.
   throw new Error("Captcha missing");
 }
 
-function isMobileDevice() {
-  return /Android|iPhone|iPad|iPod|Opera Mini|IEMobile|WPDesktop/i.test(navigator.userAgent);
-}
-
-function normalizeEmail(email) {
-  return String(email || "").trim().toLowerCase();
-}
-
-function isValidEmail(email) {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
-}
-
-function isLockedMessage(message) {
-  return String(message || "").toLowerCase().includes("temporarily locked");
-}
-
-function setTemporaryCooldown(button, ms = 3000) {
-  if (!button) {
-    return;
-  }
-
-  const originalText = button.dataset.originalText || button.textContent;
-  button.dataset.originalText = originalText;
-  button.disabled = true;
-  button.textContent = "Please wait...";
-
-  window.setTimeout(() => {
-    button.disabled = false;
-    button.textContent = originalText;
-  }, ms);
-}
-
-function setLoading(button, loadingText = "Please wait...") {
-  if (!button) {
-    return;
-  }
-
-  if (!button.dataset.originalText) {
-    button.dataset.originalText = button.textContent;
-  }
-
-  button.disabled = true;
-  button.textContent = loadingText;
-}
-
-function clearLoading(button) {
-  if (!button) {
-    return;
-  }
-
-  button.disabled = false;
-  button.textContent = button.dataset.originalText || button.textContent;
-}
-
-function setButtonsDisabled(disabled) {
-  if (loginBtn) loginBtn.disabled = disabled;
-  if (googleBtn) googleBtn.disabled = disabled;
-  if (forgotPasswordBtn) forgotPasswordBtn.disabled = disabled;
-}
-
-function formatRemainingMinutes(ms) {
-  const minutes = Math.ceil(Number(ms || 0) / 60000);
-  return minutes <= 1 ? "1 minute" : `${minutes} minutes`;
-}
-
-function clearFieldState(input, errorEl) {
-  if (!input || !errorEl) {
-    return;
-  }
-
-  errorEl.textContent = "";
-  input.classList.remove("input-invalid", "input-valid");
-  input.removeAttribute("aria-invalid");
-}
-
-function setFieldError(input, errorEl, message) {
-  if (!input || !errorEl) {
-    return;
-  }
-
-  errorEl.textContent = String(message || "").trim();
-  input.classList.add("input-invalid");
-  input.classList.remove("input-valid");
-  input.setAttribute("aria-invalid", "true");
-}
-
-function setFieldValid(input, errorEl) {
-  if (!input || !errorEl) {
-    return;
-  }
-
-  errorEl.textContent = "";
-  input.classList.remove("input-invalid");
-  input.classList.add("input-valid");
-  input.setAttribute("aria-invalid", "false");
-}
-
-function setFormMessage(message = "", type = "error") {
-  if (!formError) {
-    return;
-  }
-
-  const safeMessage = String(message || "").trim();
-
-  if (!safeMessage) {
-    formError.textContent = "";
-    formError.classList.remove("show", "form-error--success", "form-error--danger");
-    return;
-  }
-
-  formError.textContent = safeMessage;
-  formError.classList.add("show");
-  formError.classList.remove("form-error--success", "form-error--danger");
-  formError.classList.add(
-    type === "success" ? "form-error--success" : "form-error--danger"
-  );
-}
-
-function showFormError(message) {
-  setFormMessage(message, "error");
-}
-
-function showFormSuccess(message) {
-  setFormMessage(message, "success");
-}
-
-function clearFormError() {
-  setFormMessage("");
-}
-
-function showCaptchaError(message) {
-  if (captchaError) {
-    captchaError.textContent = String(message || "").trim();
-  }
-}
-
-function clearCaptchaError() {
-  if (captchaError) {
-    captchaError.textContent = "";
-  }
-}
-
-function clearAllErrors() {
-  clearFieldState(emailInput, emailError);
-  clearFieldState(passwordInput, passwordError);
-  clearCaptchaError();
-  clearFormError();
-}
+/* ---------------- VALIDATION ---------------- */
 
 function validateEmail(showUI = true) {
   const email = normalizeEmail(emailInput?.value || "");
@@ -550,7 +624,11 @@ function validateEmail(showUI = true) {
 
   if (!isValidEmail(email)) {
     if (showUI) {
-      setFieldError(emailInput, emailError, "Please enter a valid email address.");
+      setFieldError(
+        emailInput,
+        emailError,
+        "Please enter a valid email address."
+      );
     }
     return false;
   }
@@ -623,39 +701,6 @@ function getFriendlyAuthMessage(error) {
   }
 }
 
-function redirectToHome() {
-  goTo(HOME_PAGE);
-}
-
-function redirectToVerifyEmail() {
-  goTo(VERIFY_EMAIL_PAGE);
-}
-
-function getClientSecurityContext() {
-  let behavior = {};
-
-  try {
-    behavior =
-      typeof getSecurityBehaviorPayload === "function"
-        ? getSecurityBehaviorPayload()
-        : {};
-  } catch (error) {
-    console.warn("Security behavior payload failed:", error);
-    behavior = {};
-  }
-
-  return {
-    behavior,
-    userAgent: navigator.userAgent || "",
-    language: navigator.language || "",
-    platform: navigator.platform || "",
-    screen: {
-      width: window.screen?.width || 0,
-      height: window.screen?.height || 0
-    }
-  };
-}
-
 async function precheckSensitiveAction(email, actionLabel = "login_check") {
   const securityContext = getClientSecurityContext();
 
@@ -666,7 +711,9 @@ async function precheckSensitiveAction(email, actionLabel = "login_check") {
 
   if (checkResult?.isLocked) {
     throw new Error(
-      `This account is temporarily locked. Please try again in ${formatRemainingMinutes(checkResult.remainingMs)}.`
+      `This account is temporarily locked. Please try again in ${formatRemainingMinutes(
+        checkResult.remainingMs
+      )}.`
     );
   }
 
@@ -675,6 +722,8 @@ async function precheckSensitiveAction(email, actionLabel = "login_check") {
 
   return securityContext;
 }
+
+/* ---------------- GOOGLE REDIRECT HANDLING ---------------- */
 
 async function handleRedirectResultIfAny() {
   try {
@@ -698,7 +747,9 @@ async function handleRedirectResultIfAny() {
 
     if (checkResult?.isLocked) {
       throw new Error(
-        `This account is temporarily locked. Please try again in ${formatRemainingMinutes(checkResult.remainingMs)}.`
+        `This account is temporarily locked. Please try again in ${formatRemainingMinutes(
+          checkResult.remainingMs
+        )}.`
       );
     }
 
@@ -714,8 +765,8 @@ async function handleRedirectResultIfAny() {
       }
     });
 
-    redirectToHome();
-    return true;
+    authFallbackHandled = true;
+    return redirectSignedInUser(user);
   } catch (error) {
     const code = error?.code || "";
     const message = String(error?.message || "").toLowerCase();
@@ -735,7 +786,10 @@ async function handleRedirectResultIfAny() {
     try {
       await signOut(auth);
     } catch (signOutError) {
-      console.warn("[Google Login] Redirect cleanup sign-out failed:", signOutError);
+      console.warn(
+        "[Google Login] Redirect cleanup sign-out failed:",
+        signOutError
+      );
     }
 
     fireAndForgetSecurityLog({
@@ -748,6 +802,80 @@ async function handleRedirectResultIfAny() {
     return false;
   }
 }
+
+async function handleAuthenticatedUserFallback() {
+  return new Promise((resolve) => {
+    let settled = false;
+
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      if (settled || authFallbackHandled) {
+        return;
+      }
+
+      if (!user) {
+        return;
+      }
+
+      settled = true;
+      authFallbackHandled = true;
+      unsubscribe();
+
+      try {
+        const securityContext = getClientSecurityContext();
+
+        const checkResult = await callLoginAttemptApi(
+          normalizeEmail(user?.email || "google-login"),
+          "check",
+          {
+            actionLabel: "google_login_auth_state",
+            ...securityContext
+          }
+        );
+
+        if (checkResult?.isLocked) {
+          await signOut(auth);
+          showFormError(
+            `This account is temporarily locked. Please try again in ${formatRemainingMinutes(
+              checkResult.remainingMs
+            )}.`
+          );
+          resolve(true);
+          return;
+        }
+
+        await ensureUserProfile(user);
+
+        fireAndForgetSecurityLog({
+          type: "google_login_success",
+          message: "User logged in with Google via auth state fallback",
+          email: user.email || "",
+          userId: user.uid,
+          metadata: {
+            behavior: securityContext.behavior || {}
+          }
+        });
+
+        resolve(redirectSignedInUser(user));
+      } catch (error) {
+        console.error("[Google Login] auth-state fallback failed:", error);
+        showFormError(getFriendlyAuthMessage(error));
+        resolve(true);
+      }
+    });
+
+    window.setTimeout(() => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      unsubscribe();
+      resolve(false);
+    }, 5000);
+  });
+}
+
+/* ---------------- EMAIL LOGIN ---------------- */
 
 async function handleEmailLogin() {
   if (isSubmitting) {
@@ -796,12 +924,7 @@ async function handleEmailLogin() {
       }
     });
 
-    if (!user.emailVerified) {
-      redirectToVerifyEmail();
-      return;
-    }
-
-    redirectToHome();
+    redirectSignedInUser(user);
   } catch (error) {
     console.error("Email login failed:", error);
 
@@ -836,7 +959,9 @@ async function handleEmailLogin() {
 
         if (failStatus?.isLocked) {
           showFormError(
-            `Too many failed attempts. This account is locked for ${formatRemainingMinutes(failStatus.remainingMs)}.`
+            `Too many failed attempts. This account is locked for ${formatRemainingMinutes(
+              failStatus.remainingMs
+            )}.`
           );
         } else {
           showFormError(getFriendlyAuthMessage(error));
@@ -856,6 +981,8 @@ async function handleEmailLogin() {
     isSubmitting = false;
   }
 }
+
+/* ---------------- GOOGLE LOGIN ---------------- */
 
 async function handleGoogleLogin() {
   if (isSubmitting) {
@@ -931,7 +1058,9 @@ async function handleGoogleLogin() {
 
     if (checkResult?.isLocked) {
       throw new Error(
-        `This account is temporarily locked. Please try again in ${formatRemainingMinutes(checkResult.remainingMs)}.`
+        `This account is temporarily locked. Please try again in ${formatRemainingMinutes(
+          checkResult.remainingMs
+        )}.`
       );
     }
 
@@ -947,7 +1076,7 @@ async function handleGoogleLogin() {
       }
     });
 
-    redirectToHome();
+    redirectSignedInUser(user);
   } catch (error) {
     console.error("[Google Login] failed", error);
 
@@ -976,6 +1105,8 @@ async function handleGoogleLogin() {
   }
 }
 
+/* ---------------- FORGOT PASSWORD ---------------- */
+
 async function handleForgotPassword() {
   if (isSubmitting) {
     return;
@@ -997,7 +1128,11 @@ async function handleForgotPassword() {
   }
 
   if (!email) {
-    setFieldError(emailInput, emailError, "Enter your email first to reset your password.");
+    setFieldError(
+      emailInput,
+      emailError,
+      "Enter your email first to reset your password."
+    );
     emailInput?.focus();
     isSubmitting = false;
     return;
@@ -1053,6 +1188,8 @@ async function handleForgotPassword() {
     isSubmitting = false;
   }
 }
+
+/* ---------------- EVENTS ---------------- */
 
 function bindEvents() {
   if (eventsBound) {
@@ -1113,13 +1250,25 @@ function bindEvents() {
   eventsBound = true;
 }
 
+/* ---------------- PAGE INIT ---------------- */
+
 async function initLoginPage() {
   try {
     setButtonsDisabled(true);
     bindEvents();
 
+    if (auth.currentUser) {
+      redirectSignedInUser(auth.currentUser);
+      return;
+    }
+
     containmentState = await fetchContainmentState();
-    await handleRedirectResultIfAny();
+
+    const handledRedirect = await handleRedirectResultIfAny();
+
+    if (!handledRedirect) {
+      await handleAuthenticatedUserFallback();
+    }
   } catch (error) {
     console.error("Page init failed:", error);
     showFormError("Page failed to load properly. Please refresh and try again.");
