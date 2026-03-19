@@ -1,3 +1,5 @@
+import crypto from "node:crypto";
+
 import { writeSecurityLog } from "./_security-log-writer.js";
 import { createActorContext } from "./_actor-context.js";
 import { runSecurityOrchestrator } from "./_security-orchestrator.js";
@@ -13,6 +15,9 @@ const ROUTE = "/api/verify-turnstile";
 const TURNSTILE_VERIFY_URL =
   "https://challenges.cloudflare.com/turnstile/v0/siteverify";
 const TURNSTILE_TIMEOUT_MS = 8000;
+const MAX_BODY_KEYS = 25;
+const MAX_CONTENT_LENGTH_BYTES = 12 * 1024;
+const MAX_TOKEN_LENGTH = 5000;
 
 const ALLOWED_ORIGINS = new Set([
   "https://aethra-gules.vercel.app",
@@ -25,7 +30,10 @@ const ALLOWED_HOSTNAMES = new Set([
 ]);
 
 function setNoStore(res) {
-  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+  res.setHeader(
+    "Cache-Control",
+    "no-store, no-cache, must-revalidate, proxy-revalidate"
+  );
   res.setHeader("Pragma", "no-cache");
   res.setHeader("Expires", "0");
 }
@@ -89,6 +97,98 @@ function buildJsonError(res, status, message, extra = {}) {
   });
 }
 
+function getRequestContentLength(req) {
+  const raw = req?.headers?.["content-length"];
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+}
+
+function isJsonContentType(req) {
+  const contentType = safeString(req?.headers?.["content-type"] || "", 200)
+    .toLowerCase();
+  return contentType.startsWith("application/json");
+}
+
+function getRequestHost(req) {
+  const hostHeader = safeString(req?.headers?.host || "", 200).toLowerCase();
+  return normalizeHostname(hostHeader.split(":")[0] || "");
+}
+
+function isRequestHostAllowed(req) {
+  return isExpectedHostname(getRequestHost(req));
+}
+
+function getRefererOrigin(req) {
+  const referer = safeString(req?.headers?.referer || "", 500).trim();
+
+  if (!referer) {
+    return "";
+  }
+
+  try {
+    return new URL(referer).origin.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+function createVerificationFingerprint({ ip, token, origin, host }) {
+  return crypto
+    .createHash("sha256")
+    .update(
+      [
+        safeString(ip, 100),
+        safeString(token, 500),
+        safeString(origin, 200),
+        safeString(host, 200)
+      ].join("|")
+    )
+    .digest("hex")
+    .slice(0, 32);
+}
+
+function sanitizeClientContext(context) {
+  if (!context || typeof context !== "object" || Array.isArray(context)) {
+    return {};
+  }
+
+  return sanitizeMetadata({
+    language: safeString(context.language || "", 50),
+    platform: safeString(context.platform || "", 100),
+    timezone: safeString(context.timezone || "", 100),
+    webdriver: context.webdriver === true
+  });
+}
+
+function getClientBehavior(body) {
+  if (
+    body?.behavior &&
+    typeof body.behavior === "object" &&
+    !Array.isArray(body.behavior)
+  ) {
+    return body.behavior;
+  }
+
+  return {};
+}
+
+async function logAndBlockOrigin(req, actor) {
+  await writeSecurityLog({
+    type: "forbidden_turnstile_origin",
+    level: "warning",
+    message: "Blocked request from forbidden origin on verify-turnstile API",
+    ip: actor.ip,
+    route: ROUTE,
+    metadata: {
+      source: "server_enforced",
+      origin: actor.origin,
+      refererOrigin: getRefererOrigin(req),
+      host: getRequestHost(req),
+      requestUserAgent: actor.userAgent
+    }
+  });
+}
+
 export default async function handler(req, res) {
   setNoStore(res);
 
@@ -100,16 +200,19 @@ export default async function handler(req, res) {
     return res.status(405).json(buildMethodNotAllowedResponse());
   }
 
-  try {
-    const body = sanitizeBody(req.body, 20);
+  if (!isJsonContentType(req)) {
+    return buildJsonError(res, 415, "Unsupported content type.");
+  }
 
-    const token = safeString(body.token || "", 5000).trim();
-    const behavior =
-      body.behavior &&
-      typeof body.behavior === "object" &&
-      !Array.isArray(body.behavior)
-        ? body.behavior
-        : {};
+  if (getRequestContentLength(req) > MAX_CONTENT_LENGTH_BYTES) {
+    return buildJsonError(res, 413, "Request body too large.");
+  }
+
+  try {
+    const body = sanitizeBody(req.body, MAX_BODY_KEYS);
+    const token = safeString(body?.token || "", MAX_TOKEN_LENGTH).trim();
+    const behavior = getClientBehavior(body);
+    const clientContext = sanitizeClientContext(body?.context);
 
     const actor = createActorContext({
       req,
@@ -118,19 +221,31 @@ export default async function handler(req, res) {
       route: ROUTE
     });
 
-    if (!isOriginAllowed(actor.origin)) {
+    const requestHost = getRequestHost(req);
+    const refererOrigin = getRefererOrigin(req);
+
+    if (!isRequestHostAllowed(req)) {
       await writeSecurityLog({
-        type: "forbidden_turnstile_origin",
-        level: "warning",
-        message: "Blocked request from forbidden origin on verify-turnstile API",
+        type: "forbidden_turnstile_host",
+        level: "critical",
+        message: "Blocked request to verify-turnstile API on unexpected host",
         ip: actor.ip,
         route: ROUTE,
         metadata: {
           source: "server_enforced",
+          host: requestHost,
           origin: actor.origin,
-          requestUserAgent: actor.userAgent
+          refererOrigin
         }
       });
+
+      return res.status(403).json(
+        buildBlockedResponse("Forbidden host.", { action: "block" })
+      );
+    }
+
+    if (!isOriginAllowed(actor.origin)) {
+      await logAndBlockOrigin(req, actor);
 
       return res.status(403).json(
         buildBlockedResponse("Forbidden origin.", { action: "block" })
@@ -158,8 +273,17 @@ export default async function handler(req, res) {
     const ip = security.actor.ip;
     const securityAction = pickSecurityAction(security);
     const secret = getTurnstileSecret();
+    const verificationFingerprint = createVerificationFingerprint({
+      ip,
+      token,
+      origin: actor.origin,
+      host: requestHost
+    });
 
-    if (security.signals.rateLimitResult && !security.signals.rateLimitResult.allowed) {
+    if (
+      security.signals.rateLimitResult &&
+      !security.signals.rateLimitResult.allowed
+    ) {
       await writeSecurityLog({
         type: "turnstile_rate_limited",
         level: "warning",
@@ -172,7 +296,8 @@ export default async function handler(req, res) {
           remainingMs: security.signals.rateLimitResult.remainingMs || 0,
           violations: security.signals.rateLimitResult.violations || 0,
           riskScore: security.risk.riskScore,
-          riskLevel: security.risk.level
+          riskLevel: security.risk.level,
+          fingerprint: verificationFingerprint
         }
       });
 
@@ -199,7 +324,9 @@ export default async function handler(req, res) {
           risk: security.risk,
           botResult: security.signals.botResult,
           abuseResult: security.signals.abuseResult,
-          threatResult: security.signals.threatResult
+          threatResult: security.signals.threatResult,
+          clientContext,
+          fingerprint: verificationFingerprint
         })
       });
 
@@ -223,7 +350,9 @@ export default async function handler(req, res) {
           risk: security.risk,
           botResult: security.signals.botResult,
           abuseResult: security.signals.abuseResult,
-          threatResult: security.signals.threatResult
+          threatResult: security.signals.threatResult,
+          clientContext,
+          fingerprint: verificationFingerprint
         })
       });
     }
@@ -239,7 +368,8 @@ export default async function handler(req, res) {
           source: "server_enforced",
           hasToken: Boolean(token),
           hasSecret: Boolean(secret),
-          riskScore: security.risk.riskScore
+          riskScore: security.risk.riskScore,
+          fingerprint: verificationFingerprint
         }
       });
 
@@ -282,7 +412,8 @@ export default async function handler(req, res) {
         metadata: {
           source: "server_enforced",
           error: safeString(error?.message || "Unknown upstream error", 300),
-          riskScore: security.risk.riskScore
+          riskScore: security.risk.riskScore,
+          fingerprint: verificationFingerprint
         }
       });
 
@@ -305,7 +436,8 @@ export default async function handler(req, res) {
         metadata: {
           source: "server_enforced",
           status: response.status,
-          riskScore: security.risk.riskScore
+          riskScore: security.risk.riskScore,
+          fingerprint: verificationFingerprint
         }
       });
 
@@ -325,7 +457,8 @@ export default async function handler(req, res) {
         route: ROUTE,
         metadata: {
           source: "server_enforced",
-          riskScore: security.risk.riskScore
+          riskScore: security.risk.riskScore,
+          fingerprint: verificationFingerprint
         }
       });
 
@@ -350,7 +483,9 @@ export default async function handler(req, res) {
           abuseLevel: security.signals.abuseResult?.level || "low",
           botLevel: security.signals.botResult?.level || "low",
           threatLevel: security.signals.threatResult?.level || "low",
-          riskLevel: security.risk.level
+          riskLevel: security.risk.level,
+          clientContext,
+          fingerprint: verificationFingerprint
         }
       });
 
@@ -367,7 +502,8 @@ export default async function handler(req, res) {
         metadata: {
           source: "server_enforced",
           hostname: normalizeHostname(data.hostname),
-          riskScore: security.risk.riskScore
+          riskScore: security.risk.riskScore,
+          fingerprint: verificationFingerprint
         }
       });
 
