@@ -456,7 +456,7 @@
   </style>
 </head>
 <body>
-  <div class="stars" id="stars"></div>
+  <canvas class="stars-canvas" id="starsCanvas" data-scene="home" aria-hidden="true"></canvas>
 
   <div class="shell">
     <header class="topbar">
@@ -565,6 +565,7 @@
     </section>
   </div>
 
+  <script src="js/stars-canvas.js" defer></script>
   <script type="module" src="js/app-check.js"></script>
   <script type="module" src="js/home.js"></script>
 </body>
