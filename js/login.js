@@ -31,6 +31,16 @@ const TURNSTILE_MAX_WAIT_ATTEMPTS = 60;
 const HOME_PAGE = "home.html";
 const VERIFY_EMAIL_PAGE = "verify-email.html";
 
+const REQUEST_TIMEOUT_MS = 10000;
+const GOOGLE_POPUP_TIMEOUT_MS = 90000;
+
+const EMAIL_MAX_LENGTH = 120;
+const PASSWORD_MAX_LENGTH = 128;
+
+const EMAIL_LOGIN_COOLDOWN_MS = 2500;
+const GOOGLE_LOGIN_COOLDOWN_MS = 2500;
+const RESET_COOLDOWN_MS = 3000;
+
 const ALLOWED_GOOGLE_AUTH_HOSTS = new Set([
   "aethra-hb2h.vercel.app",
   "aethra-gules.vercel.app"
@@ -63,10 +73,18 @@ let eventsBound = false;
 let authFallbackHandled = false;
 let persistenceReadyPromise = null;
 
+let lastEmailLoginAt = 0;
+let lastGoogleLoginAt = 0;
+let lastResetAt = 0;
+
 /* ---------------- BASIC HELPERS ---------------- */
 
 function safeString(value, maxLength = 500) {
   return String(value || "").trim().slice(0, maxLength);
+}
+
+function now() {
+  return Date.now();
 }
 
 function goTo(page) {
@@ -96,11 +114,19 @@ function redirectSignedInUser(user) {
 }
 
 function normalizeEmail(email) {
-  return String(email || "").trim().toLowerCase();
+  return String(email || "").trim().toLowerCase().slice(0, EMAIL_MAX_LENGTH);
+}
+
+function sanitizePassword(password) {
+  return String(password || "").slice(0, PASSWORD_MAX_LENGTH);
 }
 
 function isValidEmail(email) {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+  return (
+    Boolean(email) &&
+    email.length <= EMAIL_MAX_LENGTH &&
+    /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+  );
 }
 
 function isMobileDevice() {
@@ -120,6 +146,24 @@ function isLockedMessage(message) {
 function formatRemainingMinutes(ms) {
   const minutes = Math.ceil(Number(ms || 0) / 60000);
   return minutes <= 1 ? "1 minute" : `${minutes} minutes`;
+}
+
+function hasSuspiciousLength(value, max) {
+  return String(value || "").length > max;
+}
+
+function clearSensitiveInputs({ keepEmail = true } = {}) {
+  if (!keepEmail && emailInput) {
+    emailInput.value = "";
+  }
+
+  if (passwordInput) {
+    passwordInput.value = "";
+  }
+}
+
+function shouldThrottle(lastAt, cooldownMs) {
+  return now() - lastAt < cooldownMs;
 }
 
 function withTimeout(promise, ms, message) {
@@ -205,7 +249,7 @@ function setFieldError(input, errorEl, message) {
     return;
   }
 
-  errorEl.textContent = String(message || "").trim();
+  errorEl.textContent = String(message || "").trim().slice(0, 200);
   input.classList.add("input-invalid");
   input.classList.remove("input-valid");
   input.setAttribute("aria-invalid", "true");
@@ -227,7 +271,7 @@ function setFormMessage(message = "", type = "error") {
     return;
   }
 
-  const safeMessage = String(message || "").trim();
+  const safeMessage = String(message || "").trim().slice(0, 300);
 
   if (!safeMessage) {
     formError.textContent = "";
@@ -261,7 +305,7 @@ function clearFormError() {
 
 function showCaptchaError(message) {
   if (captchaError) {
-    captchaError.textContent = String(message || "").trim();
+    captchaError.textContent = String(message || "").trim().slice(0, 200);
   }
 }
 
@@ -294,23 +338,43 @@ function fireAndForgetSecurityLog(payload) {
   });
 }
 
+/* ---------------- FETCH HELPERS ---------------- */
+
+async function fetchJson(url, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+      headers: {
+        "Content-Type": "application/json",
+        ...(options.headers || {})
+      },
+      cache: options.cache || "no-store"
+    });
+
+    const data = await response.json().catch(() => ({}));
+    return { response, data };
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
+
 /* ---------------- SECURITY / API ---------------- */
 
 async function fetchContainmentState() {
   try {
-    const response = await fetch("/api/security-containment-state", {
-      method: "GET",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      cache: "no-store"
-    });
+    const { response, data } = await fetchJson(
+      "/api/security-containment-state",
+      { method: "GET" }
+    );
 
     if (!response.ok) {
       return null;
     }
 
-    const data = await response.json().catch(() => null);
     return data && typeof data === "object" ? data : null;
   } catch (error) {
     console.warn("Containment state fetch failed:", error);
@@ -322,20 +386,21 @@ function isReadOnlyMode(state) {
   return state?.flags?.readOnlyMode === true;
 }
 
-async function verifyTurnstileToken(token, behavior = {}) {
-  const response = await fetch("/api/verify-turnstile", {
+async function verifyTurnstileToken(token, securityContext = {}) {
+  const { response, data } = await fetchJson("/api/verify-turnstile", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
     body: JSON.stringify({
       token,
-      behavior,
-      sessionId: behavior?.sessionId || ""
+      behavior: securityContext.behavior || {},
+      sessionId: securityContext?.behavior?.sessionId || "",
+      context: {
+        language: securityContext.language || "",
+        platform: securityContext.platform || "",
+        timezone: securityContext.timezone || "unknown",
+        webdriver: securityContext.webdriver === true
+      }
     })
   });
-
-  const data = await response.json().catch(() => ({}));
 
   if (!response.ok || !data.success) {
     throw new Error(
@@ -347,19 +412,14 @@ async function verifyTurnstileToken(token, behavior = {}) {
 }
 
 async function callLoginAttemptApi(email, action, extra = {}) {
-  const response = await fetch("/api/login-attempt", {
+  const { response, data } = await fetchJson("/api/login-attempt", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
     body: JSON.stringify({
       email,
       action,
       ...extra
     })
   });
-
-  const data = await response.json().catch(() => ({}));
 
   if (!response.ok || !data.success) {
     throw new Error(data?.message || "Login security check failed.");
@@ -386,6 +446,8 @@ function getClientSecurityContext() {
     userAgent: navigator.userAgent || "",
     language: navigator.language || "",
     platform: navigator.platform || "",
+    timezone: Intl.DateTimeFormat?.().resolvedOptions?.().timeZone || "unknown",
+    webdriver: navigator.webdriver === true,
     screen: {
       width: window.screen?.width || 0,
       height: window.screen?.height || 0
@@ -596,6 +658,7 @@ function bindTurnstileLazyRender() {
 
   loginBtn?.addEventListener("pointerdown", triggerTurnstileRender);
   forgotPasswordBtn?.addEventListener("pointerdown", triggerTurnstileRender);
+  googleBtn?.addEventListener("pointerdown", triggerTurnstileRender);
 }
 
 async function ensureCaptchaSolved(
@@ -637,7 +700,7 @@ function validateEmail(showUI = true) {
     return false;
   }
 
-  if (!isValidEmail(email)) {
+  if (hasSuspiciousLength(email, EMAIL_MAX_LENGTH) || !isValidEmail(email)) {
     if (showUI) {
       setFieldError(
         emailInput,
@@ -656,11 +719,22 @@ function validateEmail(showUI = true) {
 }
 
 function validatePassword(showUI = true) {
-  const password = passwordInput?.value || "";
+  const password = sanitizePassword(passwordInput?.value || "");
+
+  if (passwordInput && passwordInput.value !== password) {
+    passwordInput.value = password;
+  }
 
   if (!password) {
     if (showUI) {
       setFieldError(passwordInput, passwordError, "Please enter your password.");
+    }
+    return false;
+  }
+
+  if (hasSuspiciousLength(password, PASSWORD_MAX_LENGTH)) {
+    if (showUI) {
+      setFieldError(passwordInput, passwordError, "Password is too long.");
     }
     return false;
   }
@@ -681,7 +755,7 @@ function getFriendlyAuthMessage(error) {
   }
 
   if (message.toLowerCase().includes("timed out")) {
-    return "Google sign-in took too long. Please try again.";
+    return "The request took too long. Please try again.";
   }
 
   if (isLockedMessage(message)) {
@@ -708,11 +782,11 @@ function getFriendlyAuthMessage(error) {
     case "auth/unauthorized-domain":
       return "This domain is not authorized for Google sign-in.";
     case "auth/operation-not-allowed":
-      return "Google sign-in is not enabled right now.";
+      return "This sign-in method is temporarily unavailable.";
     case "auth/internal-error":
-      return "Google sign-in could not be completed. Please try again.";
+      return "Sign-in could not be completed. Please try again.";
     default:
-      return safeString(message, 300) || "Login failed. Please try again.";
+      return "Login failed. Please try again.";
   }
 }
 
@@ -733,7 +807,7 @@ async function precheckSensitiveAction(email, actionLabel = "login_check") {
   }
 
   const token = await ensureCaptchaSolved("Please complete the captcha first.");
-  await verifyTurnstileToken(token, securityContext.behavior || {});
+  await verifyTurnstileToken(token, securityContext);
 
   return securityContext;
 }
@@ -768,7 +842,9 @@ async function processAuthenticatedGoogleUser(user, actionLabel, successMessage)
     email: user.email || "",
     userId: user.uid,
     metadata: {
-      behavior: securityContext.behavior || {}
+      behavior: securityContext.behavior || {},
+      timezone: securityContext.timezone,
+      webdriver: securityContext.webdriver === true
     }
   });
 
@@ -874,6 +950,12 @@ async function handleEmailLogin() {
     return;
   }
 
+  if (shouldThrottle(lastEmailLoginAt, EMAIL_LOGIN_COOLDOWN_MS)) {
+    showFormError("Please wait a moment before trying again.");
+    return;
+  }
+
+  lastEmailLoginAt = now();
   isSubmitting = true;
   clearAllErrors();
 
@@ -887,10 +969,13 @@ async function handleEmailLogin() {
   }
 
   const email = normalizeEmail(emailInput?.value || "");
-  const password = passwordInput?.value || "";
+  const password = sanitizePassword(passwordInput?.value || "");
 
   if (emailInput) {
     emailInput.value = email;
+  }
+  if (passwordInput) {
+    passwordInput.value = password;
   }
 
   let securityContext = {};
@@ -913,20 +998,25 @@ async function handleEmailLogin() {
       email,
       userId: user.uid,
       metadata: {
-        behavior: securityContext.behavior || {}
+        behavior: securityContext.behavior || {},
+        timezone: securityContext.timezone,
+        webdriver: securityContext.webdriver === true
       }
     });
 
+    clearSensitiveInputs({ keepEmail: true });
     redirectSignedInUser(user);
   } catch (error) {
     console.error("Email login failed:", error);
 
     fireAndForgetSecurityLog({
       type: "login_failed",
-      message: error?.message || "Unknown login error",
+      message: error?.code || "login_failed",
       email,
       metadata: {
-        behavior: securityContext.behavior || {}
+        behavior: securityContext.behavior || {},
+        timezone: securityContext.timezone,
+        webdriver: securityContext.webdriver === true
       }
     });
 
@@ -967,6 +1057,7 @@ async function handleEmailLogin() {
       showFormError(getFriendlyAuthMessage(error));
     }
 
+    clearSensitiveInputs({ keepEmail: true });
     resetTurnstile();
     setTemporaryCooldown(loginBtn, 3000);
   } finally {
@@ -982,6 +1073,12 @@ async function handleGoogleLogin() {
     return;
   }
 
+  if (shouldThrottle(lastGoogleLoginAt, GOOGLE_LOGIN_COOLDOWN_MS)) {
+    showFormError("Please wait a moment before trying again.");
+    return;
+  }
+
+  lastGoogleLoginAt = now();
   isSubmitting = true;
   clearAllErrors();
 
@@ -992,6 +1089,15 @@ async function handleGoogleLogin() {
     clearCaptchaError();
 
     if (!isAllowedGoogleAuthHost()) {
+      fireAndForgetSecurityLog({
+        type: "google_login_blocked_host",
+        message: "Google sign-in blocked on unauthorized host",
+        email: "",
+        metadata: {
+          hostname: window.location.hostname
+        }
+      });
+
       showFormError("Google sign-in is only available on the official Aethra domains.");
       return;
     }
@@ -1014,7 +1120,7 @@ async function handleGoogleLogin() {
     try {
       userCredential = await withTimeout(
         signInWithPopup(auth, provider),
-        90000,
+        GOOGLE_POPUP_TIMEOUT_MS,
         "Google sign-in timed out."
       );
     } catch (popupError) {
@@ -1058,7 +1164,7 @@ async function handleGoogleLogin() {
 
     fireAndForgetSecurityLog({
       type: "google_login_failed",
-      message: error?.message || "Google login failed",
+      message: error?.code || "google_login_failed",
       email: signedInUser?.email || "google-login"
     });
 
@@ -1077,6 +1183,12 @@ async function handleForgotPassword() {
     return;
   }
 
+  if (shouldThrottle(lastResetAt, RESET_COOLDOWN_MS)) {
+    showFormError("Please wait a moment before trying again.");
+    return;
+  }
+
+  lastResetAt = now();
   isSubmitting = true;
   clearAllErrors();
 
@@ -1126,20 +1238,25 @@ async function handleForgotPassword() {
       message: "Password reset requested",
       email,
       metadata: {
-        behavior: securityContext.behavior || {}
+        behavior: securityContext.behavior || {},
+        timezone: securityContext.timezone,
+        webdriver: securityContext.webdriver === true
       }
     });
 
+    clearSensitiveInputs({ keepEmail: true });
     showFormSuccess("If this email is registered, a password reset link has been sent.");
   } catch (error) {
     console.error("Password reset failed:", error);
 
     fireAndForgetSecurityLog({
       type: "password_reset_failed",
-      message: error?.message || "Password reset failed",
+      message: error?.code || "password_reset_failed",
       email,
       metadata: {
-        behavior: securityContext.behavior || {}
+        behavior: securityContext.behavior || {},
+        timezone: securityContext.timezone,
+        webdriver: securityContext.webdriver === true
       }
     });
 
@@ -1148,8 +1265,9 @@ async function handleForgotPassword() {
     } else {
       showFormError("Could not process the password reset request. Please try again.");
     }
-  } finally {
+
     resetTurnstile();
+  } finally {
     clearLoading(forgotPasswordBtn);
     isSubmitting = false;
   }
