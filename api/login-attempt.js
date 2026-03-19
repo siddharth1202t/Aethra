@@ -1,3 +1,5 @@
+import crypto from "node:crypto";
+
 import { redis } from "./_redis.js";
 import { writeSecurityLog } from "./_security-log-writer.js";
 import { createActorContext } from "./_actor-context.js";
@@ -19,14 +21,30 @@ const IP_LOCK_WINDOW_MS = 10 * 60 * 1000;
 const STALE_RECORD_TTL_MS = 24 * 60 * 60 * 1000;
 
 const ROUTE = "/api/login-attempt";
+const MAX_BODY_KEYS = 25;
+const MAX_CONTENT_LENGTH_BYTES = 12 * 1024;
 
 const ALLOWED_ORIGINS = new Set([
   "https://aethra-gules.vercel.app",
   "https://aethra-hb2h.vercel.app"
 ]);
 
+const ALLOWED_HOSTNAMES = new Set([
+  "aethra-gules.vercel.app",
+  "aethra-hb2h.vercel.app"
+]);
+
 const ALLOWED_ACTIONS = new Set(["check", "fail"]);
 const GOOGLE_PLACEHOLDER_EMAIL = "google-login";
+
+function setNoStore(res) {
+  res.setHeader(
+    "Cache-Control",
+    "no-store, no-cache, must-revalidate, proxy-revalidate"
+  );
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+}
 
 function safeJsonParse(raw, fallback = null) {
   try {
@@ -54,12 +72,23 @@ function normalizeIp(ip) {
 }
 
 function normalizeKeyPart(value, fallback = "", maxLength = 160) {
-  const cleaned = safeString(value || "", maxLength).replace(/[^a-zA-Z0-9._:@/-]/g, "");
+  const cleaned = safeString(value || "", maxLength).replace(
+    /[^a-zA-Z0-9._:@/-]/g,
+    ""
+  );
   return cleaned || fallback;
 }
 
+function normalizeHostname(hostname = "") {
+  return safeString(hostname, 200).trim().toLowerCase();
+}
+
 function isValidEmail(email) {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+  return (
+    email.length >= 5 &&
+    email.length <= 200 &&
+    /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+  );
 }
 
 function getKey(email, ip) {
@@ -74,8 +103,51 @@ function buildIpAttemptKey(ip) {
   return `login-attempt-ip:${normalizeKeyPart(ip, "unknown-ip", 120)}`;
 }
 
+function normalizeOrigin(origin = "") {
+  const raw = safeString(origin, 200).trim();
+  if (!raw) return "";
+
+  try {
+    return new URL(raw).origin.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+function getRequestHost(req) {
+  const hostHeader = safeString(req?.headers?.host || "", 200).toLowerCase();
+  return normalizeHostname(hostHeader.split(":")[0] || "");
+}
+
+function getRefererOrigin(req) {
+  const referer = safeString(req?.headers?.referer || "", 500).trim();
+  if (!referer) return "";
+
+  try {
+    return new URL(referer).origin.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
 function isOriginAllowed(origin = "") {
-  return ALLOWED_ORIGINS.has(safeString(origin, 200).trim().toLowerCase());
+  return ALLOWED_ORIGINS.has(normalizeOrigin(origin));
+}
+
+function isHostAllowed(req) {
+  return ALLOWED_HOSTNAMES.has(getRequestHost(req));
+}
+
+function isJsonContentType(req) {
+  const contentType = safeString(req?.headers?.["content-type"] || "", 200)
+    .toLowerCase();
+  return contentType.startsWith("application/json");
+}
+
+function getRequestContentLength(req) {
+  const raw = req?.headers?.["content-length"];
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
 }
 
 function createDefaultRecord(now = Date.now()) {
@@ -141,7 +213,6 @@ async function saveStoredRecord(redisKey, record) {
     const normalized = normalizeRecord(record, Date.now());
 
     await redis.set(redisKey, JSON.stringify(normalized), { ex: ttlSeconds });
-
     return true;
   } catch (error) {
     console.error("Redis login-attempt write failed:", error);
@@ -156,14 +227,17 @@ function isGooglePlaceholderEmail(email) {
 function buildLockResponse(isLocked, remainingMs = 0, extra = {}) {
   return {
     success: true,
-    isLocked,
+    isLocked: Boolean(isLocked),
     remainingMs: isLocked ? Math.max(0, safePositiveInt(remainingMs, 0)) : 0,
     ...extra
   };
 }
 
 function getEscalatedLockMs(baseMs, escalationCount) {
-  const multiplier = Math.min(4, 1 + safePositiveInt(escalationCount, 0) * 0.5);
+  const multiplier = Math.min(
+    4,
+    1 + safePositiveInt(escalationCount, 0) * 0.5
+  );
   return Math.floor(baseMs * multiplier);
 }
 
@@ -174,21 +248,99 @@ function pickSecurityAction(security) {
   ).toLowerCase();
 }
 
+function sanitizeBehavior(body) {
+  if (
+    body?.behavior &&
+    typeof body.behavior === "object" &&
+    !Array.isArray(body.behavior)
+  ) {
+    return body.behavior;
+  }
+
+  return {};
+}
+
+function sanitizeClientContext(body) {
+  const context =
+    body?.context &&
+    typeof body.context === "object" &&
+    !Array.isArray(body.context)
+      ? body.context
+      : {};
+
+  return sanitizeMetadata({
+    language: safeString(context.language || "", 50),
+    platform: safeString(context.platform || "", 100),
+    timezone: safeString(context.timezone || "", 100),
+    webdriver: context.webdriver === true
+  });
+}
+
+function buildAttemptFingerprint({ email, ip, action, actionLabel }) {
+  return crypto
+    .createHash("sha256")
+    .update(
+      [
+        safeString(email, 200),
+        safeString(ip, 100),
+        safeString(action, 50),
+        safeString(actionLabel, 100)
+      ].join("|")
+    )
+    .digest("hex")
+    .slice(0, 32);
+}
+
+async function writeOriginBlockLog({ actor, req }) {
+  await writeSecurityLog({
+    type: "forbidden_origin",
+    level: "warning",
+    message: "Blocked request from forbidden origin",
+    ip: actor.ip,
+    route: ROUTE,
+    metadata: {
+      source: "server_enforced",
+      origin: actor.origin,
+      refererOrigin: getRefererOrigin(req),
+      host: getRequestHost(req),
+      requestUserAgent: actor.userAgent
+    }
+  });
+}
+
 export default async function handler(req, res) {
+  setNoStore(res);
+
+  if (req.method === "OPTIONS") {
+    return res.status(204).end();
+  }
+
   if (req.method !== "POST") {
     return res.status(405).json(buildMethodNotAllowedResponse());
   }
 
+  if (!isJsonContentType(req)) {
+    return res.status(415).json({
+      success: false,
+      message: "Unsupported content type."
+    });
+  }
+
+  if (getRequestContentLength(req) > MAX_CONTENT_LENGTH_BYTES) {
+    return res.status(413).json({
+      success: false,
+      message: "Request body too large."
+    });
+  }
+
   try {
-    const body = sanitizeBody(req.body, 20);
+    const body = sanitizeBody(req.body, MAX_BODY_KEYS);
 
     const rawEmail = normalizeEmail(body.email);
     const action = safeString(body.action, 50).toLowerCase();
     const actionLabel = safeString(body.actionLabel, 100);
-    const behavior =
-      body.behavior && typeof body.behavior === "object" && !Array.isArray(body.behavior)
-        ? body.behavior
-        : {};
+    const behavior = sanitizeBehavior(body);
+    const clientContext = sanitizeClientContext(body);
 
     const actor = createActorContext({
       req,
@@ -200,19 +352,28 @@ export default async function handler(req, res) {
       route: `${ROUTE}:${action || "unknown"}${actionLabel ? `:${actionLabel}` : ""}`
     });
 
-    if (!isOriginAllowed(actor.origin)) {
+    if (!isHostAllowed(req)) {
       await writeSecurityLog({
-        type: "forbidden_origin",
-        level: "warning",
-        message: "Blocked request from forbidden origin",
+        type: "forbidden_host",
+        level: "critical",
+        message: "Blocked request on unexpected host",
         ip: actor.ip,
         route: ROUTE,
         metadata: {
           source: "server_enforced",
+          host: getRequestHost(req),
           origin: actor.origin,
-          requestUserAgent: actor.userAgent
+          refererOrigin: getRefererOrigin(req)
         }
       });
+
+      return res.status(403).json(
+        buildBlockedResponse("Forbidden host.", { action: "block" })
+      );
+    }
+
+    if (!isOriginAllowed(actor.origin)) {
+      await writeOriginBlockLog({ actor, req });
 
       return res.status(403).json(
         buildBlockedResponse("Forbidden origin.", { action: "block" })
@@ -240,8 +401,18 @@ export default async function handler(req, res) {
 
     const ip = normalizeIp(security.actor.ip);
     const securityAction = pickSecurityAction(security);
+    const now = Date.now();
+    const fingerprint = buildAttemptFingerprint({
+      email: rawEmail,
+      ip,
+      action,
+      actionLabel
+    });
 
-    if (security.signals.rateLimitResult && !security.signals.rateLimitResult.allowed) {
+    if (
+      security.signals.rateLimitResult &&
+      !security.signals.rateLimitResult.allowed
+    ) {
       await writeSecurityLog({
         type: "login_attempt_rate_limited",
         level: "warning",
@@ -254,7 +425,8 @@ export default async function handler(req, res) {
           remainingMs: security.signals.rateLimitResult.remainingMs || 0,
           violations: security.signals.rateLimitResult.violations || 0,
           riskScore: security.risk.riskScore,
-          riskLevel: security.risk.level
+          riskLevel: security.risk.level,
+          fingerprint
         }
       });
 
@@ -276,7 +448,9 @@ export default async function handler(req, res) {
         route: ROUTE,
         metadata: {
           source: "server_enforced",
-          action
+          action,
+          actionLabel,
+          fingerprint
         }
       });
 
@@ -286,7 +460,8 @@ export default async function handler(req, res) {
       });
     }
 
-    const emailIsAllowed = isValidEmail(rawEmail) || isGooglePlaceholderEmail(rawEmail);
+    const emailIsAllowed =
+      isValidEmail(rawEmail) || isGooglePlaceholderEmail(rawEmail);
 
     if (!rawEmail || !emailIsAllowed) {
       await writeSecurityLog({
@@ -297,7 +472,10 @@ export default async function handler(req, res) {
         ip,
         route: ROUTE,
         metadata: {
-          source: "server_enforced"
+          source: "server_enforced",
+          action,
+          actionLabel,
+          fingerprint
         }
       });
 
@@ -306,8 +484,6 @@ export default async function handler(req, res) {
         message: "Invalid email."
       });
     }
-
-    const now = Date.now();
 
     if (securityAction === "block") {
       await writeSecurityLog({
@@ -324,14 +500,19 @@ export default async function handler(req, res) {
           risk: security.risk,
           botResult: security.signals.botResult,
           abuseResult: security.signals.abuseResult,
-          threatResult: security.signals.threatResult
+          threatResult: security.signals.threatResult,
+          clientContext,
+          fingerprint
         })
       });
 
       return res.status(429).json(
-        buildBlockedResponse("Suspicious activity detected. Please try again later.", {
-          action: "block"
-        })
+        buildBlockedResponse(
+          "Suspicious activity detected. Please try again later.",
+          {
+            action: "block"
+          }
+        )
       );
     }
 
@@ -350,7 +531,9 @@ export default async function handler(req, res) {
           risk: security.risk,
           botResult: security.signals.botResult,
           abuseResult: security.signals.abuseResult,
-          threatResult: security.signals.threatResult
+          threatResult: security.signals.threatResult,
+          clientContext,
+          fingerprint
         })
       });
     }
@@ -395,7 +578,8 @@ export default async function handler(req, res) {
 
       if (record.count >= MAX_ATTEMPTS) {
         record.escalationCount += 1;
-        record.lockUntil = now + getEscalatedLockMs(LOCK_WINDOW_MS, record.escalationCount);
+        record.lockUntil =
+          now + getEscalatedLockMs(LOCK_WINDOW_MS, record.escalationCount);
 
         await writeSecurityLog({
           type: "login_lockout",
@@ -410,14 +594,17 @@ export default async function handler(req, res) {
             escalationCount: record.escalationCount,
             actionLabel,
             risk: security.risk,
-            threatResult: security.signals.threatResult
+            threatResult: security.signals.threatResult,
+            clientContext,
+            fingerprint
           })
         });
       }
 
       if (ipRecord.count >= MAX_IP_ATTEMPTS) {
         ipRecord.escalationCount += 1;
-        ipRecord.lockUntil = now + getEscalatedLockMs(IP_LOCK_WINDOW_MS, ipRecord.escalationCount);
+        ipRecord.lockUntil =
+          now + getEscalatedLockMs(IP_LOCK_WINDOW_MS, ipRecord.escalationCount);
 
         await writeSecurityLog({
           type: "ip_login_lock",
@@ -430,7 +617,9 @@ export default async function handler(req, res) {
             attempts: ipRecord.count,
             escalationCount: ipRecord.escalationCount,
             actionLabel,
-            risk: security.risk
+            risk: security.risk,
+            clientContext,
+            fingerprint
           })
         });
       }
@@ -438,11 +627,15 @@ export default async function handler(req, res) {
       await saveStoredRecord(userRedisKey, record);
       await saveStoredRecord(ipRedisKey, ipRecord);
 
-      const isLocked = record.lockUntil > now;
+      const isUserLocked = record.lockUntil > now;
+      const isIpLocked = ipRecord.lockUntil > now;
 
       return res.status(200).json(
-        buildLockResponse(isLocked, record.lockUntil - now, {
-          lockType: isLocked ? "user" : (ipRecord.lockUntil > now ? "ip" : "none"),
+        buildLockResponse(isUserLocked || isIpLocked, Math.max(
+          isUserLocked ? record.lockUntil - now : 0,
+          isIpLocked ? ipRecord.lockUntil - now : 0
+        ), {
+          lockType: isUserLocked ? "user" : isIpLocked ? "ip" : "none",
           attempts: record.count,
           risk: security.risk
         })
