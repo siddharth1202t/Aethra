@@ -2,7 +2,6 @@ import { writeSecurityLog } from "./_security-log-writer.js";
 import {
   safeString,
   safeNumber,
-  safeBoolean,
   isPlainObject,
   sanitizeBody,
   sanitizeMetadata,
@@ -19,6 +18,11 @@ const ALLOWED_ORIGINS = new Set([
   "https://aethra-hb2h.vercel.app"
 ]);
 
+const ALLOWED_HOSTNAMES = new Set([
+  "aethra-gules.vercel.app",
+  "aethra-hb2h.vercel.app"
+]);
+
 const ALLOWED_CLIENT_TYPES = new Set([
   "captcha_missing",
   "client_security_event",
@@ -32,9 +36,19 @@ const ALLOWED_LEVELS = new Set([
   "error"
 ]);
 
-const MAX_BODY_KEYS = 12;
+const MAX_BODY_KEYS = 14;
 const MAX_EVENT_AGE_MS = 2 * 60 * 1000;
 const EVENT_FUTURE_TOLERANCE_MS = 15 * 1000;
+const MAX_CONTENT_LENGTH_BYTES = 12 * 1024;
+
+function setNoStore(res) {
+  res.setHeader(
+    "Cache-Control",
+    "no-store, no-cache, must-revalidate, proxy-revalidate"
+  );
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+}
 
 function normalizeEmail(value = "") {
   const email = safeString(value || "", 200).toLowerCase();
@@ -45,8 +59,69 @@ function normalizeEmail(value = "") {
   return email;
 }
 
+function normalizeEmailHash(value = "") {
+  return safeString(value || "", 128)
+    .toLowerCase()
+    .replace(/[^a-f0-9]/g, "")
+    .slice(0, 64);
+}
+
 function normalizeUserId(value = "") {
   return safeString(value || "", 128).replace(/[^a-zA-Z0-9._:@/-]/g, "");
+}
+
+function normalizeHostname(hostname = "") {
+  return safeString(hostname || "", 200).trim().toLowerCase();
+}
+
+function normalizeOrigin(origin = "") {
+  const raw = safeString(origin || "", 200).trim();
+  if (!raw) return "";
+
+  try {
+    return new URL(raw).origin.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+function getRequestHost(req) {
+  const hostHeader = safeString(req?.headers?.host || "", 200).toLowerCase();
+  return normalizeHostname(hostHeader.split(":")[0] || "");
+}
+
+function getRefererOrigin(req) {
+  const referer = safeString(req?.headers?.referer || "", 500).trim();
+
+  if (!referer) {
+    return "";
+  }
+
+  try {
+    return new URL(referer).origin.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+function isHostAllowed(req) {
+  return ALLOWED_HOSTNAMES.has(getRequestHost(req));
+}
+
+function isOriginAllowed(origin = "") {
+  return ALLOWED_ORIGINS.has(normalizeOrigin(origin));
+}
+
+function isJsonContentType(req) {
+  const contentType = safeString(req?.headers?.["content-type"] || "", 200)
+    .toLowerCase();
+  return contentType.startsWith("application/json");
+}
+
+function getRequestContentLength(req) {
+  const raw = req?.headers?.["content-length"];
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
 }
 
 function safeClientType(type) {
@@ -73,11 +148,13 @@ function sanitizeClient(client = {}) {
     pixelRatio: Math.max(0, safeNumber(client.pixelRatio, 1)),
     hardwareConcurrency: Math.max(0, safeNumber(client.hardwareConcurrency, 0)),
     deviceMemory: Math.max(0, safeNumber(client.deviceMemory, 0)),
-    url: safeString(client.url || "", 500),
-    referrer: safeString(client.referrer || "", 500),
+    url: safeString(client.url || "", 300),
+    referrer: safeString(client.referrer || "", 300),
     timezone: safeString(client.timezone || "", 100),
     visibilityState: safeString(client.visibilityState || "", 30),
-    telemetryVersion: Math.max(0, safeNumber(client.telemetryVersion, 0))
+    telemetryVersion: Math.max(0, safeNumber(client.telemetryVersion, 0)),
+    online: client.online === true,
+    webdriver: client.webdriver === true
   };
 }
 
@@ -86,8 +163,28 @@ function buildTelemetryNonceScope(type = "") {
 }
 
 export default async function handler(req, res) {
+  setNoStore(res);
+
+  if (req.method === "OPTIONS") {
+    return res.status(204).end();
+  }
+
   if (req.method !== "POST") {
     return res.status(405).json(buildMethodNotAllowedResponse());
+  }
+
+  if (!isJsonContentType(req)) {
+    return res.status(415).json({
+      success: false,
+      message: "Unsupported content type."
+    });
+  }
+
+  if (getRequestContentLength(req) > MAX_CONTENT_LENGTH_BYTES) {
+    return res.status(413).json({
+      success: false,
+      message: "Request body too large."
+    });
   }
 
   let ip = "unknown";
@@ -99,6 +196,25 @@ export default async function handler(req, res) {
         ? body.behavior
         : {};
     const sessionId = safeString(body.sessionId || "", 120);
+
+    if (!isHostAllowed(req)) {
+      await writeSecurityLog({
+        type: "client_security_event",
+        level: "warning",
+        message: "Blocked client security log request on forbidden host",
+        route: ROUTE,
+        metadata: {
+          source: "server_enforced",
+          blockedReason: "forbidden_host",
+          host: getRequestHost(req),
+          refererOrigin: getRefererOrigin(req)
+        }
+      });
+
+      return res.status(403).json(
+        buildBlockedResponse("Forbidden host.", { action: "block" })
+      );
+    }
 
     const security = await runRouteSecurity({
       req,
@@ -125,7 +241,7 @@ export default async function handler(req, res) {
     ip = security.ip;
     const origin = security.origin;
 
-    if (!security.originAllowed) {
+    if (!security.originAllowed || !isOriginAllowed(origin)) {
       await writeSecurityLog({
         type: "client_security_event",
         level: "warning",
@@ -136,7 +252,9 @@ export default async function handler(req, res) {
           source: "server_enforced",
           blockedReason: "forbidden_origin",
           requestOrigin: origin,
-          requestUserAgent: security.requestUserAgent
+          refererOrigin: getRefererOrigin(req),
+          requestUserAgent: security.requestUserAgent,
+          host: getRequestHost(req)
         }
       });
 
@@ -235,6 +353,7 @@ export default async function handler(req, res) {
     const level = safeLevel(body.level);
     const message = safeString(body.message || "", 500);
     const email = normalizeEmail(body.email || "");
+    const emailHash = normalizeEmailHash(body.emailHash || "");
     const userId = normalizeUserId(body.userId || "");
     const metadata = sanitizeMetadata(
       isPlainObject(body.metadata) ? body.metadata : {}
@@ -279,6 +398,7 @@ export default async function handler(req, res) {
       level,
       message: message || "Client security telemetry received",
       email,
+      emailHash,
       userId,
       ip,
       route: ROUTE,
@@ -289,6 +409,8 @@ export default async function handler(req, res) {
         ageMs: safeNumber(freshRequestResult.ageMs, 0),
         requestOrigin: origin,
         requestUserAgent: security.requestUserAgent,
+        requestHost: getRequestHost(req),
+        refererOrigin: getRefererOrigin(req),
         sessionIdPresent: Boolean(sessionId),
         noncePresent: Boolean(safeString(body.nonce || "", 200)),
         metadata,
