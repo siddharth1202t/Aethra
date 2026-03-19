@@ -10,40 +10,34 @@ const userRoleEl = document.getElementById("userRole");
 const heroUsernameEl = document.getElementById("heroUsername");
 const logoutBtn = document.getElementById("logoutBtn");
 const devBtn = document.getElementById("devBtn");
-const starsContainer = document.getElementById("stars");
+
+let pageReady = false;
+let logoutInProgress = false;
 
 function goTo(page) {
   window.location.replace(page);
 }
 
-function createStars() {
-  if (!starsContainer || starsContainer.dataset.ready === "true") return;
-
-  const fragment = document.createDocumentFragment();
-
-  for (let i = 0; i < 90; i += 1) {
-    const star = document.createElement("div");
-    star.classList.add("star");
-
-    const size = Math.random() * 2.2 + 1;
-    star.style.width = `${size}px`;
-    star.style.height = `${size}px`;
-    star.style.left = `${Math.random() * 100}vw`;
-    star.style.top = `${Math.random() * 100}vh`;
-    star.style.animationDuration = `${Math.random() * 4 + 2}s`;
-    star.style.animationDelay = `${Math.random() * 4}s`;
-
-    fragment.appendChild(star);
+function setPageVisible() {
+  if (!shell || pageReady) {
+    return;
   }
 
-  starsContainer.appendChild(fragment);
-  starsContainer.dataset.ready = "true";
+  shell.style.visibility = "visible";
+  shell.style.opacity = "1";
+  shell.style.transform = "translateY(0)";
+  pageReady = true;
 }
 
-function setPageVisible() {
-  if (shell) {
-    shell.style.visibility = "visible";
+function setPageLoadingState() {
+  if (!shell) {
+    return;
   }
+
+  shell.style.visibility = "visible";
+  shell.style.opacity = "0";
+  shell.style.transform = "translateY(8px)";
+  shell.style.transition = "opacity 260ms ease, transform 260ms ease";
 }
 
 function getBestDisplayName(user) {
@@ -69,7 +63,9 @@ function setDefaultUserUI(user) {
 }
 
 async function hydrateRole(user) {
-  if (!user?.uid) return;
+  if (!user?.uid) {
+    return;
+  }
 
   try {
     const userRef = doc(db, "users", user.uid);
@@ -80,7 +76,8 @@ async function hydrateRole(user) {
     }
 
     const userData = userSnap.data() || {};
-    const isDeveloper = String(userData.role || "").toLowerCase() === "developer";
+    const role = String(userData.role || "").toLowerCase();
+    const isDeveloper = role === "developer";
 
     if (userRoleEl) {
       userRoleEl.textContent = isDeveloper ? "Developer" : "User";
@@ -94,35 +91,53 @@ async function hydrateRole(user) {
   }
 }
 
-requireAuth(async (user) => {
-  try {
-    // Show useful UI immediately after auth is confirmed.
-    setDefaultUserUI(user);
-    setPageVisible();
+function bindActions() {
+  devBtn?.addEventListener("click", () => {
+    goTo("developer.html");
+  });
 
-    // Load role in the background so the page feels instant.
-    await hydrateRole(user);
-  } catch (error) {
-    console.error("Home auth setup failed:", error);
-    setDefaultUserUI(user);
-    setPageVisible();
-  }
-});
+  logoutBtn?.addEventListener("click", async () => {
+    if (logoutInProgress) {
+      return;
+    }
 
-devBtn?.addEventListener("click", () => {
-  goTo("developer.html");
-});
+    logoutInProgress = true;
 
-logoutBtn?.addEventListener("click", async () => {
-  try {
-    logoutBtn.disabled = true;
-    logoutBtn.textContent = "Logging out...";
-    await signOut(auth);
-  } catch (error) {
-    console.error("Logout failed:", error);
-  } finally {
-    goTo("login.html");
-  }
-});
+    try {
+      if (logoutBtn) {
+        logoutBtn.disabled = true;
+        logoutBtn.textContent = "Logging out...";
+      }
 
-createStars();
+      await signOut(auth);
+    } catch (error) {
+      console.error("Logout failed:", error);
+    } finally {
+      goTo("login.html");
+    }
+  });
+}
+
+async function initHomePage() {
+  setPageLoadingState();
+  bindActions();
+
+  requireAuth(async (user) => {
+    try {
+      setDefaultUserUI(user);
+      setPageVisible();
+
+      await hydrateRole(user);
+    } catch (error) {
+      console.error("Home auth setup failed:", error);
+      setDefaultUserUI(user);
+      setPageVisible();
+    }
+  });
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", initHomePage, { once: true });
+} else {
+  initHomePage();
+}
