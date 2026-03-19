@@ -3,6 +3,7 @@ const nav = document.querySelector(".nav");
 const heroCard = document.getElementById("heroCard");
 const leftPanel = document.getElementById("leftPanel");
 const rightPanel = document.getElementById("rightPanel");
+const aurora = document.querySelector(".aurora");
 
 const modal = document.getElementById("characterModal");
 const modalCard = modal?.querySelector(".modal-card");
@@ -16,12 +17,16 @@ const modalTraits = document.getElementById("modalTraits");
 const characterCards = Array.from(document.querySelectorAll(".char-card"));
 const revealTargets = Array.from(
   document.querySelectorAll(
-    ".hero-card, .side-panel, .section-head, .char-card, .about-section"
+    ".hero-card, .side-panel, .section-head, .char-card, .about-section, .mini-stats .stat"
   )
 );
 
 let activeModalTrigger = null;
 let rafId = 0;
+let parallaxRafId = 0;
+let scrollBound = false;
+let modalBound = false;
+let cardBound = false;
 
 /* ---------------- BASIC HELPERS ---------------- */
 
@@ -40,31 +45,56 @@ function setStyles(element, styles = {}) {
 
 /* ---------------- PAGE REVEAL ---------------- */
 
-function initPageReveal() {
-  revealTargets.forEach((element, index) => {
-    if (!element) return;
-    element.style.opacity = "0";
-    element.style.transform = "translateY(26px)";
-    element.style.transition =
-      "opacity 0.7s ease, transform 0.7s cubic-bezier(0.22, 1, 0.36, 1)";
-    element.style.transitionDelay = `${Math.min(index * 40, 220)}ms`;
-  });
-
-  const reveal = () => {
+function prepareRevealTargets() {
+  if (prefersReducedMotion()) {
     revealTargets.forEach((element) => {
       if (!element) return;
       element.style.opacity = "1";
-      element.style.transform = "translateY(0)";
+      element.style.transform = "none";
+      element.style.transition = "none";
     });
-  };
-
-  if (prefersReducedMotion()) {
-    reveal();
     return;
   }
 
-  window.requestAnimationFrame(() => {
-    window.requestAnimationFrame(reveal);
+  revealTargets.forEach((element, index) => {
+    if (!element) return;
+
+    element.style.opacity = "0";
+    element.style.transform = "translateY(24px)";
+    element.style.transition =
+      "opacity 0.72s ease, transform 0.72s cubic-bezier(0.22, 1, 0.36, 1)";
+    element.style.transitionDelay = `${Math.min(index * 35, 180)}ms`;
+  });
+}
+
+function initScrollReveal() {
+  if (prefersReducedMotion()) {
+    return;
+  }
+
+  const observer = new IntersectionObserver(
+    (entries) => {
+      entries.forEach((entry) => {
+        const el = entry.target;
+
+        if (!entry.isIntersecting) {
+          return;
+        }
+
+        el.style.opacity = "1";
+        el.style.transform = "translateY(0)";
+        observer.unobserve(el);
+      });
+    },
+    {
+      threshold: 0.12,
+      rootMargin: "0px 0px -36px 0px"
+    }
+  );
+
+  revealTargets.forEach((el) => {
+    if (!el) return;
+    observer.observe(el);
   });
 }
 
@@ -108,6 +138,13 @@ function attachTilt(element, options = {}) {
 
   let rect = null;
 
+  function onEnter() {
+    rect = element.getBoundingClientRect();
+    element.style.willChange = "transform";
+    element.style.transition =
+      "transform 0.18s ease, box-shadow 0.28s ease, border-color 0.28s ease";
+  }
+
   function onMove(event) {
     rect = rect || element.getBoundingClientRect();
 
@@ -126,13 +163,6 @@ function attachTilt(element, options = {}) {
       rotateY(${rotateY.toFixed(2)}deg)
       scale(${scale})
     `;
-  }
-
-  function onEnter() {
-    rect = element.getBoundingClientRect();
-    element.style.willChange = "transform";
-    element.style.transition =
-      "transform 0.18s ease, box-shadow 0.28s ease, border-color 0.28s ease";
   }
 
   function onLeave() {
@@ -156,36 +186,7 @@ function initPremiumMotion() {
   attachTilt(rightPanel, { maxRotate: 4, scale: 1.01, perspective: 950 });
 
   characterCards.forEach((card) => {
-    attachTilt(card, { maxRotate: 7, scale: 1.015, perspective: 950 });
-  });
-}
-
-/* ---------------- SCROLL REVEAL ---------------- */
-
-function initScrollReveal() {
-  if (prefersReducedMotion()) return;
-
-  const observer = new IntersectionObserver(
-    (entries) => {
-      entries.forEach((entry) => {
-        const el = entry.target;
-
-        if (entry.isIntersecting) {
-          el.style.opacity = "1";
-          el.style.transform = "translateY(0)";
-          observer.unobserve(el);
-        }
-      });
-    },
-    {
-      threshold: 0.14,
-      rootMargin: "0px 0px -40px 0px"
-    }
-  );
-
-  revealTargets.forEach((el) => {
-    if (!el) return;
-    observer.observe(el);
+    attachTilt(card, { maxRotate: 6, scale: 1.012, perspective: 950 });
   });
 }
 
@@ -231,20 +232,23 @@ function openModal(card) {
   modal.setAttribute("aria-hidden", "false");
   body.classList.add("modal-open");
 
-  if (!prefersReducedMotion()) {
-    modal.style.opacity = "0";
-    modalCard.style.transform = "translateY(20px) scale(0.98)";
-    modalCard.style.opacity = "0";
-
-    window.requestAnimationFrame(() => {
-      modal.style.transition = "opacity 0.25s ease";
-      modalCard.style.transition =
-        "transform 0.3s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.25s ease";
-      modal.style.opacity = "1";
-      modalCard.style.transform = "translateY(0) scale(1)";
-      modalCard.style.opacity = "1";
-    });
+  if (prefersReducedMotion()) {
+    closeModalBtn?.focus();
+    return;
   }
+
+  modal.style.opacity = "0";
+  modalCard.style.transform = "translateY(20px) scale(0.98)";
+  modalCard.style.opacity = "0";
+
+  window.requestAnimationFrame(() => {
+    modal.style.transition = "opacity 0.25s ease";
+    modalCard.style.transition =
+      "transform 0.3s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.25s ease";
+    modal.style.opacity = "1";
+    modalCard.style.transform = "translateY(0) scale(1)";
+    modalCard.style.opacity = "1";
+  });
 
   window.setTimeout(() => {
     closeModalBtn?.focus();
@@ -261,6 +265,7 @@ function closeModal() {
 
     modal.style.opacity = "";
     modal.style.transition = "";
+
     if (modalCard) {
       modalCard.style.transform = "";
       modalCard.style.opacity = "";
@@ -277,6 +282,7 @@ function closeModal() {
   }
 
   modal.style.opacity = "0";
+
   if (modalCard) {
     modalCard.style.transform = "translateY(16px) scale(0.985)";
     modalCard.style.opacity = "0";
@@ -286,6 +292,8 @@ function closeModal() {
 }
 
 function bindCharacterCards() {
+  if (cardBound) return;
+
   characterCards.forEach((card) => {
     card.addEventListener("click", () => openModal(card));
 
@@ -296,9 +304,13 @@ function bindCharacterCards() {
       }
     });
   });
+
+  cardBound = true;
 }
 
 function bindModalEvents() {
+  if (modalBound) return;
+
   closeModalBtn?.addEventListener("click", closeModal);
 
   modal?.addEventListener("click", (event) => {
@@ -312,20 +324,21 @@ function bindModalEvents() {
       closeModal();
     }
   });
+
+  modalBound = true;
 }
 
 /* ---------------- PARALLAX POLISH ---------------- */
 
 function initHeroParallax() {
-  if (prefersReducedMotion()) return;
-
-  const aurora = document.querySelector(".aurora");
-  if (!aurora) return;
+  if (prefersReducedMotion() || !aurora) return;
 
   function onMove(event) {
-    if (rafId) cancelAnimationFrame(rafId);
+    if (parallaxRafId) {
+      cancelAnimationFrame(parallaxRafId);
+    }
 
-    rafId = requestAnimationFrame(() => {
+    parallaxRafId = requestAnimationFrame(() => {
       const x = (event.clientX / window.innerWidth - 0.5) * 12;
       const y = (event.clientY / window.innerHeight - 0.5) * 12;
 
@@ -339,7 +352,7 @@ function initHeroParallax() {
 /* ---------------- INIT ---------------- */
 
 function init() {
-  initPageReveal();
+  prepareRevealTargets();
   initScrollReveal();
   updateNavOnScroll();
   initPremiumMotion();
@@ -347,7 +360,10 @@ function init() {
   bindModalEvents();
   initHeroParallax();
 
-  window.addEventListener("scroll", updateNavOnScroll, { passive: true });
+  if (!scrollBound) {
+    window.addEventListener("scroll", updateNavOnScroll, { passive: true });
+    scrollBound = true;
+  }
 }
 
 if (document.readyState === "loading") {
