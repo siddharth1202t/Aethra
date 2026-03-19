@@ -42,6 +42,15 @@ function goTo(page) {
   window.location.replace(page);
 }
 
+function redirectSignedInUser(user) {
+  if (!user) {
+    return false;
+  }
+
+  goTo(HOME_PAGE);
+  return true;
+}
+
 function isMobileDevice() {
   return /Android|iPhone|iPad|iPod|Opera Mini|IEMobile|WPDesktop/i.test(
     navigator.userAgent
@@ -228,15 +237,6 @@ function mapGoogleError(error) {
     default:
       return message || "Google signup failed. Please try again.";
   }
-}
-
-function redirectSignedInUser(user) {
-  if (!user) {
-    return false;
-  }
-
-  goTo(HOME_PAGE);
-  return true;
 }
 
 async function handleRedirectResultIfAny() {
