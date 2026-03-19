@@ -19,6 +19,7 @@ function safeString(value, maxLength = 300) {
 
 function sanitizeDisplayName(value) {
   return safeString(value, MAX_DISPLAY_NAME_LENGTH)
+    .normalize("NFKC")
     .replace(/[^a-zA-Z0-9._ ]/g, "")
     .replace(/\s+/g, " ")
     .trim()
@@ -42,7 +43,7 @@ function sanitizePhotoURL(value) {
 
   try {
     const parsed = new URL(url);
-    return /^https?:$/i.test(parsed.protocol)
+    return /^https:$/i.test(parsed.protocol)
       ? parsed.toString().slice(0, MAX_PHOTO_URL_LENGTH)
       : "";
   } catch {
@@ -54,21 +55,34 @@ function safeExistingString(value) {
   return typeof value === "string" ? value : "";
 }
 
+function getSafeDisplayName(user) {
+  return sanitizeDisplayName(user?.displayName) || DEFAULT_DISPLAY_NAME;
+}
+
+function getSafeEmail(user) {
+  const safeEmail = normalizeEmail(user?.email);
+  return isValidEmailLike(safeEmail) ? safeEmail : "";
+}
+
+function getSafePhotoURL(user) {
+  return sanitizePhotoURL(user?.photoURL);
+}
+
 function buildCreatePayload(user) {
   const safeUid = safeString(user?.uid || "", MAX_UID_LENGTH);
-  const safeDisplayName =
-    sanitizeDisplayName(user?.displayName) || DEFAULT_DISPLAY_NAME;
-  const safeEmail = normalizeEmail(user?.email);
-  const safePhotoURL = sanitizePhotoURL(user?.photoURL);
+  const safeEmail = getSafeEmail(user);
+
+  if (!safeUid || !safeEmail) {
+    return null;
+  }
 
   return {
     uid: safeUid,
-    displayName: safeDisplayName,
-    email: isValidEmailLike(safeEmail) ? safeEmail : "",
-    photoURL: safePhotoURL,
+    displayName: getSafeDisplayName(user),
+    email: safeEmail,
+    photoURL: getSafePhotoURL(user),
     role: "user",
     isProfileComplete: false,
-    profileLocked: false,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp()
   };
@@ -77,10 +91,9 @@ function buildCreatePayload(user) {
 function buildSafeUpdatePayload(existingData, user) {
   const updates = {};
 
-  const safeDisplayName =
-    sanitizeDisplayName(user?.displayName) || DEFAULT_DISPLAY_NAME;
-  const safePhotoURL = sanitizePhotoURL(user?.photoURL);
-  const safeEmail = normalizeEmail(user?.email);
+  const safeDisplayName = getSafeDisplayName(user);
+  const safePhotoURL = getSafePhotoURL(user);
+  const safeEmail = getSafeEmail(user);
 
   if (safeExistingString(existingData.displayName) !== safeDisplayName) {
     updates.displayName = safeDisplayName;
@@ -90,7 +103,7 @@ function buildSafeUpdatePayload(existingData, user) {
     updates.photoURL = safePhotoURL;
   }
 
-  if (!safeExistingString(existingData.email) && isValidEmailLike(safeEmail)) {
+  if (!safeExistingString(existingData.email) && safeEmail) {
     updates.email = safeEmail;
   }
 
@@ -119,6 +132,10 @@ export async function ensureUserProfile(user) {
 
   if (!userSnap.exists()) {
     const createPayload = buildCreatePayload(user);
+
+    if (!createPayload) {
+      return { ok: false, reason: "invalid_create_payload" };
+    }
 
     try {
       await setDoc(userRef, createPayload);
