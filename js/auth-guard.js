@@ -1,12 +1,12 @@
 import {
   getAuth,
   onAuthStateChanged,
-  reload,
   getIdTokenResult
 } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
 import { app } from "./firestore-config.js";
 
 const auth = getAuth(app);
+const AUTH_SETTLE_TIMEOUT_MS = 6000;
 
 function safeString(value, maxLength = 300) {
   return String(value || "").trim().slice(0, maxLength);
@@ -51,7 +51,8 @@ async function fetchContainmentState() {
       method: "GET",
       headers: {
         "Content-Type": "application/json"
-      }
+      },
+      cache: "no-store"
     });
 
     if (!response.ok) {
@@ -80,23 +81,11 @@ async function resolveVerifiedUser(user) {
     return { ok: false, reason: "not-authenticated" };
   }
 
-  try {
-    await reload(user);
-  } catch (error) {
-    console.error("Failed to reload auth user:", error);
+  if (!user.emailVerified) {
+    return { ok: false, reason: "email-not-verified", user };
   }
 
-  const currentUser = auth.currentUser;
-
-  if (!currentUser) {
-    return { ok: false, reason: "missing-current-user" };
-  }
-
-  if (!currentUser.emailVerified) {
-    return { ok: false, reason: "email-not-verified", user: currentUser };
-  }
-
-  return { ok: true, user: currentUser };
+  return { ok: true, user };
 }
 
 async function getClaimsAccess(currentUser) {
@@ -136,6 +125,20 @@ async function getClaimsAccess(currentUser) {
 function createSingleRunGuard(handler, onError) {
   let handled = false;
   let unsubscribe = null;
+  let settleTimer = null;
+
+  const finish = () => {
+    handled = true;
+
+    if (typeof unsubscribe === "function") {
+      unsubscribe();
+    }
+
+    if (settleTimer) {
+      window.clearTimeout(settleTimer);
+      settleTimer = null;
+    }
+  };
 
   unsubscribe = onAuthStateChanged(auth, async (user) => {
     if (handled) {
@@ -146,19 +149,11 @@ function createSingleRunGuard(handler, onError) {
       const done = await handler(user);
 
       if (done) {
-        handled = true;
-
-        if (typeof unsubscribe === "function") {
-          unsubscribe();
-        }
+        finish();
       }
     } catch (error) {
       console.error("Auth guard failed:", error);
-      handled = true;
-
-      if (typeof unsubscribe === "function") {
-        unsubscribe();
-      }
+      finish();
 
       if (typeof onError === "function") {
         onError(error);
@@ -167,6 +162,24 @@ function createSingleRunGuard(handler, onError) {
       }
     }
   });
+
+  settleTimer = window.setTimeout(() => {
+    if (handled) {
+      return;
+    }
+
+    finish();
+
+    if (auth.currentUser) {
+      return;
+    }
+
+    if (typeof onError === "function") {
+      onError(new Error("Auth state timed out."));
+    } else {
+      handleUnauthedState();
+    }
+  }, AUTH_SETTLE_TIMEOUT_MS);
 
   return unsubscribe;
 }
@@ -298,7 +311,8 @@ export async function getCurrentAccessProfile() {
   }
 
   const containmentState = await fetchContainmentState();
-  const containmentRestricted = isDeveloperRestrictedByContainment(containmentState);
+  const containmentRestricted =
+    isDeveloperRestrictedByContainment(containmentState);
 
   return {
     ok: true,
