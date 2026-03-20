@@ -1,6 +1,7 @@
 import { Redis } from "@upstash/redis";
 
 let redisInstance = null;
+let redisInitAttempted = false;
 
 function safeString(value, maxLength = 500) {
   return String(value || "")
@@ -20,12 +21,53 @@ export function getRedis() {
     return redisInstance;
   }
 
-  if (!hasRedisEnv()) {
-    throw new Error("Upstash Redis environment variables are missing.");
+  if (redisInitAttempted) {
+    return null;
   }
 
-  redisInstance = Redis.fromEnv();
-  return redisInstance;
+  redisInitAttempted = true;
+
+  if (!hasRedisEnv()) {
+    console.error("Upstash Redis environment variables are missing.");
+    return null;
+  }
+
+  try {
+    redisInstance = Redis.fromEnv();
+    return redisInstance;
+  } catch (error) {
+    console.error("Upstash Redis initialization failed:", error);
+    return null;
+  }
+}
+
+function createNoopRedisMethod(methodName) {
+  return async (..._args) => {
+    switch (String(methodName)) {
+      case "get":
+      case "hget":
+        return null;
+      case "set":
+      case "expire":
+        return false;
+      case "del":
+      case "incr":
+      case "decr":
+      case "hset":
+      case "lpush":
+      case "zadd":
+        return 0;
+      case "ttl":
+        return -1;
+      case "hgetall":
+        return {};
+      case "lrange":
+      case "zrange":
+        return [];
+      default:
+        return null;
+    }
+  };
 }
 
 export const redis = new Proxy(
@@ -33,6 +75,11 @@ export const redis = new Proxy(
   {
     get(_target, prop) {
       const client = getRedis();
+
+      if (!client) {
+        return createNoopRedisMethod(String(prop));
+      }
+
       const value = client[prop];
 
       if (typeof value === "function") {
