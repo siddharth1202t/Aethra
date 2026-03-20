@@ -1,9 +1,16 @@
 import { redis } from "./_redis.js";
-import { getContainmentState, setContainmentState } from "./_security-containment.js";
+import {
+  getContainmentState,
+  setContainmentState
+} from "./_security-containment.js";
 
 const ADAPTIVE_MODE_KEY = "security:adaptive-mode";
 const ADAPTIVE_MODE_TTL_MS = 24 * 60 * 60 * 1000;
 const ADAPTIVE_MODE_WINDOW_MS = 30 * 60 * 1000;
+const ADAPTIVE_MODE_TTL_SECONDS = Math.max(
+  1,
+  Math.ceil(ADAPTIVE_MODE_TTL_MS / 1000)
+);
 
 const ALLOWED_MODES = new Set([
   "normal",
@@ -25,6 +32,8 @@ const ALLOWED_ROUTE_SENSITIVITY = new Set([
   "critical"
 ]);
 
+const MAX_COUNTER_VALUE = 1_000_000;
+
 function safeString(value, maxLength = 200) {
   return String(value || "")
     .replace(/[\u0000-\u001F\u007F]/g, "")
@@ -37,7 +46,7 @@ function safeNumber(value, fallback = 0) {
   return Number.isFinite(num) ? num : fallback;
 }
 
-function safeInt(value, fallback = 0, min = 0, max = 1_000_000) {
+function safeInt(value, fallback = 0, min = 0, max = MAX_COUNTER_VALUE) {
   const num = Math.floor(safeNumber(value, fallback));
   if (!Number.isFinite(num)) return fallback;
   return Math.min(max, Math.max(min, num));
@@ -103,15 +112,28 @@ function normalizeAdaptiveState(raw) {
       0,
       nowMax
     ),
-    totalSignals: safeInt(state.totalSignals, 0, 0, 1_000_000),
-    criticalSignals: safeInt(state.criticalSignals, 0, 0, 1_000_000),
-    blockSignals: safeInt(state.blockSignals, 0, 0, 1_000_000),
-    challengeSignals: safeInt(state.challengeSignals, 0, 0, 1_000_000),
-    repeatedOffenderSignals: safeInt(state.repeatedOffenderSignals, 0, 0, 1_000_000),
-    lockdownTriggers: safeInt(state.lockdownTriggers, 0, 0, 1_000_000),
-    highRiskStateSignals: safeInt(state.highRiskStateSignals, 0, 0, 1_000_000),
-    routePressureSignals: safeInt(state.routePressureSignals, 0, 0, 1_000_000),
+    totalSignals: safeInt(state.totalSignals, 0),
+    criticalSignals: safeInt(state.criticalSignals, 0),
+    blockSignals: safeInt(state.blockSignals, 0),
+    challengeSignals: safeInt(state.challengeSignals, 0),
+    repeatedOffenderSignals: safeInt(state.repeatedOffenderSignals, 0),
+    lockdownTriggers: safeInt(state.lockdownTriggers, 0),
+    highRiskStateSignals: safeInt(state.highRiskStateSignals, 0),
+    routePressureSignals: safeInt(state.routePressureSignals, 0),
     lastReason: normalizeReason(state.lastReason || base.lastReason)
+  };
+}
+
+function normalizeCounters(state) {
+  return {
+    totalSignals: safeInt(state.totalSignals, 0),
+    criticalSignals: safeInt(state.criticalSignals, 0),
+    blockSignals: safeInt(state.blockSignals, 0),
+    challengeSignals: safeInt(state.challengeSignals, 0),
+    repeatedOffenderSignals: safeInt(state.repeatedOffenderSignals, 0),
+    lockdownTriggers: safeInt(state.lockdownTriggers, 0),
+    highRiskStateSignals: safeInt(state.highRiskStateSignals, 0),
+    routePressureSignals: safeInt(state.routePressureSignals, 0)
   };
 }
 
@@ -125,9 +147,6 @@ async function getStoredAdaptiveState() {
 
     if (typeof raw === "string") {
       const parsed = safeJsonParse(raw, null);
-      if (!parsed || typeof parsed !== "object") {
-        return createDefaultAdaptiveState();
-      }
       return normalizeAdaptiveState(parsed);
     }
 
@@ -145,8 +164,9 @@ async function getStoredAdaptiveState() {
 async function storeAdaptiveState(state) {
   try {
     const normalized = normalizeAdaptiveState(state);
-    const ttlSeconds = Math.max(1, Math.ceil(ADAPTIVE_MODE_TTL_MS / 1000));
-    await redis.set(ADAPTIVE_MODE_KEY, JSON.stringify(normalized), { ex: ttlSeconds });
+    await redis.set(ADAPTIVE_MODE_KEY, JSON.stringify(normalized), {
+      ex: ADAPTIVE_MODE_TTL_SECONDS
+    });
     return true;
   } catch (error) {
     console.error("Adaptive mode write failed:", error);
@@ -165,6 +185,11 @@ function resetWindow(state, now) {
   state.highRiskStateSignals = 0;
   state.routePressureSignals = 0;
   state.lastReason = "stable_activity";
+}
+
+function hasWindowExpired(windowStartedAt, now) {
+  const safeWindowStartedAt = safeInt(windowStartedAt, now, 0, now);
+  return now - safeWindowStartedAt > ADAPTIVE_MODE_WINDOW_MS;
 }
 
 function decideAdaptiveMode(state) {
@@ -208,6 +233,41 @@ function decideAdaptiveMode(state) {
   };
 }
 
+function normalizeSecurityState(securityState = null) {
+  if (!securityState || typeof securityState !== "object") {
+    return null;
+  }
+
+  return {
+    currentRiskScore: safeInt(securityState.currentRiskScore, 0, 0, 100),
+    currentRiskLevel: safeString(
+      securityState.currentRiskLevel || "low",
+      20
+    ).toLowerCase(),
+    failedLoginCount: safeInt(securityState.failedLoginCount, 0),
+    failedSignupCount: safeInt(securityState.failedSignupCount, 0),
+    failedPasswordResetCount: safeInt(
+      securityState.failedPasswordResetCount,
+      0
+    ),
+    captchaFailureCount: safeInt(securityState.captchaFailureCount, 0),
+    suspiciousEventCount: safeInt(securityState.suspiciousEventCount, 0),
+    rateLimitHitCount: safeInt(securityState.rateLimitHitCount, 0),
+    lockoutCount: safeInt(securityState.lockoutCount, 0)
+  };
+}
+
+function shouldReturnToNormalContainment(currentContainment) {
+  return (
+    currentContainment?.mode !== "normal" ||
+    currentContainment?.flags?.freezeRegistrations === true ||
+    currentContainment?.flags?.disableUploads === true ||
+    currentContainment?.flags?.forceCaptcha === true ||
+    currentContainment?.flags?.readOnlyMode === true ||
+    currentContainment?.flags?.lockdown === true
+  );
+}
+
 async function syncContainmentToMode(mode, reason) {
   const normalizedMode = normalizeMode(mode);
   const normalizedReason = normalizeReason(reason || "adaptive_sync");
@@ -247,14 +307,7 @@ async function syncContainmentToMode(mode, reason) {
     });
   }
 
-  if (
-    currentContainment?.mode !== "normal" ||
-    currentContainment?.flags?.freezeRegistrations ||
-    currentContainment?.flags?.disableUploads ||
-    currentContainment?.flags?.forceCaptcha ||
-    currentContainment?.flags?.readOnlyMode ||
-    currentContainment?.flags?.lockdown
-  ) {
+  if (shouldReturnToNormalContainment(currentContainment)) {
     return setContainmentState({
       mode: "normal",
       reason: normalizedReason,
@@ -272,27 +325,6 @@ async function syncContainmentToMode(mode, reason) {
   return {
     ok: true,
     state: currentContainment
-  };
-}
-
-function hasWindowExpired(windowStartedAt, now) {
-  const safeWindowStartedAt = safeInt(windowStartedAt, now, 0, now);
-  return now - safeWindowStartedAt > ADAPTIVE_MODE_WINDOW_MS;
-}
-
-function normalizeSecurityState(securityState = null) {
-  if (!securityState || typeof securityState !== "object") return null;
-
-  return {
-    currentRiskScore: safeInt(securityState.currentRiskScore, 0, 0, 100),
-    currentRiskLevel: safeString(securityState.currentRiskLevel || "low", 20).toLowerCase(),
-    failedLoginCount: safeInt(securityState.failedLoginCount, 0, 0, 1_000_000),
-    failedSignupCount: safeInt(securityState.failedSignupCount, 0, 0, 1_000_000),
-    failedPasswordResetCount: safeInt(securityState.failedPasswordResetCount, 0, 0, 1_000_000),
-    captchaFailureCount: safeInt(securityState.captchaFailureCount, 0, 0, 1_000_000),
-    suspiciousEventCount: safeInt(securityState.suspiciousEventCount, 0, 0, 1_000_000),
-    rateLimitHitCount: safeInt(securityState.rateLimitHitCount, 0, 0, 1_000_000),
-    lockoutCount: safeInt(securityState.lockoutCount, 0, 0, 1_000_000)
   };
 }
 
@@ -323,9 +355,9 @@ export async function evaluateAdaptiveThreatMode({
   const abuseScore = safeInt(abuseResult?.abuseScore, 0, 0, 100);
   const botScore = safeInt(botResult?.riskScore, 0, 0, 100);
 
-  const blockEvents = safeInt(threatResult?.events?.blockEvents, 0, 0, 1_000_000);
-  const hardBlockSignals = safeInt(threatResult?.events?.hardBlockSignals, 0, 0, 1_000_000);
-  const criticalRouteHits = safeInt(threatResult?.events?.criticalRouteHits, 0, 0, 1_000_000);
+  const blockEvents = safeInt(threatResult?.events?.blockEvents, 0);
+  const hardBlockSignals = safeInt(threatResult?.events?.hardBlockSignals, 0);
+  const criticalRouteHits = safeInt(threatResult?.events?.criticalRouteHits, 0);
 
   if (riskAction === "block") {
     state.blockSignals += 1;
@@ -397,11 +429,11 @@ export async function evaluateAdaptiveThreatMode({
 
   const decision = decideAdaptiveMode(state);
   const previousMode = state.mode;
+
   state.mode = decision.mode;
   state.lastReason = normalizeReason(decision.reason);
 
   await storeAdaptiveState(state);
-
   const containment = await syncContainmentToMode(state.mode, state.lastReason);
 
   return {
@@ -411,16 +443,7 @@ export async function evaluateAdaptiveThreatMode({
     reason: state.lastReason,
     windowStartedAt: state.windowStartedAt,
     updatedAt: state.updatedAt,
-    counters: {
-      totalSignals: safeInt(state.totalSignals, 0, 0, 1_000_000),
-      criticalSignals: safeInt(state.criticalSignals, 0, 0, 1_000_000),
-      blockSignals: safeInt(state.blockSignals, 0, 0, 1_000_000),
-      challengeSignals: safeInt(state.challengeSignals, 0, 0, 1_000_000),
-      repeatedOffenderSignals: safeInt(state.repeatedOffenderSignals, 0, 0, 1_000_000),
-      lockdownTriggers: safeInt(state.lockdownTriggers, 0, 0, 1_000_000),
-      highRiskStateSignals: safeInt(state.highRiskStateSignals, 0, 0, 1_000_000),
-      routePressureSignals: safeInt(state.routePressureSignals, 0, 0, 1_000_000)
-    },
+    counters: normalizeCounters(state),
     containment: containment?.state || null
   };
 }
@@ -433,17 +456,12 @@ export async function getAdaptiveThreatMode() {
     updatedAt: state.updatedAt,
     windowStartedAt: state.windowStartedAt,
     lastReason: state.lastReason,
-    counters: {
-      totalSignals: safeInt(state.totalSignals, 0, 0, 1_000_000),
-      criticalSignals: safeInt(state.criticalSignals, 0, 0, 1_000_000),
-      blockSignals: safeInt(state.blockSignals, 0, 0, 1_000_000),
-      challengeSignals: safeInt(state.challengeSignals, 0, 0, 1_000_000),
-      repeatedOffenderSignals: safeInt(state.repeatedOffenderSignals, 0, 0, 1_000_000),
-      lockdownTriggers: safeInt(state.lockdownTriggers, 0, 0, 1_000_000),
-      highRiskStateSignals: safeInt(state.highRiskStateSignals, 0, 0, 1_000_000),
-      routePressureSignals: safeInt(state.routePressureSignals, 0, 0, 1_000_000)
-    }
+    counters: normalizeCounters(state)
   };
+}
+
+export async function getAdaptiveThreatModeSnapshot() {
+  return getAdaptiveThreatMode();
 }
 
 export async function resetAdaptiveThreatMode() {
