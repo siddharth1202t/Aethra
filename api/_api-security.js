@@ -55,7 +55,6 @@ function normalizeIp(value = "") {
   }
 
   ip = ip.replace(/[^a-fA-F0-9:.,]/g, "").slice(0, 100);
-
   return ip || "unknown";
 }
 
@@ -207,7 +206,7 @@ function normalizeRoute(route = "") {
 
   const cleaned = withoutQuery
     .replace(/\/{2,}/g, "/")
-    .replace(/[^a-zA-Z0-9/_-]/g, "")
+    .replace(/[^a-zA-Z0-9/_:-]/g, "")
     .toLowerCase()
     .slice(0, 150);
 
@@ -322,13 +321,6 @@ function updateSecurityMode() {
     reason = "moderate_suspicious_activity";
   }
 
-  if (
-    now - safeNumber(securityStateStore.updatedAt, 0) > SECURITY_MODE_TTL_MS &&
-    mode !== "lockdown"
-  ) {
-    // natural decay through event expiry
-  }
-
   securityStateStore.mode = mode;
   securityStateStore.updatedAt = now;
   securityStateStore.lastEscalationReason = reason;
@@ -436,30 +428,6 @@ function updateActorMemory({
       lastAction: safeString(record.lastAction, 30)
     }
   };
-}
-
-function getActorRiskBonus(actorMemory) {
-  if (!actorMemory) return 0;
-
-  let bonus = 0;
-
-  if (safePositiveInt(actorMemory.suspiciousCount, 0) >= 3) {
-    bonus += 8;
-  }
-
-  if (safePositiveInt(actorMemory.challengedCount, 0) >= 2) {
-    bonus += 7;
-  }
-
-  if (safePositiveInt(actorMemory.blockedCount, 0) >= 1) {
-    bonus += 15;
-  }
-
-  if (safePositiveInt(actorMemory.highestRisk, 0, 100) >= 80) {
-    bonus += 10;
-  }
-
-  return Math.min(30, bonus);
 }
 
 export function getCombinedRisk(botAnalysis, abuseAnalysis, extra = {}) {
@@ -651,8 +619,10 @@ export async function runRouteSecurity({
     normalizedRoute
   );
 
-  const rateLimitResult = rateLimit
-    ? checkApiRateLimit({
+  let rateLimitResult = null;
+  if (rateLimit) {
+    try {
+      rateLimitResult = await checkApiRateLimit({
         key: safeString(rateLimit.key || `route:${normalizedRoute}:${ip}`, 200),
         limit: Math.max(
           1,
@@ -660,25 +630,41 @@ export async function runRouteSecurity({
         ),
         windowMs: safePositiveInt(rateLimit.windowMs, 60 * 1000),
         route: normalizedRoute
-      })
-    : null;
+      });
+    } catch (error) {
+      console.error("runRouteSecurity rate limit failed:", error);
+      rateLimitResult = null;
+    }
+  }
 
-  const abuseAnalysis = await trackApiAbuse({
-    ip,
-    sessionId: safeString(sessionId || "", 120),
-    userId: safeString(userId || "", 120),
-    route: normalizedRoute,
-    success: Boolean(abuseSuccess)
-  });
-
-  const botAnalysis = analyzeBotBehavior(
-    {
-      ...(isPlainObject(behavior) ? behavior : {}),
+  let abuseAnalysis = null;
+  try {
+    abuseAnalysis = await trackApiAbuse({
+      ip,
+      sessionId: safeString(sessionId || "", 120),
+      userId: safeString(userId || "", 120),
       route: normalizedRoute,
-      sessionId: safeString(sessionId || "", 120)
-    },
-    req
-  );
+      success: Boolean(abuseSuccess)
+    });
+  } catch (error) {
+    console.error("runRouteSecurity abuse analysis failed:", error);
+    abuseAnalysis = null;
+  }
+
+  let botAnalysis = null;
+  try {
+    botAnalysis = await analyzeBotBehavior(
+      {
+        ...(isPlainObject(behavior) ? behavior : {}),
+        route: normalizedRoute,
+        sessionId: safeString(sessionId || "", 120)
+      },
+      req
+    );
+  } catch (error) {
+    console.error("runRouteSecurity bot analysis failed:", error);
+    botAnalysis = null;
+  }
 
   const actorBaseline = getOrCreateActorMemory(ip, sessionId).record;
   const actorRiskBonus = getActorRiskBonus(actorBaseline);
