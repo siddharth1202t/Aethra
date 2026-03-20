@@ -34,14 +34,11 @@ function normalizeIp(value = "") {
 
   if (!ip) return "unknown";
 
-  // Remove IPv6 localhost prefix if present
   if (ip.startsWith("::ffff:")) {
     ip = ip.slice(7);
   }
 
-  // Keep only characters that can appear in IPv4 / IPv6 / proxy values
   ip = ip.replace(/[^a-fA-F0-9:.,]/g, "").slice(0, MAX_IP_LENGTH);
-
   return ip || "unknown";
 }
 
@@ -58,12 +55,11 @@ function normalizeRoute(value = "") {
 
   if (!raw) return "unknown-route";
 
-  // Remove query strings and fragments so actor keys stay stable
   const withoutQuery = raw.split("?")[0].split("#")[0];
 
   const cleaned = withoutQuery
     .replace(/\/{2,}/g, "/")
-    .replace(/[^a-zA-Z0-9/_-]/g, "")
+    .replace(/[^a-zA-Z0-9/_:-]/g, "")
     .toLowerCase()
     .slice(0, MAX_ROUTE_LENGTH);
 
@@ -95,9 +91,10 @@ function normalizeMethod(value = "") {
 function normalizeEmail(value = "") {
   const email = safeString(value || "", MAX_EMAIL_LENGTH).toLowerCase();
 
-  if (!email) return "";
+  if (!email) {
+    return "";
+  }
 
-  // Very light sanity check, avoids storing obvious garbage
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     return "";
   }
@@ -144,9 +141,7 @@ function extractOrigin(req = null) {
 }
 
 function extractUserAgent(req = null, fallback = "") {
-  return normalizeUserAgent(
-    getHeaderValue(req, "user-agent") || fallback
-  );
+  return normalizeUserAgent(getHeaderValue(req, "user-agent") || fallback);
 }
 
 function extractRoute(req = null, fallback = "") {
@@ -165,9 +160,9 @@ function extractSessionId({
 } = {}) {
   return normalizeSessionId(
     context.sessionId ||
-    body.sessionId ||
-    behavior.sessionId ||
-    fallback
+      body.sessionId ||
+      behavior.sessionId ||
+      fallback
   );
 }
 
@@ -179,10 +174,10 @@ function extractUserId({
 } = {}) {
   return normalizeUserId(
     context.userId ||
-    body.userId ||
-    req?.user?.uid ||
-    req?.auth?.uid ||
-    fallback
+      body.userId ||
+      req?.user?.uid ||
+      req?.auth?.uid ||
+      fallback
   );
 }
 
