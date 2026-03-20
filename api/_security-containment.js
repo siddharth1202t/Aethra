@@ -76,7 +76,7 @@ function normalizeRoute(value = "") {
     .split("?")[0]
     .split("#")[0]
     .replace(/\/{2,}/g, "/")
-    .replace(/[^a-zA-Z0-9/_-]/g, "")
+    .replace(/[^a-zA-Z0-9/_:-]/g, "")
     .toLowerCase()
     .slice(0, 200);
 }
@@ -386,7 +386,12 @@ export async function setContainmentState({
   if (ok && !statesAreEquivalent(currentState, nextState)) {
     await recordContainmentEvent({
       type: finalMode === "normal" ? "containment_cleared" : "containment_updated",
-      severity: finalMode === "lockdown" ? "critical" : finalMode === "normal" ? "info" : "warning",
+      severity:
+        finalMode === "lockdown"
+          ? "critical"
+          : finalMode === "normal"
+            ? "info"
+            : "warning",
       action: finalMode === "normal" ? "observe" : "contain",
       reason: normalizedReason || (finalMode === "normal" ? "containment_cleared" : "containment_updated"),
       previousState: currentState,
