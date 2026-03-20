@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+  />
+  <title>Aethra Security Dashboard</title>
+  <link rel="stylesheet" href="./security.css" />
+</head>
+<body>
+  <div class="wrap">
+    <div class="topbar">
+      <div class="title-box">
+        <h1>Aethra Security Dashboard</h1>
+        <p>Internal security observability panel for Level 8 monitoring.</p>
+      </div>
+
+      <div class="controls">
+        <input
+          id="adminKey"
+          class="secret-input"
+          type="password"
+          placeholder="Enter security admin key"
+          autocomplete="off"
+        />
+        <button id="saveKeyBtn" class="btn secondary" type="button">Save Key</button>
+        <button id="refreshBtn" class="btn" type="button">Refresh</button>
+      </div>
+    </div>
+
+    <p id="statusLine" class="status-line">Waiting for dashboard data...</p>
+
+    <div class="grid">
+      <section class="card span-3">
+        <h2>Mode</h2>
+        <div id="modeValue" class="stat-value">--</div>
+        <div class="stat-label">Adaptive threat mode</div>
+      </section>
+
+      <section class="card span-3">
+        <h2>Containment</h2>
+        <div id="containmentValue" class="stat-value">--</div>
+        <div class="stat-label">Current containment mode</div>
+      </section>
+
+      <section class="card span-3">
+        <h2>Threat Pressure</h2>
+        <div id="threatPressureValue" class="stat-value">0</div>
+        <div class="stat-label">0–100 system pressure</div>
+        <div class="progress-shell">
+          <div id="threatPressureBar" class="progress-bar"></div>
+        </div>
+      </section>
+
+      <section class="card span-3">
+        <h2>Health</h2>
+        <div id="healthBadge" class="badge">Unknown</div>
+        <div class="stat-label health-spacing">System health state</div>
+      </section>
+
+      <section class="card span-6">
+        <h3>Containment Flags</h3>
+        <div id="flagsBox" class="flags"></div>
+      </section>
+
+      <section class="card span-6">
+        <h3>Signal Counters</h3>
+        <div id="counterList" class="kv-list"></div>
+      </section>
+
+      <section class="card span-6">
+        <h3>Metrics Overview</h3>
+        <div class="mini-grid">
+          <div class="mini-box">
+            <div id="warningCount" class="num">0</div>
+            <div class="txt">Warning events</div>
+          </div>
+          <div class="mini-box">
+            <div id="criticalCount" class="num">0</div>
+            <div class="txt">Critical events</div>
+          </div>
+          <div class="mini-box">
+            <div id="unauthCount" class="num">0</div>
+            <div class="txt">Unauthorized admin attempts</div>
+          </div>
+          <div class="mini-box">
+            <div id="containmentCount" class="num">0</div>
+            <div class="txt">Containment events</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card span-6">
+        <h3>Action Breakdown</h3>
+        <div id="actionBreakdown" class="kv-list"></div>
+      </section>
+
+      <section class="card span-12">
+        <h3>Recent Security Events</h3>
+        <div id="eventsList" class="events">
+          <div class="empty">No events loaded yet.</div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <script type="module" src="./security.js"></script>
+</body>
+</html>
