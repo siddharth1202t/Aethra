@@ -1,9 +1,8 @@
 import { buildSecurityStatus } from "../_security-status.js";
 import { writeSecurityLog } from "../_security-log-writer.js";
 import { safeString, buildMethodNotAllowedResponse } from "../_api-security.js";
-import { getAdaptiveThreatModeState } from "../_adaptive-threat-mode.js";
-import { getThreatIntelligenceSnapshot } from "../_threat-intelligence.js";
-import { getSecurityContainmentState } from "../_security-containment.js";
+import { getAdaptiveThreatMode } from "../_adaptive-threat-mode.js";
+import { getContainmentState } from "../_security-containment.js";
 
 const ROUTE = "/api/security-status";
 
@@ -34,18 +33,23 @@ export default async function handler(req, res) {
     return res.status(response.status).json(response.body);
   }
 
+  const clientIp = getClientIp(req);
+
   try {
     const adminKey = safeString(
       req.headers["x-security-admin-key"] || "",
       200
     );
 
-    if (!process.env.SECURITY_ADMIN_API_KEY || adminKey !== process.env.SECURITY_ADMIN_API_KEY) {
+    if (
+      !process.env.SECURITY_ADMIN_API_KEY ||
+      adminKey !== process.env.SECURITY_ADMIN_API_KEY
+    ) {
       await writeSecurityLog({
         type: "security_status_unauthorized",
         level: "warning",
         route: ROUTE,
-        ip: getClientIp(req),
+        ip: clientIp,
         message: "Unauthorized attempt to access security status endpoint.",
         metadata: {
           method: req.method
@@ -55,25 +59,17 @@ export default async function handler(req, res) {
       return res.status(404).json(buildUnauthorizedResponse());
     }
 
-    const adaptiveState =
-      typeof getAdaptiveThreatModeState === "function"
-        ? getAdaptiveThreatModeState()
-        : {};
+    // ✅ FIXED: correct async calls
+    const adaptiveState = await getAdaptiveThreatMode();
+    const containmentState = await getContainmentState();
 
-    const threatSnapshot =
-      typeof getThreatIntelligenceSnapshot === "function"
-        ? getThreatIntelligenceSnapshot()
-        : {};
+    // (optional: future use)
+    const threatSnapshot = {};
 
-    const containmentState =
-      typeof getSecurityContainmentState === "function"
-        ? getSecurityContainmentState()
-        : {};
-
+    // ✅ FIXED: correct payload structure
     const payload = buildSecurityStatus({
-      adaptiveMode: adaptiveState.mode || "normal",
-      threatPressure: adaptiveState.threatPressure || threatSnapshot.threatPressure || 0,
-      activeThreats: threatSnapshot.activeThreats || 0,
+      adaptiveState,
+      threatSnapshot,
       containment: containmentState,
       timestamp: Date.now()
     });
@@ -82,7 +78,7 @@ export default async function handler(req, res) {
       type: "security_status_accessed",
       level: "info",
       route: ROUTE,
-      ip: getClientIp(req),
+      ip: clientIp,
       message: "Security status endpoint accessed successfully.",
       metadata: {
         mode: payload.mode,
@@ -96,7 +92,7 @@ export default async function handler(req, res) {
       type: "security_status_error",
       level: "error",
       route: ROUTE,
-      ip: getClientIp(req),
+      ip: clientIp,
       message: "Failed to build security status response.",
       metadata: {
         error: error instanceof Error ? error.message : "unknown_error"
