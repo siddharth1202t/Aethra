@@ -87,7 +87,6 @@ function normalizeIp(value = "") {
   }
 
   ip = ip.replace(/[^a-fA-F0-9:.,]/g, "").slice(0, MAX_IP_LENGTH);
-
   return ip || "unknown";
 }
 
@@ -184,8 +183,8 @@ function getRequiredEnv(name) {
 function hasFirebaseAdminEnv() {
   return Boolean(
     getRequiredEnv("FIREBASE_PROJECT_ID") &&
-    getRequiredEnv("FIREBASE_CLIENT_EMAIL") &&
-    safeString(process.env.FIREBASE_PRIVATE_KEY || "", 10000)
+      getRequiredEnv("FIREBASE_CLIENT_EMAIL") &&
+      safeString(process.env.FIREBASE_PRIVATE_KEY || "", 10000)
   );
 }
 
@@ -369,9 +368,9 @@ export async function writeSecurityLog(data = {}) {
       ipHash,
       sessionId: safeString(
         metadataInput?.sessionId ||
-        metadata?.sessionId ||
-        metadataInput?.client?.sessionId ||
-        "",
+          metadata?.sessionId ||
+          metadataInput?.client?.sessionId ||
+          "",
         128
       ),
       routeGroup,
