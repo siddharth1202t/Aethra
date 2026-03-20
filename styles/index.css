@@ -601,8 +601,10 @@ h1 {
 }
 
 .stat span {
+  display: block;
+  margin-top: 4px;
   font-size: 0.92rem;
-  line-height: 1.66;
+  line-height: 1.75;
   color: var(--muted);
 }
 
@@ -615,6 +617,14 @@ h1 {
 
 .about-section {
   padding-top: 0;
+}
+
+.about-section .mini-stats {
+  margin-top: 12px;
+}
+
+.about-section .stat {
+  min-height: 140px;
 }
 
 .section-head {
@@ -635,8 +645,16 @@ h1 {
 
 .section-head p {
   max-width: 760px;
-  line-height: 1.9;
+  line-height: 1.95;
   color: var(--muted);
+}
+
+.section-support {
+  margin-top: 14px;
+  max-width: 720px;
+  font-size: 0.98rem;
+  line-height: 1.8;
+  color: rgba(233, 228, 255, 0.6);
 }
 
 .cards {
@@ -922,6 +940,15 @@ h1 {
   .about-section {
     padding: 32px 20px 76px;
   }
+
+  .section-support {
+    font-size: 0.95rem;
+    line-height: 1.75;
+  }
+
+  .about-section .stat {
+    min-height: auto;
+  }
 }
 
 @media (max-width: 640px) {
@@ -993,4 +1020,4 @@ h1 {
     transition: none !important;
     scroll-behavior: auto !important;
   }
-} 
+}
