@@ -138,6 +138,21 @@ function isHostAllowed(req) {
   return ALLOWED_HOSTNAMES.has(getRequestHost(req));
 }
 
+function isTrustedRequestSource(req, actorOrigin = "") {
+  const normalizedOrigin = normalizeOrigin(actorOrigin);
+  const refererOrigin = getRefererOrigin(req);
+
+  if (normalizedOrigin && isOriginAllowed(normalizedOrigin)) {
+    return true;
+  }
+
+  if (refererOrigin && isOriginAllowed(refererOrigin)) {
+    return true;
+  }
+
+  return false;
+}
+
 function isJsonContentType(req) {
   const contentType = safeString(req?.headers?.["content-type"] || "", 200)
     .toLowerCase();
@@ -291,8 +306,16 @@ function buildAttemptFingerprint({ email, ip, action, actionLabel }) {
     .slice(0, 32);
 }
 
+async function safeWriteSecurityLog(payload) {
+  try {
+    await writeSecurityLog(payload);
+  } catch (error) {
+    console.error("Security log write failed:", error);
+  }
+}
+
 async function writeOriginBlockLog({ actor, req }) {
-  await writeSecurityLog({
+  await safeWriteSecurityLog({
     type: "forbidden_origin",
     level: "warning",
     message: "Blocked request from forbidden origin",
@@ -353,7 +376,7 @@ export default async function handler(req, res) {
     });
 
     if (!isHostAllowed(req)) {
-      await writeSecurityLog({
+      await safeWriteSecurityLog({
         type: "forbidden_host",
         level: "critical",
         message: "Blocked request on unexpected host",
@@ -372,7 +395,7 @@ export default async function handler(req, res) {
       );
     }
 
-    if (!isOriginAllowed(actor.origin)) {
+    if (!isTrustedRequestSource(req, actor.origin)) {
       await writeOriginBlockLog({ actor, req });
 
       return res.status(403).json(
@@ -399,7 +422,7 @@ export default async function handler(req, res) {
       abuseSuccess: action !== "fail"
     });
 
-    const ip = normalizeIp(security.actor.ip);
+    const ip = normalizeIp(security?.actor?.ip || actor.ip);
     const securityAction = pickSecurityAction(security);
     const now = Date.now();
     const fingerprint = buildAttemptFingerprint({
@@ -410,10 +433,10 @@ export default async function handler(req, res) {
     });
 
     if (
-      security.signals.rateLimitResult &&
+      security?.signals?.rateLimitResult &&
       !security.signals.rateLimitResult.allowed
     ) {
-      await writeSecurityLog({
+      await safeWriteSecurityLog({
         type: "login_attempt_rate_limited",
         level: "warning",
         message: "Rate limit exceeded for login attempt API",
@@ -424,8 +447,8 @@ export default async function handler(req, res) {
           action: security.signals.rateLimitResult.recommendedAction,
           remainingMs: security.signals.rateLimitResult.remainingMs || 0,
           violations: security.signals.rateLimitResult.violations || 0,
-          riskScore: security.risk.riskScore,
-          riskLevel: security.risk.level,
+          riskScore: security?.risk?.riskScore || 0,
+          riskLevel: security?.risk?.level || "low",
           fingerprint
         }
       });
@@ -439,7 +462,7 @@ export default async function handler(req, res) {
     }
 
     if (!ALLOWED_ACTIONS.has(action)) {
-      await writeSecurityLog({
+      await safeWriteSecurityLog({
         type: "invalid_login_action",
         level: "warning",
         message: "Invalid action sent",
@@ -464,7 +487,7 @@ export default async function handler(req, res) {
       isValidEmail(rawEmail) || isGooglePlaceholderEmail(rawEmail);
 
     if (!rawEmail || !emailIsAllowed) {
-      await writeSecurityLog({
+      await safeWriteSecurityLog({
         type: "invalid_login_request",
         level: "warning",
         message: "Invalid email sent to login attempt API",
@@ -486,7 +509,7 @@ export default async function handler(req, res) {
     }
 
     if (securityAction === "block") {
-      await writeSecurityLog({
+      await safeWriteSecurityLog({
         type: "blocked_suspicious_request",
         level: "critical",
         message: "Blocked login attempt API request due to suspicious behavior",
@@ -497,10 +520,10 @@ export default async function handler(req, res) {
           source: "server_enforced",
           action,
           actionLabel,
-          risk: security.risk,
-          botResult: security.signals.botResult,
-          abuseResult: security.signals.abuseResult,
-          threatResult: security.signals.threatResult,
+          risk: security?.risk || {},
+          botResult: security?.signals?.botResult || null,
+          abuseResult: security?.signals?.abuseResult || null,
+          threatResult: security?.signals?.threatResult || null,
           clientContext,
           fingerprint
         })
@@ -517,7 +540,7 @@ export default async function handler(req, res) {
     }
 
     if (securityAction === "challenge" || securityAction === "throttle") {
-      await writeSecurityLog({
+      await safeWriteSecurityLog({
         type: "temporary_security_challenge",
         level: "warning",
         message: "Suspicious login behavior detected",
@@ -528,10 +551,10 @@ export default async function handler(req, res) {
           source: "server_enforced",
           action,
           actionLabel,
-          risk: security.risk,
-          botResult: security.signals.botResult,
-          abuseResult: security.signals.abuseResult,
-          threatResult: security.signals.threatResult,
+          risk: security?.risk || {},
+          botResult: security?.signals?.botResult || null,
+          abuseResult: security?.signals?.abuseResult || null,
+          threatResult: security?.signals?.threatResult || null,
           clientContext,
           fingerprint
         })
@@ -545,7 +568,7 @@ export default async function handler(req, res) {
       return res.status(200).json(
         buildLockResponse(true, ipRecord.lockUntil - now, {
           lockType: "ip",
-          risk: security.risk
+          risk: security?.risk || {}
         })
       );
     }
@@ -559,7 +582,7 @@ export default async function handler(req, res) {
       return res.status(200).json(
         buildLockResponse(isLocked, record.lockUntil - now, {
           lockType: isLocked ? "user" : "none",
-          risk: security.risk
+          risk: security?.risk || {}
         })
       );
     }
@@ -581,7 +604,7 @@ export default async function handler(req, res) {
         record.lockUntil =
           now + getEscalatedLockMs(LOCK_WINDOW_MS, record.escalationCount);
 
-        await writeSecurityLog({
+        await safeWriteSecurityLog({
           type: "login_lockout",
           level: "critical",
           message: "Too many login attempts",
@@ -593,8 +616,8 @@ export default async function handler(req, res) {
             attempts: record.count,
             escalationCount: record.escalationCount,
             actionLabel,
-            risk: security.risk,
-            threatResult: security.signals.threatResult,
+            risk: security?.risk || {},
+            threatResult: security?.signals?.threatResult || null,
             clientContext,
             fingerprint
           })
@@ -606,7 +629,7 @@ export default async function handler(req, res) {
         ipRecord.lockUntil =
           now + getEscalatedLockMs(IP_LOCK_WINDOW_MS, ipRecord.escalationCount);
 
-        await writeSecurityLog({
+        await safeWriteSecurityLog({
           type: "ip_login_lock",
           level: "critical",
           message: "IP temporarily blocked due to excessive login attempts",
@@ -617,7 +640,7 @@ export default async function handler(req, res) {
             attempts: ipRecord.count,
             escalationCount: ipRecord.escalationCount,
             actionLabel,
-            risk: security.risk,
+            risk: security?.risk || {},
             clientContext,
             fingerprint
           })
@@ -631,14 +654,18 @@ export default async function handler(req, res) {
       const isIpLocked = ipRecord.lockUntil > now;
 
       return res.status(200).json(
-        buildLockResponse(isUserLocked || isIpLocked, Math.max(
-          isUserLocked ? record.lockUntil - now : 0,
-          isIpLocked ? ipRecord.lockUntil - now : 0
-        ), {
-          lockType: isUserLocked ? "user" : isIpLocked ? "ip" : "none",
-          attempts: record.count,
-          risk: security.risk
-        })
+        buildLockResponse(
+          isUserLocked || isIpLocked,
+          Math.max(
+            isUserLocked ? record.lockUntil - now : 0,
+            isIpLocked ? ipRecord.lockUntil - now : 0
+          ),
+          {
+            lockType: isUserLocked ? "user" : isIpLocked ? "ip" : "none",
+            attempts: record.count,
+            risk: security?.risk || {}
+          }
+        )
       );
     }
 
@@ -649,20 +676,16 @@ export default async function handler(req, res) {
   } catch (error) {
     console.error("Login attempt API error:", error);
 
-    try {
-      await writeSecurityLog({
-        type: "login_attempt_api_error",
-        level: "error",
-        message: "Unhandled server error",
-        route: ROUTE,
-        metadata: {
-          source: "server_enforced",
-          error: safeString(error?.message || "Unknown error", 500)
-        }
-      });
-    } catch (logError) {
-      console.error("Security log write failed:", logError);
-    }
+    await safeWriteSecurityLog({
+      type: "login_attempt_api_error",
+      level: "error",
+      message: "Unhandled server error",
+      route: ROUTE,
+      metadata: {
+        source: "server_enforced",
+        error: safeString(error?.message || "Unknown error", 500)
+      }
+    });
 
     return res.status(500).json({
       success: false,
