@@ -1,12 +1,18 @@
 import {
-  getRecentSecurityEvents
+  getRecentSecurityEvents,
+  appendSecurityEvent
 } from "../_security-events-store.js";
 import { writeSecurityLog } from "../_security-log-writer.js";
-import { safeString, buildMethodNotAllowedResponse } from "../_api-security.js";
+import {
+  safeString,
+  buildMethodNotAllowedResponse
+} from "../_api-security.js";
 import { getAdaptiveThreatMode } from "../_adaptive-threat-mode.js";
 import { getContainmentState } from "../_security-containment.js";
 
 const ROUTE = "/api/security-events";
+const DEFAULT_LIMIT = 50;
+const MAX_LIMIT = 100;
 
 function getClientIp(req) {
   const forwarded = req.headers["x-forwarded-for"];
@@ -31,8 +37,56 @@ function buildUnauthorizedResponse() {
 
 function parseLimit(value) {
   const num = Number(value);
-  if (!Number.isFinite(num)) return 50;
-  return Math.min(100, Math.max(1, Math.floor(num)));
+
+  if (!Number.isFinite(num)) {
+    return DEFAULT_LIMIT;
+  }
+
+  return Math.min(MAX_LIMIT, Math.max(1, Math.floor(num)));
+}
+
+async function recordUnauthorizedAccess({ ip, method }) {
+  try {
+    await appendSecurityEvent({
+      type: "admin_endpoint_unauthorized",
+      severity: "warning",
+      action: "block",
+      route: ROUTE,
+      ip,
+      reason: "invalid_admin_key",
+      message: "Unauthorized attempt to access protected security events endpoint.",
+      metadata: {
+        method
+      }
+    });
+  } catch (error) {
+    console.error("Security events unauthorized event write failed:", error);
+  }
+}
+
+async function recordAuthorizedAccess({ ip, eventCount, mode, containmentMode, filters }) {
+  try {
+    await appendSecurityEvent({
+      type: "security_events_accessed",
+      severity: "info",
+      action: "observe",
+      route: ROUTE,
+      ip,
+      mode,
+      reason: "admin_events_check",
+      message: "Protected security events endpoint accessed successfully.",
+      metadata: {
+        returnedEvents: eventCount,
+        containmentMode,
+        filterSeverity: filters.severity || "",
+        filterAction: filters.action || "",
+        filterType: filters.type || "",
+        limit: filters.limit
+      }
+    });
+  } catch (error) {
+    console.error("Security events access event write failed:", error);
+  }
 }
 
 export default async function handler(req, res) {
@@ -64,21 +118,23 @@ export default async function handler(req, res) {
         }
       });
 
+      await recordUnauthorizedAccess({
+        ip: clientIp,
+        method: req.method
+      });
+
       return res.status(404).json(buildUnauthorizedResponse());
     }
 
-    const limit = parseLimit(req.query?.limit);
-    const severity = safeString(req.query?.severity || "", 20).toLowerCase();
-    const action = safeString(req.query?.action || "", 20).toLowerCase();
-    const type = safeString(req.query?.type || "", 80).toLowerCase();
+    const filters = {
+      limit: parseLimit(req.query?.limit),
+      severity: safeString(req.query?.severity || "", 20).toLowerCase(),
+      action: safeString(req.query?.action || "", 20).toLowerCase(),
+      type: safeString(req.query?.type || "", 80).toLowerCase()
+    };
 
     const [events, adaptiveState, containmentState] = await Promise.all([
-      getRecentSecurityEvents({
-        limit,
-        severity,
-        action,
-        type
-      }),
+      getRecentSecurityEvents(filters),
       getAdaptiveThreatMode(),
       getContainmentState()
     ]);
@@ -90,8 +146,20 @@ export default async function handler(req, res) {
       ip: clientIp,
       message: "Security events endpoint accessed successfully.",
       metadata: {
-        returnedEvents: events.length
+        returnedEvents: events.length,
+        filterSeverity: filters.severity || "",
+        filterAction: filters.action || "",
+        filterType: filters.type || "",
+        limit: filters.limit
       }
+    });
+
+    await recordAuthorizedAccess({
+      ip: clientIp,
+      eventCount: events.length,
+      mode: adaptiveState?.mode || "normal",
+      containmentMode: containmentState?.mode || "normal",
+      filters
     });
 
     return res.status(200).json({
@@ -99,10 +167,10 @@ export default async function handler(req, res) {
       timestamp: new Date().toISOString(),
       count: events.length,
       filters: {
-        limit,
-        severity: severity || "",
-        action: action || "",
-        type: type || ""
+        limit: filters.limit,
+        severity: filters.severity || "",
+        action: filters.action || "",
+        type: filters.type || ""
       },
       mode: adaptiveState?.mode || "normal",
       containmentMode: containmentState?.mode || "normal",
