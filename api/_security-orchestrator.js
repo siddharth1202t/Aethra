@@ -12,6 +12,8 @@ import { evaluateContainment } from "./_security-containment.js";
 import { evaluateAdaptiveThreatMode } from "./_adaptive-threat-mode.js";
 import { getRiskState, updateRiskState } from "./_security-risk-state.js";
 import { evaluateAnomalyDetection } from "./_security-anomaly-detection.js";
+import { evaluateSecurityAlerts } from "./_security-alerts.js";
+import { getRecentSecurityEvents } from "./_security-events-store.js";
 
 function safeString(value, maxLength = 200) {
   return String(value || "")
@@ -103,7 +105,8 @@ function buildSafeSignalBundle({
   adaptiveModeResult = null,
   anomalyResult = null,
   securityState = null,
-  persistentRiskState = null
+  persistentRiskState = null,
+  alertsResult = null
 } = {}) {
   return {
     botResult: botResult || null,
@@ -115,7 +118,8 @@ function buildSafeSignalBundle({
     adaptiveModeResult: adaptiveModeResult || null,
     anomalyResult: anomalyResult || null,
     securityState: securityState || null,
-    persistentRiskState: persistentRiskState || null
+    persistentRiskState: persistentRiskState || null,
+    alertsResult: alertsResult || null
   };
 }
 
@@ -364,14 +368,16 @@ async function getPersistentRiskStates({
 }
 
 function mergeAnomalyIntoRisk(risk = null, anomalyResult = null) {
-  const baseRisk = risk && typeof risk === "object" ? { ...risk } : {
-    riskScore: 0,
-    level: "low",
-    action: "allow",
-    containmentAction: "none",
-    hardBlockSignals: 0,
-    reasons: []
-  };
+  const baseRisk = risk && typeof risk === "object"
+    ? { ...risk }
+    : {
+        riskScore: 0,
+        level: "low",
+        action: "allow",
+        containmentAction: "none",
+        hardBlockSignals: 0,
+        reasons: []
+      };
 
   if (!anomalyResult || typeof anomalyResult !== "object") {
     return baseRisk;
@@ -421,6 +427,116 @@ function mergeAnomalyIntoRisk(risk = null, anomalyResult = null) {
     action: nextAction,
     containmentAction: nextContainmentAction,
     reasons: nextReasons.slice(0, 50)
+  };
+}
+
+function buildInlineSecurityStatus({
+  adaptiveModeResult = null,
+  containmentResult = null
+} = {}) {
+  const mode = safeString(adaptiveModeResult?.mode || "normal", 30).toLowerCase();
+  const counters =
+    adaptiveModeResult && typeof adaptiveModeResult.counters === "object"
+      ? adaptiveModeResult.counters
+      : {};
+
+  const totalSignals = safeInt(counters.totalSignals, 0, 0, 1_000_000);
+  const criticalSignals = safeInt(counters.criticalSignals, 0, 0, 1_000_000);
+  const blockSignals = safeInt(counters.blockSignals, 0, 0, 1_000_000);
+  const challengeSignals = safeInt(counters.challengeSignals, 0, 0, 1_000_000);
+  const repeatedOffenderSignals = safeInt(counters.repeatedOffenderSignals, 0, 0, 1_000_000);
+  const lockdownTriggers = safeInt(counters.lockdownTriggers, 0, 0, 1_000_000);
+  const highRiskStateSignals = safeInt(counters.highRiskStateSignals, 0, 0, 1_000_000);
+  const routePressureSignals = safeInt(counters.routePressureSignals, 0, 0, 1_000_000);
+
+  let threatPressure = 0;
+  threatPressure += Math.min(20, totalSignals * 2);
+  threatPressure += Math.min(20, criticalSignals * 5);
+  threatPressure += Math.min(15, blockSignals * 4);
+  threatPressure += Math.min(10, challengeSignals * 2);
+  threatPressure += Math.min(15, repeatedOffenderSignals * 4);
+  threatPressure += Math.min(10, lockdownTriggers * 5);
+  threatPressure += Math.min(5, highRiskStateSignals * 2);
+  threatPressure += Math.min(5, routePressureSignals * 2);
+
+  if (mode === "elevated") threatPressure = Math.max(threatPressure, 35);
+  if (mode === "defense") threatPressure = Math.max(threatPressure, 65);
+  if (mode === "lockdown") threatPressure = Math.max(threatPressure, 90);
+
+  return {
+    mode,
+    threatPressure: Math.min(100, Math.max(0, threatPressure)),
+    containment: {
+      mode: safeString(containmentResult?.mode || "normal", 30).toLowerCase(),
+      flags: containmentResult?.flags || {}
+    }
+  };
+}
+
+function buildInlineSecurityMetrics({
+  securityStatus = null,
+  recentEvents = []
+} = {}) {
+  const events = Array.isArray(recentEvents) ? recentEvents : [];
+
+  const bySeverity = {
+    info: 0,
+    warning: 0,
+    error: 0,
+    critical: 0
+  };
+
+  const byAction = {
+    allow: 0,
+    challenge: 0,
+    throttle: 0,
+    block: 0,
+    contain: 0,
+    observe: 0
+  };
+
+  let recentHighSeverityCount = 0;
+  let containmentEventCount = 0;
+  let unauthorizedAdminAttempts = 0;
+
+  for (const event of events) {
+    const severity = safeString(event?.severity || "", 20).toLowerCase();
+    const action = safeString(event?.action || "", 20).toLowerCase();
+    const type = safeString(event?.type || "", 120).toLowerCase();
+
+    if (severity in bySeverity) {
+      bySeverity[severity] += 1;
+    }
+
+    if (action in byAction) {
+      byAction[action] += 1;
+    }
+
+    if (severity === "warning" || severity === "error" || severity === "critical") {
+      recentHighSeverityCount += 1;
+    }
+
+    if (type.startsWith("containment_")) {
+      containmentEventCount += 1;
+    }
+
+    if (type === "admin_endpoint_unauthorized") {
+      unauthorizedAdminAttempts += 1;
+    }
+  }
+
+  return {
+    mode: safeString(securityStatus?.mode || "normal", 30).toLowerCase(),
+    threatPressure: safeInt(securityStatus?.threatPressure, 0, 0, 100),
+    eventCounts: {
+      bySeverity,
+      byAction
+    },
+    highlights: {
+      recentHighSeverityCount,
+      containmentEventCount,
+      unauthorizedAdminAttempts
+    }
   };
 }
 
@@ -803,6 +919,29 @@ export async function runSecurityOrchestrator({
     abuseSuccess
   });
 
+  let alertsResult = null;
+  try {
+    const recentEvents = await getRecentSecurityEvents({ limit: 100 });
+    const securityStatus = buildInlineSecurityStatus({
+      adaptiveModeResult,
+      containmentResult
+    });
+    const securityMetrics = buildInlineSecurityMetrics({
+      securityStatus,
+      recentEvents
+    });
+
+    alertsResult = await evaluateSecurityAlerts({
+      securityStatus,
+      securityMetrics,
+      events: recentEvents,
+      anomalyResult,
+      risk: finalRisk
+    });
+  } catch (error) {
+    console.error("Security alert evaluation failed:", error);
+  }
+
   return {
     actor,
     risk: finalRisk,
@@ -816,7 +955,8 @@ export async function runSecurityOrchestrator({
       adaptiveModeResult,
       anomalyResult,
       securityState,
-      persistentRiskState
+      persistentRiskState,
+      alertsResult
     })
   };
 }
