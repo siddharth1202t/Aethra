@@ -44,11 +44,15 @@ export function buildSecurityStatus({
     threatPressure: safeThreatPressure,
     activeThreats: safeActiveThreats,
     systemHealth: normalizeHealth(safeMode, safeThreatPressure),
-    containment: {
-      freezeRegistrations: containment.freezeRegistrations === true,
-      disableUploads: containment.disableUploads === true,
-      forceCaptcha: containment.forceCaptcha === true,
-      readOnlyMode: containment.readOnlyMode === true
-    }
+   containment: {
+      mode: String(containment?.mode || "normal").slice(0, 30),
+      freezeRegistrations: containment?.flags?.freezeRegistrations === true,
+      disableProfileEdits: containment?.flags?.disableProfileEdits === true,
+      lockAdminWrites: containment?.flags?.lockAdminWrites === true,
+      disableUploads: containment?.flags?.disableUploads === true,
+      forceCaptcha: containment?.flags?.forceCaptcha === true,
+      readOnlyMode: containment?.flags?.readOnlyMode === true,
+      lockdown: containment?.flags?.lockdown === true
+   }
   };
 }
