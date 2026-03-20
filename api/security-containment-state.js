@@ -51,9 +51,9 @@ export default async function handler(req, res) {
 
     return res.status(200).json({
       success: true,
-      mode: safeString(state.mode || "normal", 30).toLowerCase(),
-      updatedAt: safeTimestamp(state.updatedAt, 0),
-      expiresAt: safeTimestamp(state.expiresAt, 0),
+      mode: safeString(state?.mode || "normal", 30).toLowerCase(),
+      updatedAt: safeTimestamp(state?.updatedAt, 0),
+      expiresAt: safeTimestamp(state?.expiresAt, 0),
       flags: {
         freezeRegistrations: state?.flags?.freezeRegistrations === true,
         disableProfileEdits: state?.flags?.disableProfileEdits === true,
