@@ -310,12 +310,10 @@ function bindActions() {
   });
 
   primaryBtn?.addEventListener("click", () => {
-    // Placeholder until chat page is connected
     console.log("Start Chatting clicked");
   });
 
   secondaryBtn?.addEventListener("click", () => {
-    // Placeholder until character page/section is connected
     console.log("Explore Characters clicked");
   });
 
