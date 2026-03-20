@@ -1,4 +1,5 @@
 import { redis } from "./_redis.js";
+import { appendSecurityEvent } from "./_security-events-store.js";
 
 const CONTAINMENT_KEY = "security:containment:global";
 const CONTAINMENT_TTL_MS = 24 * 60 * 60 * 1000;
@@ -195,6 +196,69 @@ function isContainmentExpired(state, now = Date.now()) {
   return state.expiresAt > 0 && now > state.expiresAt;
 }
 
+function statesAreEquivalent(a = {}, b = {}) {
+  const stateA = normalizeContainmentState(a);
+  const stateB = normalizeContainmentState(b);
+
+  if (stateA.mode !== stateB.mode) return false;
+  if (safeString(stateA.reason || "", 300) !== safeString(stateB.reason || "", 300)) return false;
+  if (safeInt(stateA.expiresAt, 0, 0, getNowMax()) !== safeInt(stateB.expiresAt, 0, 0, getNowMax())) {
+    return false;
+  }
+
+  for (const key of ALLOWED_FLAGS) {
+    if (safeBoolean(stateA.flags?.[key]) !== safeBoolean(stateB.flags?.[key])) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function buildContainmentMetadata(state = {}) {
+  return {
+    mode: normalizeMode(state.mode || "normal"),
+    expiresAt: safeInt(state.expiresAt, 0, 0, getNowMax()),
+    freezeRegistrations: safeBoolean(state.flags?.freezeRegistrations),
+    disableProfileEdits: safeBoolean(state.flags?.disableProfileEdits),
+    lockAdminWrites: safeBoolean(state.flags?.lockAdminWrites),
+    readOnlyMode: safeBoolean(state.flags?.readOnlyMode),
+    disableUploads: safeBoolean(state.flags?.disableUploads),
+    forceCaptcha: safeBoolean(state.flags?.forceCaptcha),
+    lockdown: safeBoolean(state.flags?.lockdown)
+  };
+}
+
+async function recordContainmentEvent({
+  type,
+  severity,
+  action,
+  reason,
+  previousState,
+  nextState,
+  message
+}) {
+  try {
+    await appendSecurityEvent({
+      type,
+      severity,
+      action,
+      mode: normalizeMode(nextState?.mode || "normal"),
+      reason: safeString(reason || "", 300),
+      message: safeString(message || "", 500),
+      metadata: {
+        previousMode: normalizeMode(previousState?.mode || "normal"),
+        nextMode: normalizeMode(nextState?.mode || "normal"),
+        previousExpiresAt: safeInt(previousState?.expiresAt, 0, 0, getNowMax()),
+        nextExpiresAt: safeInt(nextState?.expiresAt, 0, 0, getNowMax()),
+        ...buildContainmentMetadata(nextState)
+      }
+    });
+  } catch (error) {
+    console.error("Containment event write failed:", error);
+  }
+}
+
 async function getStoredContainmentState() {
   try {
     const raw = await redis.get(CONTAINMENT_KEY);
@@ -239,8 +303,20 @@ export async function getContainmentState() {
   const state = await getStoredContainmentState();
 
   if (isContainmentExpired(state)) {
+    const previousState = normalizeContainmentState(state);
     const reset = createDefaultContainmentState();
     await storeContainmentState(reset);
+
+    await recordContainmentEvent({
+      type: "containment_expired_reset",
+      severity: "info",
+      action: "observe",
+      reason: "containment_expired",
+      previousState,
+      nextState: reset,
+      message: "Containment state expired and was reset to normal."
+    });
+
     return reset;
   }
 
@@ -307,6 +383,21 @@ export async function setContainmentState({
 
   const ok = await storeContainmentState(nextState);
 
+  if (ok && !statesAreEquivalent(currentState, nextState)) {
+    await recordContainmentEvent({
+      type: finalMode === "normal" ? "containment_cleared" : "containment_updated",
+      severity: finalMode === "lockdown" ? "critical" : finalMode === "normal" ? "info" : "warning",
+      action: finalMode === "normal" ? "observe" : "contain",
+      reason: normalizedReason || (finalMode === "normal" ? "containment_cleared" : "containment_updated"),
+      previousState: currentState,
+      nextState,
+      message:
+        finalMode === "normal"
+          ? "Containment state returned to normal."
+          : "Containment state updated."
+    });
+  }
+
   return {
     ok,
     state: nextState
@@ -314,8 +405,21 @@ export async function setContainmentState({
 }
 
 export async function clearContainmentState() {
+  const previousState = await getContainmentState();
   const state = createDefaultContainmentState();
   const ok = await storeContainmentState(state);
+
+  if (ok && !statesAreEquivalent(previousState, state)) {
+    await recordContainmentEvent({
+      type: "containment_cleared",
+      severity: "info",
+      action: "observe",
+      reason: "manual_clear",
+      previousState,
+      nextState: state,
+      message: "Containment state was cleared manually."
+    });
+  }
 
   return {
     ok,
