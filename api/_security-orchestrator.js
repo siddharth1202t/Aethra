@@ -10,6 +10,7 @@ import { validateFreshRequest } from "./_request-freshness.js";
 import { evaluateThreat } from "./_threat-intelligence.js";
 import { evaluateContainment } from "./_security-containment.js";
 import { evaluateAdaptiveThreatMode } from "./_adaptive-threat-mode.js";
+import { getRiskState, updateRiskState } from "./_security-risk-state.js";
 
 function safeString(value, maxLength = 200) {
   return String(value || "")
@@ -99,7 +100,8 @@ function buildSafeSignalBundle({
   threatResult = null,
   containmentResult = null,
   adaptiveModeResult = null,
-  securityState = null
+  securityState = null,
+  persistentRiskState = null
 } = {}) {
   return {
     botResult: botResult || null,
@@ -109,7 +111,8 @@ function buildSafeSignalBundle({
     threatResult: threatResult || null,
     containmentResult: containmentResult || null,
     adaptiveModeResult: adaptiveModeResult || null,
-    securityState: securityState || null
+    securityState: securityState || null,
+    persistentRiskState: persistentRiskState || null
   };
 }
 
@@ -233,6 +236,130 @@ async function getSecurityStateSummary({
   return merged;
 }
 
+function mergeRiskLevel(a = "low", b = "low") {
+  const rank = {
+    low: 0,
+    medium: 1,
+    high: 2,
+    critical: 3
+  };
+
+  const safeA = safeString(a || "low", 20).toLowerCase();
+  const safeB = safeString(b || "low", 20).toLowerCase();
+
+  return (rank[safeA] || 0) >= (rank[safeB] || 0) ? safeA : safeB;
+}
+
+function mergeSecuritySummaries(baseState = null, persistentStates = []) {
+  const merged = {
+    currentRiskScore: 0,
+    currentRiskLevel: "low",
+    failedLoginCount: 0,
+    failedSignupCount: 0,
+    failedPasswordResetCount: 0,
+    captchaFailureCount: 0,
+    suspiciousEventCount: 0,
+    rateLimitHitCount: 0,
+    lockoutCount: 0,
+    successfulAuthCount: 0
+  };
+
+  if (baseState && typeof baseState === "object") {
+    merged.currentRiskScore = Math.max(
+      merged.currentRiskScore,
+      safeInt(baseState.currentRiskScore, 0, 0, 100)
+    );
+    merged.currentRiskLevel = mergeRiskLevel(
+      merged.currentRiskLevel,
+      safeString(baseState.currentRiskLevel || "low", 20).toLowerCase()
+    );
+    merged.failedLoginCount += safeInt(baseState.failedLoginCount, 0, 0, 100000);
+    merged.failedSignupCount += safeInt(baseState.failedSignupCount, 0, 0, 100000);
+    merged.failedPasswordResetCount += safeInt(baseState.failedPasswordResetCount, 0, 0, 100000);
+    merged.captchaFailureCount += safeInt(baseState.captchaFailureCount, 0, 0, 100000);
+    merged.suspiciousEventCount += safeInt(baseState.suspiciousEventCount, 0, 0, 100000);
+    merged.rateLimitHitCount += safeInt(baseState.rateLimitHitCount, 0, 0, 100000);
+    merged.lockoutCount += safeInt(baseState.lockoutCount, 0, 0, 100000);
+    merged.successfulAuthCount += safeInt(baseState.successfulAuthCount, 0, 0, 100000);
+  }
+
+  for (const state of Array.isArray(persistentStates) ? persistentStates : []) {
+    if (!state || typeof state !== "object") {
+      continue;
+    }
+
+    merged.currentRiskScore = Math.max(
+      merged.currentRiskScore,
+      safeInt(state.currentRiskScore, 0, 0, 100)
+    );
+    merged.currentRiskLevel = mergeRiskLevel(
+      merged.currentRiskLevel,
+      safeString(state.currentRiskLevel || "low", 20).toLowerCase()
+    );
+
+    merged.failedLoginCount += safeInt(state.failedLoginCount, 0, 0, 100000);
+    merged.failedSignupCount += safeInt(state.failedSignupCount, 0, 0, 100000);
+    merged.failedPasswordResetCount += safeInt(state.failedPasswordResetCount, 0, 0, 100000);
+    merged.captchaFailureCount += safeInt(state.captchaFailureCount, 0, 0, 100000);
+    merged.suspiciousEventCount += safeInt(state.suspiciousEventCount, 0, 0, 100000);
+    merged.rateLimitHitCount += safeInt(state.rateLimitHitCount, 0, 0, 100000);
+    merged.lockoutCount += safeInt(state.lockoutCount, 0, 0, 100000);
+    merged.successfulAuthCount += safeInt(state.successfulAuthCount, 0, 0, 100000);
+  }
+
+  return merged;
+}
+
+async function getPersistentRiskStates({
+  userId = "",
+  ip = "",
+  sessionId = ""
+} = {}) {
+  const safeUserId = safeString(userId || "", 128);
+  const safeSessionId = safeString(sessionId || "", 128);
+  const safeIp = safeString(ip || "", 100);
+
+  const requests = [];
+
+  if (safeSessionId) {
+    requests.push(
+      getRiskState({
+        actorType: "session",
+        actorId: safeSessionId
+      })
+    );
+  }
+
+  if (safeUserId) {
+    requests.push(
+      getRiskState({
+        actorType: "user",
+        actorId: safeUserId
+      })
+    );
+  }
+
+  if (safeIp && safeIp !== "unknown") {
+    requests.push(
+      getRiskState({
+        actorType: "ip",
+        actorId: safeIp
+      })
+    );
+  }
+
+  if (!requests.length) {
+    return [];
+  }
+
+  try {
+    return await Promise.all(requests);
+  } catch (error) {
+    console.error("Persistent risk state read failed:", error);
+    return [];
+  }
+}
+
 function pickFinalAction({
   containment,
   risk,
@@ -321,6 +448,90 @@ function pickFinalContainmentAction({
   return safeString(risk?.containmentAction || "none", 50);
 }
 
+function buildRiskStateIncrements({
+  risk = null,
+  rateLimitResult = null,
+  freshnessResult = null,
+  abuseSuccess = true
+} = {}) {
+  const finalAction = normalizeAction(risk?.finalAction || risk?.action || "allow");
+  const riskScore = safeInt(risk?.riskScore, 0, 0, 100);
+
+  return {
+    suspiciousEventCount: riskScore >= 45 ? 1 : 0,
+    challengeCount: finalAction === "challenge" ? 1 : 0,
+    throttleCount: finalAction === "throttle" ? 1 : 0,
+    blockCount: finalAction === "block" ? 1 : 0,
+    rateLimitHitCount: rateLimitResult && !rateLimitResult.allowed ? 1 : 0,
+    captchaFailureCount: freshnessResult && !freshnessResult.ok ? 1 : 0,
+    trustedEventCount:
+      finalAction === "allow" && riskScore <= 20 && safeBoolean(abuseSuccess) ? 1 : 0
+  };
+}
+
+async function persistActorRiskStates({
+  actor,
+  risk,
+  rateLimitResult,
+  freshnessResult,
+  abuseSuccess
+}) {
+  const updates = [];
+  const increments = buildRiskStateIncrements({
+    risk,
+    rateLimitResult,
+    freshnessResult,
+    abuseSuccess
+  });
+
+  if (actor?.sessionId) {
+    updates.push(
+      updateRiskState({
+        actorType: "session",
+        actorId: actor.sessionId,
+        riskResult: risk,
+        reason: "request_risk_evaluated",
+        increments
+      })
+    );
+  }
+
+  if (actor?.userId) {
+    updates.push(
+      updateRiskState({
+        actorType: "user",
+        actorId: actor.userId,
+        riskResult: risk,
+        reason: "request_risk_evaluated",
+        increments
+      })
+    );
+  }
+
+  if (actor?.ip && actor.ip !== "unknown") {
+    updates.push(
+      updateRiskState({
+        actorType: "ip",
+        actorId: actor.ip,
+        riskResult: risk,
+        reason: "request_risk_evaluated",
+        increments
+      })
+    );
+  }
+
+  if (!updates.length) {
+    return [];
+  }
+
+  try {
+    return await Promise.all(updates);
+  } catch (error) {
+    console.error("Persistent risk state update failed:", error);
+    return [];
+  }
+}
+
 export async function runSecurityOrchestrator({
   req = null,
   body = {},
@@ -399,12 +610,20 @@ export async function runSecurityOrchestrator({
 
   let securityState = null;
   try {
-    securityState = await getSecurityStateSummary({
+    const firestoreState = await getSecurityStateSummary({
       userId: actor.userId,
       email: context?.email || body?.email || "",
       ip: actor.ip,
       sessionId: actor.sessionId
     });
+
+    const persistentRiskStates = await getPersistentRiskStates({
+      userId: actor.userId,
+      ip: actor.ip,
+      sessionId: actor.sessionId
+    });
+
+    securityState = mergeSecuritySummaries(firestoreState, persistentRiskStates);
   } catch (error) {
     console.error("Security state read failed:", error);
   }
@@ -476,14 +695,24 @@ export async function runSecurityOrchestrator({
     adaptiveModeResult
   });
 
+  const finalRisk = {
+    ...risk,
+    routeSensitivity,
+    finalAction,
+    finalContainmentAction
+  };
+
+  const persistentRiskState = await persistActorRiskStates({
+    actor,
+    risk: finalRisk,
+    rateLimitResult,
+    freshnessResult,
+    abuseSuccess
+  });
+
   return {
     actor,
-    risk: {
-      ...risk,
-      routeSensitivity,
-      finalAction,
-      finalContainmentAction
-    },
+    risk: finalRisk,
     signals: buildSafeSignalBundle({
       botResult,
       abuseResult,
@@ -492,7 +721,8 @@ export async function runSecurityOrchestrator({
       threatResult,
       containmentResult,
       adaptiveModeResult,
-      securityState
+      securityState,
+      persistentRiskState
     })
   };
 }
