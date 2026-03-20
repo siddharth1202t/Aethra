@@ -22,11 +22,11 @@ const revealTargets = Array.from(
 );
 
 let activeModalTrigger = null;
-let rafId = 0;
 let parallaxRafId = 0;
 let scrollBound = false;
 let modalBound = false;
 let cardBound = false;
+let parallaxBound = false;
 
 /* ---------------- BASIC HELPERS ---------------- */
 
@@ -170,6 +170,7 @@ function attachTilt(element, options = {}) {
     element.style.transition =
       "transform 0.35s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.28s ease, border-color 0.28s ease";
     element.style.transform = "";
+
     window.setTimeout(() => {
       element.style.willChange = "auto";
     }, 350);
@@ -331,22 +332,34 @@ function bindModalEvents() {
 /* ---------------- PARALLAX POLISH ---------------- */
 
 function initHeroParallax() {
-  if (prefersReducedMotion() || !aurora) return;
+  if (prefersReducedMotion() || !aurora || parallaxBound) return;
 
   function onMove(event) {
     if (parallaxRafId) {
       cancelAnimationFrame(parallaxRafId);
     }
 
-    parallaxRafId = requestAnimationFrame(() => {
-      const x = (event.clientX / window.innerWidth - 0.5) * 12;
-      const y = (event.clientY / window.innerHeight - 0.5) * 12;
+    parallaxRafId = window.requestAnimationFrame(() => {
+      const x = clamp((event.clientX / window.innerWidth - 0.5) * 12, -12, 12);
+      const y = clamp((event.clientY / window.innerHeight - 0.5) * 12, -12, 12);
 
       aurora.style.transform = `translate3d(${x}px, ${y}px, 0)`;
     });
   }
 
+  function onLeave() {
+    if (parallaxRafId) {
+      cancelAnimationFrame(parallaxRafId);
+    }
+
+    parallaxRafId = window.requestAnimationFrame(() => {
+      aurora.style.transform = "translate3d(0, 0, 0)";
+    });
+  }
+
   window.addEventListener("pointermove", onMove, { passive: true });
+  window.addEventListener("pointerleave", onLeave, { passive: true });
+  parallaxBound = true;
 }
 
 /* ---------------- INIT ---------------- */
