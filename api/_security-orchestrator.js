@@ -11,6 +11,7 @@ import { evaluateThreat } from "./_threat-intelligence.js";
 import { evaluateContainment } from "./_security-containment.js";
 import { evaluateAdaptiveThreatMode } from "./_adaptive-threat-mode.js";
 import { getRiskState, updateRiskState } from "./_security-risk-state.js";
+import { evaluateAnomalyDetection } from "./_security-anomaly-detection.js";
 
 function safeString(value, maxLength = 200) {
   return String(value || "")
@@ -100,6 +101,7 @@ function buildSafeSignalBundle({
   threatResult = null,
   containmentResult = null,
   adaptiveModeResult = null,
+  anomalyResult = null,
   securityState = null,
   persistentRiskState = null
 } = {}) {
@@ -111,6 +113,7 @@ function buildSafeSignalBundle({
     threatResult: threatResult || null,
     containmentResult: containmentResult || null,
     adaptiveModeResult: adaptiveModeResult || null,
+    anomalyResult: anomalyResult || null,
     securityState: securityState || null,
     persistentRiskState: persistentRiskState || null
   };
@@ -358,6 +361,67 @@ async function getPersistentRiskStates({
     console.error("Persistent risk state read failed:", error);
     return [];
   }
+}
+
+function mergeAnomalyIntoRisk(risk = null, anomalyResult = null) {
+  const baseRisk = risk && typeof risk === "object" ? { ...risk } : {
+    riskScore: 0,
+    level: "low",
+    action: "allow",
+    containmentAction: "none",
+    hardBlockSignals: 0,
+    reasons: []
+  };
+
+  if (!anomalyResult || typeof anomalyResult !== "object") {
+    return baseRisk;
+  }
+
+  const anomalyScore = safeInt(anomalyResult.anomalyScore, 0, 0, 100);
+  const anomalyAction = normalizeAction(anomalyResult.action || "allow");
+  const anomalyReasons = Array.isArray(anomalyResult.reasons)
+    ? anomalyResult.reasons.map((reason) => safeString(reason, 120)).filter(Boolean)
+    : [];
+
+  const nextScore = Math.min(
+    100,
+    safeInt(baseRisk.riskScore, 0, 0, 100) + Math.min(25, Math.floor(anomalyScore / 2))
+  );
+
+  const nextReasons = Array.isArray(baseRisk.reasons) ? [...baseRisk.reasons] : [];
+  for (const reason of anomalyReasons) {
+    if (!nextReasons.includes(reason)) {
+      nextReasons.push(reason);
+    }
+  }
+
+  let nextAction = normalizeAction(baseRisk.action || "allow");
+  if (anomalyAction === "block") {
+    nextAction = "block";
+  } else if (anomalyAction === "challenge" && nextAction !== "block") {
+    nextAction = "challenge";
+  } else if (
+    anomalyAction === "throttle" &&
+    nextAction !== "block" &&
+    nextAction !== "challenge"
+  ) {
+    nextAction = "throttle";
+  }
+
+  let nextContainmentAction = safeString(baseRisk.containmentAction || "none", 50);
+  if (anomalyScore >= 70 && nextContainmentAction === "none") {
+    nextContainmentAction = "step_up_verification";
+  } else if (anomalyScore >= 40 && nextContainmentAction === "none") {
+    nextContainmentAction = "slow_down_actor";
+  }
+
+  return {
+    ...baseRisk,
+    riskScore: nextScore,
+    action: nextAction,
+    containmentAction: nextContainmentAction,
+    reasons: nextReasons.slice(0, 50)
+  };
 }
 
 function pickFinalAction({
@@ -646,7 +710,7 @@ export async function runSecurityOrchestrator({
     console.error("Threat intelligence failed:", error);
   }
 
-  const risk = evaluateRisk({
+  const baseRisk = evaluateRisk({
     botResult,
     abuseResult,
     rateLimitResult,
@@ -655,6 +719,35 @@ export async function runSecurityOrchestrator({
     securityState,
     routeSensitivity
   });
+
+  let anomalyResult = null;
+  try {
+    const anomalyActorType = actor.userId
+      ? "user"
+      : actor.sessionId
+        ? "session"
+        : actor.ip && actor.ip !== "unknown"
+          ? "ip"
+          : "";
+
+    const anomalyActorId = actor.userId || actor.sessionId || actor.ip || "";
+
+    anomalyResult = anomalyActorType
+      ? await evaluateAnomalyDetection({
+          actorType: anomalyActorType,
+          actorId: anomalyActorId,
+          ip: actor.ip,
+          route: actor.route,
+          riskScore: baseRisk.riskScore,
+          isWriteAction: safeBoolean(containmentConfig.isWriteAction),
+          actionType: safeString(containmentConfig.actionType || "", 50)
+        })
+      : null;
+  } catch (error) {
+    console.error("Anomaly detection failed:", error);
+  }
+
+  const risk = mergeAnomalyIntoRisk(baseRisk, anomalyResult);
 
   let containmentResult = null;
   try {
@@ -721,6 +814,7 @@ export async function runSecurityOrchestrator({
       threatResult,
       containmentResult,
       adaptiveModeResult,
+      anomalyResult,
       securityState,
       persistentRiskState
     })
