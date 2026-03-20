@@ -2,6 +2,8 @@ import { redis } from "./_redis.js";
 
 const CONTAINMENT_KEY = "security:containment:global";
 const CONTAINMENT_TTL_MS = 24 * 60 * 60 * 1000;
+const CONTAINMENT_TTL_SECONDS = Math.max(1, Math.ceil(CONTAINMENT_TTL_MS / 1000));
+const MAX_FUTURE_TIME_MS = 7 * 24 * 60 * 60 * 1000;
 
 const ALLOWED_MODES = new Set([
   "normal",
@@ -37,7 +39,11 @@ function safeNumber(value, fallback = 0) {
   return Number.isFinite(num) ? num : fallback;
 }
 
-function safeInt(value, fallback = 0, min = 0, max = Date.now() + 7 * 24 * 60 * 60 * 1000) {
+function getNowMax() {
+  return Date.now() + MAX_FUTURE_TIME_MS;
+}
+
+function safeInt(value, fallback = 0, min = 0, max = getNowMax()) {
   const num = Math.floor(safeNumber(value, fallback));
   if (!Number.isFinite(num)) return fallback;
   return Math.min(max, Math.max(min, num));
@@ -88,27 +94,61 @@ function sanitizeFlags(flags = {}) {
   return output;
 }
 
+function createDefaultFlags() {
+  return {
+    freezeRegistrations: false,
+    disableProfileEdits: false,
+    lockAdminWrites: false,
+    readOnlyMode: false,
+    disableUploads: false,
+    forceCaptcha: false,
+    lockdown: false
+  };
+}
+
 function createDefaultContainmentState() {
   return {
     mode: "normal",
     reason: "",
     updatedAt: Date.now(),
     expiresAt: 0,
-    flags: {
+    flags: createDefaultFlags()
+  };
+}
+
+function getDefaultFlagsForMode(mode) {
+  const normalizedMode = normalizeMode(mode);
+
+  if (normalizedMode === "lockdown") {
+    return {
+      freezeRegistrations: true,
+      disableProfileEdits: true,
+      lockAdminWrites: true,
+      readOnlyMode: true,
+      disableUploads: true,
+      forceCaptcha: true,
+      lockdown: true
+    };
+  }
+
+  if (normalizedMode === "elevated") {
+    return {
       freezeRegistrations: false,
       disableProfileEdits: false,
       lockAdminWrites: false,
       readOnlyMode: false,
       disableUploads: false,
-      forceCaptcha: false,
+      forceCaptcha: true,
       lockdown: false
-    }
-  };
+    };
+  }
+
+  return createDefaultFlags();
 }
 
 function normalizeContainmentState(raw) {
   const base = createDefaultContainmentState();
-  const nowMax = Date.now() + 7 * 24 * 60 * 60 * 1000;
+  const nowMax = getNowMax();
   const state = raw && typeof raw === "object" ? raw : {};
 
   const normalizedMode = normalizeMode(state.mode || base.mode);
@@ -117,7 +157,6 @@ function normalizeContainmentState(raw) {
     ...(state.flags || {})
   });
 
-  // Force consistency between mode and flags
   if (normalizedMode === "lockdown") {
     mergedFlags.lockdown = true;
   }
@@ -133,6 +172,27 @@ function normalizeContainmentState(raw) {
     expiresAt: safeInt(state.expiresAt, 0, 0, nowMax),
     flags: mergedFlags
   };
+}
+
+function getStrongerMode(a = "normal", b = "normal") {
+  const modeA = normalizeMode(a);
+  const modeB = normalizeMode(b);
+
+  return MODE_RANK[modeA] >= MODE_RANK[modeB] ? modeA : modeB;
+}
+
+function mergeFlagsForEscalation(currentFlags = {}, nextFlags = {}) {
+  const output = {};
+
+  for (const key of ALLOWED_FLAGS) {
+    output[key] = safeBoolean(currentFlags?.[key]) || safeBoolean(nextFlags?.[key]);
+  }
+
+  return output;
+}
+
+function isContainmentExpired(state, now = Date.now()) {
+  return state.expiresAt > 0 && now > state.expiresAt;
 }
 
 async function getStoredContainmentState() {
@@ -164,9 +224,10 @@ async function getStoredContainmentState() {
 
 async function storeContainmentState(state) {
   try {
-    const ttlSeconds = Math.max(1, Math.ceil(CONTAINMENT_TTL_MS / 1000));
     const normalized = normalizeContainmentState(state);
-    await redis.set(CONTAINMENT_KEY, JSON.stringify(normalized), { ex: ttlSeconds });
+    await redis.set(CONTAINMENT_KEY, JSON.stringify(normalized), {
+      ex: CONTAINMENT_TTL_SECONDS
+    });
     return true;
   } catch (error) {
     console.error("Containment write failed:", error);
@@ -174,53 +235,10 @@ async function storeContainmentState(state) {
   }
 }
 
-function getDefaultFlagsForMode(mode) {
-  if (mode === "lockdown") {
-    return {
-      freezeRegistrations: true,
-      disableProfileEdits: true,
-      lockAdminWrites: true,
-      readOnlyMode: true,
-      disableUploads: true,
-      forceCaptcha: true,
-      lockdown: true
-    };
-  }
-
-  if (mode === "elevated") {
-    return {
-      freezeRegistrations: false,
-      disableProfileEdits: false,
-      lockAdminWrites: false,
-      readOnlyMode: false,
-      disableUploads: false,
-      forceCaptcha: true,
-      lockdown: false
-    };
-  }
-
-  return createDefaultContainmentState().flags;
-}
-
-function getStrongerMode(a = "normal", b = "normal") {
-  return MODE_RANK[normalizeMode(a)] >= MODE_RANK[normalizeMode(b)]
-    ? normalizeMode(a)
-    : normalizeMode(b);
-}
-
-function mergeFlagsForEscalation(currentFlags = {}, nextFlags = {}) {
-  const output = {};
-  for (const key of ALLOWED_FLAGS) {
-    output[key] = safeBoolean(currentFlags?.[key]) || safeBoolean(nextFlags?.[key]);
-  }
-  return output;
-}
-
 export async function getContainmentState() {
   const state = await getStoredContainmentState();
-  const now = Date.now();
 
-  if (state.expiresAt > 0 && now > state.expiresAt) {
+  if (isContainmentExpired(state)) {
     const reset = createDefaultContainmentState();
     await storeContainmentState(reset);
     return reset;
@@ -240,13 +258,14 @@ export async function setContainmentState({
   const normalizedReason = safeString(reason || "", 300);
   const now = Date.now();
   const safeDurationMs = Math.max(0, safeNumber(durationMs, 0));
+  const sanitizedRequestedFlags = sanitizeFlags(flags);
 
   const currentState = await getContainmentState();
 
   let finalMode = normalizedMode;
   let finalFlags = {
     ...getDefaultFlagsForMode(normalizedMode),
-    ...sanitizeFlags(flags)
+    ...sanitizedRequestedFlags
   };
 
   if (!allowDowngrade) {
@@ -258,19 +277,16 @@ export async function setContainmentState({
         currentState.flags,
         {
           ...getDefaultFlagsForMode(normalizedMode),
-          ...sanitizeFlags(flags)
+          ...sanitizedRequestedFlags
         }
       );
     } else if (strongerMode === currentState.mode && strongerMode === normalizedMode) {
-      finalFlags = mergeFlagsForEscalation(
-        currentState.flags,
-        finalFlags
-      );
+      finalFlags = mergeFlagsForEscalation(currentState.flags, finalFlags);
     }
   }
 
   if (finalMode === "normal") {
-    finalFlags = createDefaultContainmentState().flags;
+    finalFlags = createDefaultFlags();
   }
 
   if (finalMode === "lockdown") {
@@ -322,39 +338,39 @@ export async function evaluateContainment({
   let action = "allow";
 
   if (state.flags.lockdown) {
-    action = "block";
     blocked = true;
+    action = "block";
     reason = "lockdown_active";
   }
 
   if (!blocked && state.flags.readOnlyMode && isWriteAction) {
     blocked = true;
-    reason = "read_only_mode_active";
     action = "block";
+    reason = "read_only_mode_active";
   }
 
   if (!blocked && state.flags.freezeRegistrations && normalizedRoute.includes("signup")) {
     blocked = true;
-    reason = "registrations_frozen";
     action = "block";
+    reason = "registrations_frozen";
   }
 
   if (!blocked && state.flags.disableProfileEdits && normalizedRoute.includes("profile")) {
     blocked = true;
-    reason = "profile_edits_disabled";
     action = "block";
+    reason = "profile_edits_disabled";
   }
 
   if (!blocked && state.flags.disableUploads && normalizedActionType === "upload") {
     blocked = true;
-    reason = "uploads_disabled";
     action = "block";
+    reason = "uploads_disabled";
   }
 
   if (!blocked && state.flags.lockAdminWrites && isAdminRoute && isWriteAction) {
     blocked = true;
-    reason = "admin_writes_locked";
     action = "block";
+    reason = "admin_writes_locked";
   }
 
   if (!blocked && state.flags.forceCaptcha) {
