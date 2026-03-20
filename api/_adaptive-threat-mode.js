@@ -3,6 +3,7 @@ import {
   getContainmentState,
   setContainmentState
 } from "./_security-containment.js";
+import { appendSecurityEvent } from "./_security-events-store.js";
 
 const ADAPTIVE_MODE_KEY = "security:adaptive-mode";
 const ADAPTIVE_MODE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -33,6 +34,7 @@ const ALLOWED_ROUTE_SENSITIVITY = new Set([
 ]);
 
 const MAX_COUNTER_VALUE = 1_000_000;
+const MAX_TIMESTAMP_FUTURE_SKEW_MS = 60_000;
 
 function safeString(value, maxLength = 200) {
   return String(value || "")
@@ -100,7 +102,7 @@ function createDefaultAdaptiveState() {
 
 function normalizeAdaptiveState(raw) {
   const base = createDefaultAdaptiveState();
-  const nowMax = Date.now() + 60_000;
+  const nowMax = Date.now() + MAX_TIMESTAMP_FUTURE_SKEW_MS;
   const state = raw && typeof raw === "object" ? raw : {};
 
   return {
@@ -261,6 +263,8 @@ function shouldReturnToNormalContainment(currentContainment) {
   return (
     currentContainment?.mode !== "normal" ||
     currentContainment?.flags?.freezeRegistrations === true ||
+    currentContainment?.flags?.disableProfileEdits === true ||
+    currentContainment?.flags?.lockAdminWrites === true ||
     currentContainment?.flags?.disableUploads === true ||
     currentContainment?.flags?.forceCaptcha === true ||
     currentContainment?.flags?.readOnlyMode === true ||
@@ -314,6 +318,8 @@ async function syncContainmentToMode(mode, reason) {
       durationMs: 5 * 60 * 1000,
       flags: {
         freezeRegistrations: false,
+        disableProfileEdits: false,
+        lockAdminWrites: false,
         disableUploads: false,
         forceCaptcha: false,
         readOnlyMode: false,
@@ -326,6 +332,38 @@ async function syncContainmentToMode(mode, reason) {
     ok: true,
     state: currentContainment
   };
+}
+
+async function recordAdaptiveModeChange({
+  previousMode,
+  nextMode,
+  reason,
+  counters
+}) {
+  try {
+    await appendSecurityEvent({
+      type: "adaptive_mode_changed",
+      severity: nextMode === "lockdown" ? "critical" : "warning",
+      action: nextMode === "lockdown" ? "contain" : "observe",
+      mode: nextMode,
+      reason,
+      message: "Adaptive threat mode changed.",
+      metadata: {
+        previousMode,
+        nextMode,
+        totalSignals: safeInt(counters?.totalSignals, 0),
+        criticalSignals: safeInt(counters?.criticalSignals, 0),
+        blockSignals: safeInt(counters?.blockSignals, 0),
+        challengeSignals: safeInt(counters?.challengeSignals, 0),
+        repeatedOffenderSignals: safeInt(counters?.repeatedOffenderSignals, 0),
+        lockdownTriggers: safeInt(counters?.lockdownTriggers, 0),
+        highRiskStateSignals: safeInt(counters?.highRiskStateSignals, 0),
+        routePressureSignals: safeInt(counters?.routePressureSignals, 0)
+      }
+    });
+  } catch (error) {
+    console.error("Adaptive mode event write failed:", error);
+  }
 }
 
 export async function evaluateAdaptiveThreatMode({
@@ -436,6 +474,17 @@ export async function evaluateAdaptiveThreatMode({
   await storeAdaptiveState(state);
   const containment = await syncContainmentToMode(state.mode, state.lastReason);
 
+  const normalizedCounters = normalizeCounters(state);
+
+  if (previousMode !== state.mode) {
+    await recordAdaptiveModeChange({
+      previousMode,
+      nextMode: state.mode,
+      reason: state.lastReason,
+      counters: normalizedCounters
+    });
+  }
+
   return {
     mode: state.mode,
     previousMode,
@@ -443,7 +492,7 @@ export async function evaluateAdaptiveThreatMode({
     reason: state.lastReason,
     windowStartedAt: state.windowStartedAt,
     updatedAt: state.updatedAt,
-    counters: normalizeCounters(state),
+    counters: normalizedCounters,
     containment: containment?.state || null
   };
 }
@@ -469,6 +518,22 @@ export async function resetAdaptiveThreatMode() {
   const ok = await storeAdaptiveState(state);
 
   await syncContainmentToMode("normal", "manual_reset");
+
+  try {
+    await appendSecurityEvent({
+      type: "adaptive_mode_reset",
+      severity: "info",
+      action: "observe",
+      mode: "normal",
+      reason: "manual_reset",
+      message: "Adaptive threat mode was reset manually.",
+      metadata: {
+        mode: "normal"
+      }
+    });
+  } catch (error) {
+    console.error("Adaptive mode reset event write failed:", error);
+  }
 
   return {
     ok,
