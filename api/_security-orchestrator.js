@@ -826,15 +826,32 @@ export async function runSecurityOrchestrator({
     console.error("Threat intelligence failed:", error);
   }
 
-  const baseRisk = evaluateRisk({
-    botResult,
-    abuseResult,
-    rateLimitResult,
-    freshnessResult,
-    threatResult,
-    securityState,
-    routeSensitivity
-  });
+  let baseRisk = {
+    riskScore: 0,
+    level: "low",
+    action: "allow",
+    containmentAction: "none",
+    hardBlockSignals: 0,
+    reasons: []
+  };
+
+  try {
+    const evaluated = evaluateRisk({
+      botResult,
+      abuseResult,
+      rateLimitResult,
+      freshnessResult,
+      threatResult,
+      securityState,
+      routeSensitivity
+    });
+
+    if (evaluated && typeof evaluated === "object") {
+      baseRisk = evaluated;
+    }
+  } catch (error) {
+    console.error("Risk evaluation failed:", error);
+  }
 
   let anomalyResult = null;
   try {
