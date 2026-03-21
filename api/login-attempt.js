@@ -25,13 +25,15 @@ const MAX_BODY_KEYS = 25;
 const MAX_CONTENT_LENGTH_BYTES = 12 * 1024;
 
 const ALLOWED_ORIGINS = new Set([
-  "https://aethra-gules.vercel.app",
-  "https://aethra-hb2h.vercel.app"
+  "localhost",
+  "https://aethra-hb2h.vercel.app",
+  "127.0.0.1"
 ]);
 
 const ALLOWED_HOSTNAMES = new Set([
-  "aethra-gules.vercel.app",
-  "aethra-hb2h.vercel.app"
+  "localhost",
+  "aethra-hb2h.vercel.app",
+  "127.0.0.1"
 ]);
 
 const ALLOWED_ACTIONS = new Set(["check", "fail"]);
