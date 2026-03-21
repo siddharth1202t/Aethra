@@ -1,5 +1,5 @@
 import { redis } from "./_redis.js";
-import { appendSecurityEvent } from "./_security-events-store.js";
+import { appendSecurityEvent } from "./_security-event-store.js";
 
 const CONTAINMENT_KEY = "security:containment:global";
 const CONTAINMENT_TTL_MS = 24 * 60 * 60 * 1000;
