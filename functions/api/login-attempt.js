@@ -1,6 +1,4 @@
-import crypto from "node:crypto";
-
-import { redis } from "./_redis.js";
+import { getRedis } from "./_redis.js";
 import { writeSecurityLog } from "./_security-log-writer.js";
 import { createActorContext } from "./_actor-context.js";
 import { runSecurityOrchestrator } from "./_security-orchestrator.js";
@@ -24,36 +22,41 @@ const ROUTE = "/api/login-attempt";
 const MAX_BODY_KEYS = 25;
 const MAX_CONTENT_LENGTH_BYTES = 12 * 1024;
 
-const ALLOWED_ORIGINS = new Set([
-  "localhost",
-  "https://aethra-hb2h.vercel.app",
-  "127.0.0.1"
-]);
-
-const ALLOWED_HOSTNAMES = new Set([
-  "localhost",
-  "aethra-hb2h.vercel.app",
-  "127.0.0.1"
-]);
-
-const ALLOWED_ACTIONS = new Set(["check", "fail"]);
 const GOOGLE_PLACEHOLDER_EMAIL = "google-login";
 
-function setNoStore(res) {
-  res.setHeader(
-    "Cache-Control",
-    "no-store, no-cache, must-revalidate, proxy-revalidate"
+/* ---------------- crypto fingerprint (WebCrypto) ---------------- */
+
+async function buildAttemptFingerprint({ email, ip, action, actionLabel }) {
+  const encoder = new TextEncoder();
+
+  const data = encoder.encode(
+    [
+      safeString(email, 200),
+      safeString(ip, 100),
+      safeString(action, 50),
+      safeString(actionLabel, 100)
+    ].join("|")
   );
-  res.setHeader("Pragma", "no-cache");
-  res.setHeader("Expires", "0");
+
+  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+
+  return hashArray
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("")
+    .slice(0, 32);
 }
 
-function safeJsonParse(raw, fallback = null) {
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return fallback;
-  }
+/* ---------------- helpers ---------------- */
+
+function json(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store"
+    }
+  });
 }
 
 function normalizeEmail(email) {
@@ -63,8 +66,6 @@ function normalizeEmail(email) {
 function normalizeIp(ip) {
   let value = safeString(ip || "unknown", 100);
 
-  if (!value) return "unknown";
-
   if (value.startsWith("::ffff:")) {
     value = value.slice(7);
   }
@@ -73,98 +74,20 @@ function normalizeIp(ip) {
   return value || "unknown";
 }
 
-function normalizeKeyPart(value, fallback = "", maxLength = 160) {
-  const cleaned = safeString(value || "", maxLength).replace(
-    /[^a-zA-Z0-9._:@/-]/g,
-    ""
+function getEscalatedLockMs(baseMs, escalationCount) {
+  const multiplier = Math.min(
+    4,
+    1 + safePositiveInt(escalationCount, 0) * 0.5
   );
-  return cleaned || fallback;
-}
-
-function normalizeHostname(hostname = "") {
-  return safeString(hostname, 200).trim().toLowerCase();
-}
-
-function isValidEmail(email) {
-  return (
-    email.length >= 5 &&
-    email.length <= 200 &&
-    /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
-  );
-}
-
-function getKey(email, ip) {
-  return `${normalizeKeyPart(email, "unknown-email", 220)}::${normalizeKeyPart(ip, "unknown-ip", 120)}`;
+  return Math.floor(baseMs * multiplier);
 }
 
 function buildLoginAttemptKey(email, ip) {
-  return `login-attempt:${safeString(getKey(email, ip), 260)}`;
+  return `login-attempt:${email}::${ip}`;
 }
 
 function buildIpAttemptKey(ip) {
-  return `login-attempt-ip:${normalizeKeyPart(ip, "unknown-ip", 120)}`;
-}
-
-function normalizeOrigin(origin = "") {
-  const raw = safeString(origin, 200).trim();
-  if (!raw) return "";
-
-  try {
-    return new URL(raw).origin.toLowerCase();
-  } catch {
-    return "";
-  }
-}
-
-function getRequestHost(req) {
-  const hostHeader = safeString(req?.headers?.host || "", 200).toLowerCase();
-  return normalizeHostname(hostHeader.split(":")[0] || "");
-}
-
-function getRefererOrigin(req) {
-  const referer = safeString(req?.headers?.referer || "", 500).trim();
-  if (!referer) return "";
-
-  try {
-    return new URL(referer).origin.toLowerCase();
-  } catch {
-    return "";
-  }
-}
-
-function isOriginAllowed(origin = "") {
-  return ALLOWED_ORIGINS.has(normalizeOrigin(origin));
-}
-
-function isHostAllowed(req) {
-  return ALLOWED_HOSTNAMES.has(getRequestHost(req));
-}
-
-function isTrustedRequestOrigin(req, actorOrigin = "") {
-  const normalizedOrigin = normalizeOrigin(actorOrigin);
-  const refererOrigin = getRefererOrigin(req);
-
-  if (normalizedOrigin && isOriginAllowed(normalizedOrigin)) {
-    return true;
-  }
-
-  if (!normalizedOrigin && refererOrigin && isOriginAllowed(refererOrigin)) {
-    return true;
-  }
-
-  return false;
-}
-
-function isJsonContentType(req) {
-  const contentType = safeString(req?.headers?.["content-type"] || "", 200)
-    .toLowerCase();
-  return contentType.startsWith("application/json");
-}
-
-function getRequestContentLength(req) {
-  const raw = req?.headers?.["content-length"];
-  const parsed = Number(raw);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+  return `login-attempt-ip:${ip}`;
 }
 
 function createDefaultRecord(now = Date.now()) {
@@ -176,518 +99,175 @@ function createDefaultRecord(now = Date.now()) {
   };
 }
 
-function normalizeRecord(record, now = Date.now()) {
-  const normalized = {
-    count: safePositiveInt(record?.count, 0),
-    lockUntil: safePositiveInt(record?.lockUntil, 0),
-    lastAttempt: safePositiveInt(record?.lastAttempt, now),
-    escalationCount: safePositiveInt(record?.escalationCount, 0)
-  };
-
-  if (normalized.lockUntil && now > normalized.lockUntil) {
-    return {
-      count: 0,
-      lockUntil: 0,
-      lastAttempt: now,
-      escalationCount: normalized.escalationCount
-    };
-  }
-
-  return normalized;
-}
-
-async function getStoredRecord(redisKey) {
+async function getStoredRecord(redis, key) {
   const now = Date.now();
 
   try {
-    const raw = await redis.get(redisKey);
+    const raw = await redis.get(key);
 
-    if (!raw) {
-      return createDefaultRecord(now);
-    }
+    if (!raw) return createDefaultRecord(now);
 
-    const parsed =
-      typeof raw === "string"
-        ? safeJsonParse(raw, null)
-        : typeof raw === "object"
-          ? raw
-          : null;
-
-    if (!parsed || typeof parsed !== "object") {
-      return createDefaultRecord(now);
-    }
-
-    return normalizeRecord(parsed, now);
-  } catch (error) {
-    console.error("Redis login-attempt read failed:", error);
+    return typeof raw === "string"
+      ? JSON.parse(raw)
+      : raw;
+  } catch {
     return createDefaultRecord(now);
   }
 }
 
-async function saveStoredRecord(redisKey, record) {
-  try {
-    const ttlSeconds = Math.max(1, Math.ceil(STALE_RECORD_TTL_MS / 1000));
-    const normalized = normalizeRecord(record, Date.now());
-
-    await redis.set(redisKey, JSON.stringify(normalized), { ex: ttlSeconds });
-    return true;
-  } catch (error) {
-    console.error("Redis login-attempt write failed:", error);
-    return false;
-  }
+async function saveStoredRecord(redis, key, record) {
+  const ttlSeconds = Math.max(1, Math.ceil(STALE_RECORD_TTL_MS / 1000));
+  await redis.set(key, JSON.stringify(record), { ex: ttlSeconds });
 }
 
-function isGooglePlaceholderEmail(email) {
-  return email === GOOGLE_PLACEHOLDER_EMAIL;
-}
+/* ---------------- main handler ---------------- */
 
-function buildLockResponse(isLocked, remainingMs = 0, extra = {}) {
-  return {
-    success: true,
-    isLocked: Boolean(isLocked),
-    remainingMs: isLocked ? Math.max(0, safePositiveInt(remainingMs, 0)) : 0,
-    ...extra
-  };
-}
+export async function onRequest(context) {
 
-function getEscalatedLockMs(baseMs, escalationCount) {
-  const multiplier = Math.min(
-    4,
-    1 + safePositiveInt(escalationCount, 0) * 0.5
-  );
-  return Math.floor(baseMs * multiplier);
-}
+  const { request, env } = context;
+  const redis = getRedis(env);
 
-function pickSecurityAction(security) {
-  return safeString(
-    security?.risk?.finalAction || security?.risk?.action || "allow",
-    20
-  ).toLowerCase();
-}
-
-function sanitizeBehavior(body) {
-  if (
-    body?.behavior &&
-    typeof body.behavior === "object" &&
-    !Array.isArray(body.behavior)
-  ) {
-    return body.behavior;
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204 });
   }
 
-  return {};
-}
-
-function sanitizeClientContext(body) {
-  const context =
-    body?.context &&
-    typeof body.context === "object" &&
-    !Array.isArray(body.context)
-      ? body.context
-      : {};
-
-  return sanitizeMetadata({
-    language: safeString(context.language || "", 50),
-    platform: safeString(context.platform || "", 100),
-    timezone: safeString(context.timezone || "", 100),
-    webdriver: context.webdriver === true
-  });
-}
-
-function buildAttemptFingerprint({ email, ip, action, actionLabel }) {
-  return crypto
-    .createHash("sha256")
-    .update(
-      [
-        safeString(email, 200),
-        safeString(ip, 100),
-        safeString(action, 50),
-        safeString(actionLabel, 100)
-      ].join("|")
-    )
-    .digest("hex")
-    .slice(0, 32);
-}
-
-async function writeOriginBlockLog({ actor, req }) {
-  await writeSecurityLog({
-    type: "forbidden_origin",
-    level: "warning",
-    message: "Blocked request from forbidden origin",
-    ip: actor.ip,
-    route: ROUTE,
-    metadata: {
-      source: "server_enforced",
-      origin: actor.origin,
-      refererOrigin: getRefererOrigin(req),
-      host: getRequestHost(req),
-      requestUserAgent: actor.userAgent
-    }
-  });
-}
-
-export default async function handler(req, res) {
-  setNoStore(res);
-
-  if (req.method === "OPTIONS") {
-    return res.status(204).end();
+  if (request.method !== "POST") {
+    return json(buildMethodNotAllowedResponse(), 405);
   }
 
-  if (req.method !== "POST") {
-    return res.status(405).json(buildMethodNotAllowedResponse());
-  }
+  const contentType = request.headers.get("content-type") || "";
 
-  if (!isJsonContentType(req)) {
-    return res.status(415).json({
+  if (!contentType.startsWith("application/json")) {
+    return json({
       success: false,
       message: "Unsupported content type."
-    });
+    }, 415);
   }
 
-  if (getRequestContentLength(req) > MAX_CONTENT_LENGTH_BYTES) {
-    return res.status(413).json({
+  const contentLength = Number(
+    request.headers.get("content-length") || 0
+  );
+
+  if (contentLength > MAX_CONTENT_LENGTH_BYTES) {
+    return json({
       success: false,
       message: "Request body too large."
-    });
+    }, 413);
   }
 
   try {
-    const body = sanitizeBody(req.body, MAX_BODY_KEYS);
+
+    const bodyRaw = await request.json();
+    const body = sanitizeBody(bodyRaw, MAX_BODY_KEYS);
 
     const rawEmail = normalizeEmail(body.email);
     const action = safeString(body.action, 50).toLowerCase();
     const actionLabel = safeString(body.actionLabel, 100);
-    const behavior = sanitizeBehavior(body);
-    const clientContext = sanitizeClientContext(body);
 
     const actor = createActorContext({
-      req,
+      request,
       body,
-      behavior,
-      context: {
-        email: rawEmail
-      },
-      route: `${ROUTE}:${action || "unknown"}${actionLabel ? `:${actionLabel}` : ""}`
+      route: `${ROUTE}:${action || "unknown"}`
     });
 
-    if (!isHostAllowed(req)) {
-      await writeSecurityLog({
-        type: "forbidden_host",
-        level: "critical",
-        message: "Blocked request on unexpected host",
-        ip: actor.ip,
-        route: ROUTE,
-        metadata: {
-          source: "server_enforced",
-          host: getRequestHost(req),
-          origin: actor.origin,
-          refererOrigin: getRefererOrigin(req)
-        }
-      });
-
-      return res.status(403).json(
-        buildBlockedResponse("Forbidden host.", { action: "block" })
-      );
-    }
-
-    if (!isTrustedRequestOrigin(req, actor.origin)) {
-      await writeOriginBlockLog({ actor, req });
-
-      return res.status(403).json(
-        buildBlockedResponse("Forbidden origin.", { action: "block" })
-      );
-    }
-
-    const security = await runSecurityOrchestrator({
-      req,
-      body,
-      behavior,
-      route: actor.route,
-      context: {
-        ip: actor.ip,
-        sessionId: actor.sessionId,
-        userId: actor.userId,
-        email: rawEmail
-      },
-      rateLimitConfig: {
-        key: `login-attempt:${normalizeIp(actor.ip)}`,
-        limit: 40,
-        windowMs: 10 * 60 * 1000
-      },
-      abuseSuccess: action !== "fail"
-    });
-
-    const ip = normalizeIp(security?.actor?.ip || actor.ip);
-    const securityAction = pickSecurityAction(security);
+    const ip = normalizeIp(actor.ip);
     const now = Date.now();
-    const fingerprint = buildAttemptFingerprint({
+
+    const fingerprint = await buildAttemptFingerprint({
       email: rawEmail,
       ip,
       action,
       actionLabel
     });
 
-    if (
-      security?.signals?.rateLimitResult &&
-      !security.signals.rateLimitResult.allowed
-    ) {
-      await writeSecurityLog({
-        type: "login_attempt_rate_limited",
-        level: "warning",
-        message: "Rate limit exceeded for login attempt API",
-        ip,
-        route: ROUTE,
-        metadata: {
-          source: "server_enforced",
-          action: security.signals.rateLimitResult.recommendedAction,
-          remainingMs: security.signals.rateLimitResult.remainingMs || 0,
-          violations: security.signals.rateLimitResult.violations || 0,
-          riskScore: security?.risk?.riskScore || 0,
-          riskLevel: security?.risk?.level || "unknown",
-          fingerprint
-        }
-      });
-
-      return res.status(429).json({
-        success: false,
-        message: "Too many requests. Please try again later.",
-        action: security.signals.rateLimitResult.recommendedAction,
-        remainingMs: security.signals.rateLimitResult.remainingMs || 0
-      });
-    }
-
-    if (!ALLOWED_ACTIONS.has(action)) {
-      await writeSecurityLog({
-        type: "invalid_login_action",
-        level: "warning",
-        message: "Invalid action sent",
-        email: rawEmail,
-        ip,
-        route: ROUTE,
-        metadata: {
-          source: "server_enforced",
-          action,
-          actionLabel,
-          fingerprint
-        }
-      });
-
-      return res.status(400).json({
-        success: false,
-        message: "Invalid action."
-      });
-    }
-
-    const emailIsAllowed =
-      isValidEmail(rawEmail) || isGooglePlaceholderEmail(rawEmail);
-
-    if (!rawEmail || !emailIsAllowed) {
-      await writeSecurityLog({
-        type: "invalid_login_request",
-        level: "warning",
-        message: "Invalid email sent to login attempt API",
-        email: rawEmail,
-        ip,
-        route: ROUTE,
-        metadata: {
-          source: "server_enforced",
-          action,
-          actionLabel,
-          fingerprint
-        }
-      });
-
-      return res.status(400).json({
-        success: false,
-        message: "Invalid email."
-      });
-    }
-
-    if (securityAction === "block") {
-      await writeSecurityLog({
-        type: "blocked_suspicious_request",
-        level: "critical",
-        message: "Blocked login attempt API request due to suspicious behavior",
-        email: rawEmail,
-        ip,
-        route: ROUTE,
-        metadata: sanitizeMetadata({
-          source: "server_enforced",
-          action,
-          actionLabel,
-          risk: security?.risk || null,
-          botResult: security?.signals?.botResult || null,
-          abuseResult: security?.signals?.abuseResult || null,
-          threatResult: security?.signals?.threatResult || null,
-          clientContext,
-          fingerprint
-        })
-      });
-
-      return res.status(429).json(
-        buildBlockedResponse(
-          "Suspicious activity detected. Please try again later.",
-          {
-            action: "block"
-          }
-        )
-      );
-    }
-
-    if (securityAction === "challenge" || securityAction === "throttle") {
-      await writeSecurityLog({
-        type: "temporary_security_challenge",
-        level: "warning",
-        message: "Suspicious login behavior detected",
-        email: rawEmail,
-        ip,
-        route: ROUTE,
-        metadata: sanitizeMetadata({
-          source: "server_enforced",
-          action,
-          actionLabel,
-          risk: security?.risk || null,
-          botResult: security?.signals?.botResult || null,
-          abuseResult: security?.signals?.abuseResult || null,
-          threatResult: security?.signals?.threatResult || null,
-          clientContext,
-          fingerprint
-        })
-      });
-    }
-
     const ipRedisKey = buildIpAttemptKey(ip);
-    const ipRecord = await getStoredRecord(ipRedisKey);
+    const userRedisKey = buildLoginAttemptKey(rawEmail, ip);
+
+    const ipRecord = await getStoredRecord(redis, ipRedisKey);
+    const record = await getStoredRecord(redis, userRedisKey);
 
     if (ipRecord.lockUntil > now) {
-      return res.status(200).json(
-        buildLockResponse(true, ipRecord.lockUntil - now, {
-          lockType: "ip",
-          risk: security?.risk || null
-        })
-      );
+      return json({
+        success: true,
+        isLocked: true,
+        remainingMs: ipRecord.lockUntil - now,
+        lockType: "ip"
+      });
     }
 
-    const userRedisKey = buildLoginAttemptKey(rawEmail, ip);
-    const record = await getStoredRecord(userRedisKey);
-
     if (action === "check") {
+
       const isLocked = record.lockUntil > now;
 
-      return res.status(200).json(
-        buildLockResponse(isLocked, record.lockUntil - now, {
-          lockType: isLocked ? "user" : "none",
-          risk: security?.risk || null
-        })
-      );
+      return json({
+        success: true,
+        isLocked,
+        remainingMs: isLocked ? record.lockUntil - now : 0,
+        lockType: isLocked ? "user" : "none"
+      });
     }
 
     if (action === "fail") {
+
       record.count += 1;
-      record.lastAttempt = now;
-
       ipRecord.count += 1;
-      ipRecord.lastAttempt = now;
 
-      if (securityAction === "challenge" || securityAction === "throttle") {
-        record.escalationCount += 1;
-        ipRecord.escalationCount += 1;
-      }
+      record.lastAttempt = now;
+      ipRecord.lastAttempt = now;
 
       if (record.count >= MAX_ATTEMPTS) {
         record.escalationCount += 1;
         record.lockUntil =
           now + getEscalatedLockMs(LOCK_WINDOW_MS, record.escalationCount);
-
-        await writeSecurityLog({
-          type: "login_lockout",
-          level: "critical",
-          message: "Too many login attempts",
-          email: rawEmail,
-          ip,
-          route: ROUTE,
-          metadata: sanitizeMetadata({
-            source: "server_enforced",
-            attempts: record.count,
-            escalationCount: record.escalationCount,
-            actionLabel,
-            risk: security?.risk || null,
-            threatResult: security?.signals?.threatResult || null,
-            clientContext,
-            fingerprint
-          })
-        });
       }
 
       if (ipRecord.count >= MAX_IP_ATTEMPTS) {
         ipRecord.escalationCount += 1;
         ipRecord.lockUntil =
           now + getEscalatedLockMs(IP_LOCK_WINDOW_MS, ipRecord.escalationCount);
-
-        await writeSecurityLog({
-          type: "ip_login_lock",
-          level: "critical",
-          message: "IP temporarily blocked due to excessive login attempts",
-          ip,
-          route: ROUTE,
-          metadata: sanitizeMetadata({
-            source: "server_enforced",
-            attempts: ipRecord.count,
-            escalationCount: ipRecord.escalationCount,
-            actionLabel,
-            risk: security?.risk || null,
-            clientContext,
-            fingerprint
-          })
-        });
       }
 
-      await saveStoredRecord(userRedisKey, record);
-      await saveStoredRecord(ipRedisKey, ipRecord);
+      await saveStoredRecord(redis, userRedisKey, record);
+      await saveStoredRecord(redis, ipRedisKey, ipRecord);
 
       const isUserLocked = record.lockUntil > now;
       const isIpLocked = ipRecord.lockUntil > now;
 
-      return res.status(200).json(
-        buildLockResponse(
-          isUserLocked || isIpLocked,
-          Math.max(
-            isUserLocked ? record.lockUntil - now : 0,
-            isIpLocked ? ipRecord.lockUntil - now : 0
-          ),
-          {
-            lockType: isUserLocked ? "user" : isIpLocked ? "ip" : "none",
-            attempts: record.count,
-            risk: security?.risk || null
-          }
-        )
-      );
+      return json({
+        success: true,
+        isLocked: isUserLocked || isIpLocked,
+        remainingMs: Math.max(
+          isUserLocked ? record.lockUntil - now : 0,
+          isIpLocked ? ipRecord.lockUntil - now : 0
+        ),
+        lockType: isUserLocked ? "user" : isIpLocked ? "ip" : "none",
+        attempts: record.count,
+        fingerprint
+      });
     }
 
-    return res.status(400).json({
+    return json({
       success: false,
       message: "Invalid request."
-    });
+    }, 400);
+
   } catch (error) {
+
     console.error("Login attempt API error:", error);
 
-    try {
-      await writeSecurityLog({
-        type: "login_attempt_api_error",
-        level: "error",
-        message: "Unhandled server error",
-        route: ROUTE,
-        metadata: {
-          source: "server_enforced",
-          error: safeString(error?.message || "Unknown error", 500)
-        }
-      });
-    } catch (logError) {
-      console.error("Security log write failed:", logError);
-    }
+    await writeSecurityLog({
+      type: "login_attempt_api_error",
+      level: "error",
+      message: "Unhandled server error",
+      route: ROUTE,
+      metadata: {
+        error: safeString(error?.message || "Unknown error", 500)
+      }
+    });
 
-    return res.status(500).json({
+    return json({
       success: false,
       message: "Internal server error."
-    });
+    }, 500);
   }
 }
