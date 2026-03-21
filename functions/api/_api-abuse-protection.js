@@ -1,4 +1,4 @@
-import { redis } from "./_redis.js";
+import { getRedis } from "./_redis.js";
 
 const WINDOW_MS = 10 * 60 * 1000;
 const STALE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -18,11 +18,11 @@ const MAX_ROUTE_LENGTH = 150;
 const MAX_REASON_LENGTH = 120;
 
 function stripControlChars(value = "") {
-  return String(value).replace(/[\u0000-\u001F\u007F]/g, "");
+  return String(value ?? "").replace(/[\u0000-\u001F\u007F]/g, "");
 }
 
 function safeString(value, maxLength = 200) {
-  return stripControlChars(value || "").trim().slice(0, maxLength);
+  return stripControlChars(value).trim().slice(0, maxLength);
 }
 
 function safeNumber(value, fallback = 0) {
@@ -53,7 +53,7 @@ function sanitizeKeyPart(value = "", maxLength = 120, fallback = "") {
   return cleaned || fallback;
 }
 
-function normalizeRoute(route) {
+function normalizeRoute(route = "") {
   const raw = safeString(route || "unknown-route", MAX_ROUTE_LENGTH * 2);
 
   if (!raw) return "unknown-route";
@@ -62,7 +62,7 @@ function normalizeRoute(route) {
 
   const cleaned = withoutQuery
     .replace(/\/{2,}/g, "/")
-    .replace(/[^a-zA-Z0-9/_-]/g, "")
+    .replace(/[^a-zA-Z0-9/_:-]/g, "")
     .trim()
     .toLowerCase()
     .slice(0, MAX_ROUTE_LENGTH);
@@ -71,11 +71,19 @@ function normalizeRoute(route) {
 }
 
 function normalizeSessionId(sessionId = "") {
-  return sanitizeKeyPart(sessionId || "no-session", MAX_SESSION_ID_LENGTH, "no-session");
+  return sanitizeKeyPart(
+    sessionId || "no-session",
+    MAX_SESSION_ID_LENGTH,
+    "no-session"
+  );
 }
 
 function normalizeUserId(userId = "") {
-  return sanitizeKeyPart(userId || "anon-user", MAX_USER_ID_LENGTH, "anon-user");
+  return sanitizeKeyPart(
+    userId || "anon-user",
+    MAX_USER_ID_LENGTH,
+    "anon-user"
+  );
 }
 
 function normalizeIp(ip = "") {
@@ -144,7 +152,7 @@ function getRouteClass(route = "") {
   return "normal";
 }
 
-function getRouteRiskWeight(route) {
+function getRouteRiskWeight(route = "") {
   const routeClass = getRouteClass(route);
 
   if (routeClass === "critical") return 3;
@@ -152,15 +160,18 @@ function getRouteRiskWeight(route) {
   return 1;
 }
 
-function normalizeRequestItem(item) {
+function normalizeRequestItem(item = {}) {
   const routeClass = safeString(item?.routeClass || "normal", 20).toLowerCase();
 
   return {
     at: safeTimestamp(item?.at, 0),
     route: normalizeRoute(item?.route),
-    success: Boolean(item?.success),
+    success: item?.success === true,
     weight: Math.max(1, safePositiveInt(item?.weight, 1, 10)),
-    routeClass: routeClass === "critical" || routeClass === "high" ? routeClass : "normal"
+    routeClass:
+      routeClass === "critical" || routeClass === "high"
+        ? routeClass
+        : "normal"
   };
 }
 
@@ -193,7 +204,7 @@ function normalizeRecord(raw, now) {
   };
 }
 
-async function getStoredRecord(redisKey, now) {
+async function getStoredRecord(redis, redisKey, now) {
   try {
     const raw = await redis.get(redisKey);
 
@@ -220,7 +231,7 @@ async function getStoredRecord(redisKey, now) {
   }
 }
 
-async function storeRecord(redisKey, record) {
+async function storeRecord(redis, redisKey, record) {
   try {
     const ttlSeconds = Math.max(1, Math.ceil(STALE_TTL_MS / 1000));
     const normalized = normalizeRecord(record, Date.now());
@@ -254,8 +265,13 @@ function decaySuspiciousHistory(record, now) {
     lastSuspiciousAt > 0 &&
     now - lastSuspiciousAt > SUSPICIOUS_HISTORY_DECAY_MS
   ) {
-    const decaySteps = Math.floor((now - lastSuspiciousAt) / SUSPICIOUS_HISTORY_DECAY_MS);
-    record.suspiciousEvents = Math.max(0, suspiciousEvents - Math.max(1, decaySteps));
+    const decaySteps = Math.floor(
+      (now - lastSuspiciousAt) / SUSPICIOUS_HISTORY_DECAY_MS
+    );
+    record.suspiciousEvents = Math.max(
+      0,
+      suspiciousEvents - Math.max(1, decaySteps)
+    );
     record.lastSuspiciousAt = now;
   }
 }
@@ -289,13 +305,14 @@ function applyPenalty(record, now, reason, abuseScore, routeClass = "normal") {
   record.penaltyCount = safePositiveInt(record.penaltyCount) + 1;
   record.lastPenaltyReason = safeString(reason, MAX_REASON_LENGTH);
   record.lastSuspiciousAt = now;
-  record.lastPenaltyAppliedAt = now;
 
   if (abuseScore >= 85) {
     record.suspiciousEvents = safePositiveInt(record.suspiciousEvents) + 2;
   } else {
     record.suspiciousEvents = safePositiveInt(record.suspiciousEvents) + 1;
   }
+
+  record.lastPenaltyAppliedAt = now;
 }
 
 function getRecommendedAction({
@@ -354,6 +371,7 @@ function getContainmentAction({ recommendedAction, routeClass }) {
 }
 
 export async function getApiAbuseSnapshot({
+  env = {},
   ip,
   sessionId,
   userId = ""
@@ -361,8 +379,9 @@ export async function getApiAbuseSnapshot({
   const now = Date.now();
   const key = getClientKey(ip, sessionId, userId);
   const redisKey = buildAbuseKey(key);
+  const redis = getRedis(env);
 
-  const record = await getStoredRecord(redisKey, now);
+  const record = await getStoredRecord(redis, redisKey, now);
 
   if (!record) {
     return {
@@ -386,12 +405,14 @@ export async function getApiAbuseSnapshot({
 }
 
 export async function clearApiAbuse({
+  env = {},
   ip,
   sessionId,
   userId = ""
 } = {}) {
   const key = getClientKey(ip, sessionId, userId);
   const redisKey = buildAbuseKey(key);
+  const redis = getRedis(env);
 
   try {
     await redis.del(redisKey);
@@ -403,6 +424,7 @@ export async function clearApiAbuse({
 }
 
 export async function trackApiAbuse({
+  env = {},
   ip,
   sessionId,
   userId = "",
@@ -415,15 +437,15 @@ export async function trackApiAbuse({
   const routeWeight = getRouteRiskWeight(safeRoute);
   const key = getClientKey(ip, sessionId, userId);
   const redisKey = buildAbuseKey(key);
+  const redis = getRedis(env);
 
-  let record = await getStoredRecord(redisKey, now);
+  let record = await getStoredRecord(redis, redisKey, now);
 
   if (!record) {
     record = createEmptyRecord(now);
   }
 
   decaySuspiciousHistory(record, now);
-
   record.updatedAt = now;
 
   if (routeClass === "critical") {
@@ -561,7 +583,7 @@ export async function trackApiAbuse({
     );
   }
 
-  await storeRecord(redisKey, record);
+  await storeRecord(redis, redisKey, record);
 
   const finalPenaltyActive = safeTimestamp(record.penaltyUntil, 0) > now;
 
