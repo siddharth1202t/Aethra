@@ -1,16 +1,6 @@
 import {
   getRecentSecurityEvents,
   appendSecurityEvent
-<<<<<<< HEAD
-} from "./_security-event-store.js";
-import { writeSecurityLog } from "./_security-log-writer.js";
-import {
-  safeString,
-  buildMethodNotAllowedResponse
-} from "./_api-security.js";
-import { getAdaptiveThreatMode } from "./_adaptive-threat-mode.js";
-import { getContainmentState } from "./_security-containment.js";
-=======
 } from "./_security-event-store.js";
 
 import { writeSecurityLog } from "./_security-log-writer.js";
@@ -22,7 +12,6 @@ import {
 
 import { getAdaptiveThreatMode } from "./_adaptive-threat-mode.js";
 import { getContainmentState } from "./_security-containment.js";
->>>>>>> 462287806a8da117fc6781c19b96bf5570233eaa
 
 const ROUTE = "/api/security-events";
 
