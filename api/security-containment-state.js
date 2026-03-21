@@ -5,8 +5,9 @@ import {
 } from "./_api-security.js";
 
 const ALLOWED_ORIGINS = new Set([
-  "https://aethra-gules.vercel.app",
-  "https://aethra-hb2h.vercel.app"
+  "127.0.0.1",
+  "https://aethra-hb2h.vercel.app",
+  "localhost"
 ]);
 
 function normalizeOrigin(origin = "") {
