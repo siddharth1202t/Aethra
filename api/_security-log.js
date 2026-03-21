@@ -14,13 +14,15 @@ import { validateFreshRequest } from "./_request-freshness.js";
 const ROUTE = "/api/security-log";
 
 const ALLOWED_ORIGINS = new Set([
-  "https://aethra-gules.vercel.app",
-  "https://aethra-hb2h.vercel.app"
+  "127.0.0.1",
+  "https://aethra-hb2h.vercel.app",
+  "localhost"
 ]);
 
 const ALLOWED_HOSTNAMES = new Set([
-  "aethra-gules.vercel.app",
-  "aethra-hb2h.vercel.app"
+  "127.0.0.1",
+  "aethra-hb2h.vercel.app",
+  "localhost"
 ]);
 
 const ALLOWED_CLIENT_TYPES = new Set([
