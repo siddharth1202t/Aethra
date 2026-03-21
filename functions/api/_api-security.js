@@ -20,7 +20,7 @@ const ACTOR_CLEANUP_INTERVAL_MS = 60 * 1000;
 let lastActorCleanupAt = 0;
 
 export function safeString(value, maxLength = 300) {
-  return String(value || "")
+  return String(value ?? "")
     .replace(/[\u0000-\u001F\u007F]/g, "")
     .trim()
     .slice(0, maxLength);
@@ -45,6 +45,30 @@ export function isPlainObject(value) {
   return Object.prototype.toString.call(value) === "[object Object]";
 }
 
+function getHeaderValue(headers, name) {
+  if (!headers) return "";
+
+  if (typeof headers.get === "function") {
+    return safeString(headers.get(name) || "", 1000);
+  }
+
+  if (isPlainObject(headers)) {
+    const direct = headers[name];
+    if (direct !== undefined && direct !== null) {
+      return safeString(direct, 1000);
+    }
+
+    const lowerName = String(name).toLowerCase();
+    for (const [key, value] of Object.entries(headers)) {
+      if (String(key).toLowerCase() === lowerName) {
+        return safeString(value, 1000);
+      }
+    }
+  }
+
+  return "";
+}
+
 function normalizeIp(value = "") {
   let ip = safeString(value || "unknown", 100);
 
@@ -59,22 +83,24 @@ function normalizeIp(value = "") {
 }
 
 export function getClientIp(req) {
-  const forwarded = req?.headers?.["x-forwarded-for"];
+  const headers = req?.headers;
+  const forwarded = getHeaderValue(headers, "x-forwarded-for");
 
-  if (typeof forwarded === "string" && forwarded.length > 0) {
+  if (forwarded) {
     return normalizeIp(forwarded.split(",")[0]?.trim());
   }
 
-  if (Array.isArray(forwarded) && forwarded.length > 0) {
-    return normalizeIp(String(forwarded[0]).split(",")[0]?.trim());
+  const cfIp = getHeaderValue(headers, "cf-connecting-ip");
+  if (cfIp) {
+    return normalizeIp(cfIp);
   }
 
-  const realIp = req?.headers?.["x-real-ip"];
-  if (typeof realIp === "string" && realIp.length > 0) {
-    return normalizeIp(realIp.trim());
+  const realIp = getHeaderValue(headers, "x-real-ip");
+  if (realIp) {
+    return normalizeIp(realIp);
   }
 
-  return normalizeIp(req?.socket?.remoteAddress || "unknown");
+  return normalizeIp(req?.ip || req?.socket?.remoteAddress || "unknown");
 }
 
 export function normalizeOrigin(origin = "") {
@@ -152,7 +178,9 @@ export function sanitizeMetadata(
   if (Array.isArray(value)) {
     return value
       .slice(0, maxArrayItems)
-      .map((item) => sanitizeMetadata(item, depth + 1, maxDepth, maxKeys, maxArrayItems));
+      .map((item) =>
+        sanitizeMetadata(item, depth + 1, maxDepth, maxKeys, maxArrayItems)
+      );
   }
 
   if (isPlainObject(value)) {
@@ -262,7 +290,39 @@ function cleanupActorMemory(force = false) {
 }
 
 function getActorKey(ip, sessionId = "") {
-  return `${normalizeIp(ip || "unknown")}::${safeString(sessionId || "no-session", 120).replace(/[^a-zA-Z0-9._:@/-]/g, "") || "no-session"}`;
+  const normalizedSession = safeString(sessionId || "no-session", 120).replace(
+    /[^a-zA-Z0-9._:@/-]/g,
+    ""
+  );
+
+  return `${normalizeIp(ip || "unknown")}::${normalizedSession || "no-session"}`;
+}
+
+function getActorRiskBonus(actorMemory = null) {
+  if (!actorMemory || typeof actorMemory !== "object") {
+    return 0;
+  }
+
+  let bonus = 0;
+
+  const suspiciousCount = safePositiveInt(actorMemory.suspiciousCount, 0, 1000);
+  const blockedCount = safePositiveInt(actorMemory.blockedCount, 0, 1000);
+  const challengedCount = safePositiveInt(actorMemory.challengedCount, 0, 1000);
+  const highestRisk = safePositiveInt(actorMemory.highestRisk, 0, 100);
+
+  bonus += Math.min(20, suspiciousCount * 2);
+  bonus += Math.min(20, blockedCount * 5);
+  bonus += Math.min(10, challengedCount * 2);
+
+  if (highestRisk >= 90) {
+    bonus += 20;
+  } else if (highestRisk >= 75) {
+    bonus += 12;
+  } else if (highestRisk >= 60) {
+    bonus += 6;
+  }
+
+  return Math.min(40, bonus);
 }
 
 function recordSuspiciousEvent({
@@ -290,6 +350,11 @@ function recordSuspiciousEvent({
 
 function updateSecurityMode() {
   const now = Date.now();
+
+  if (now - safeNumber(securityStateStore.updatedAt, 0) > SECURITY_MODE_TTL_MS) {
+    securityStateStore.mode = "normal";
+    securityStateStore.lastEscalationReason = "ttl_reset";
+  }
 
   securityStateStore.suspiciousEvents = securityStateStore.suspiciousEvents.filter(
     (item) => item && now - safeNumber(item.at, 0) <= SUSPICIOUS_EVENT_WINDOW_MS
@@ -608,8 +673,8 @@ export async function runRouteSecurity({
 } = {}) {
   const normalizedRoute = normalizeRoute(route);
   const ip = getClientIp(req);
-  const origin = normalizeOrigin(req?.headers?.origin || "");
-  const requestUserAgent = safeString(req?.headers?.["user-agent"] || "", 500);
+  const origin = normalizeOrigin(getHeaderValue(req?.headers, "origin"));
+  const requestUserAgent = safeString(getHeaderValue(req?.headers, "user-agent"), 500);
 
   const originAllowed = isAllowedOrigin(origin, allowedOrigins);
   const securityModeBefore = updateSecurityMode();
@@ -657,7 +722,8 @@ export async function runRouteSecurity({
       {
         ...(isPlainObject(behavior) ? behavior : {}),
         route: normalizedRoute,
-        sessionId: safeString(sessionId || "", 120)
+        sessionId: safeString(sessionId || "", 120),
+        body: sanitizeBody(body, 20)
       },
       req
     );
