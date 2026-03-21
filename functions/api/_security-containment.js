@@ -3,7 +3,10 @@ import { appendSecurityEvent } from "./_security-event-store.js";
 
 const CONTAINMENT_KEY = "security:containment:global";
 const CONTAINMENT_TTL_MS = 24 * 60 * 60 * 1000;
-const CONTAINMENT_TTL_SECONDS = Math.max(1, Math.ceil(CONTAINMENT_TTL_MS / 1000));
+const CONTAINMENT_TTL_SECONDS = Math.max(
+  1,
+  Math.ceil(CONTAINMENT_TTL_MS / 1000)
+);
 const MAX_FUTURE_TIME_MS = 7 * 24 * 60 * 60 * 1000;
 
 const ALLOWED_MODES = new Set([
@@ -29,7 +32,7 @@ const MODE_RANK = {
 };
 
 function safeString(value, maxLength = 200) {
-  return String(value || "")
+  return String(value ?? "")
     .replace(/[\u0000-\u001F\u007F]/g, "")
     .trim()
     .slice(0, maxLength);
@@ -69,7 +72,6 @@ function normalizeMode(mode = "") {
 
 function normalizeRoute(value = "") {
   const raw = safeString(value || "", 300);
-
   if (!raw) return "";
 
   return raw
@@ -85,16 +87,6 @@ function normalizeActionType(value = "") {
   return safeString(value || "", 50).toLowerCase();
 }
 
-function sanitizeFlags(flags = {}) {
-  const output = {};
-
-  for (const key of ALLOWED_FLAGS) {
-    output[key] = safeBoolean(flags?.[key]);
-  }
-
-  return output;
-}
-
 function createDefaultFlags() {
   return {
     freezeRegistrations: false,
@@ -107,17 +99,19 @@ function createDefaultFlags() {
   };
 }
 
-function createDefaultContainmentState() {
-  return {
-    mode: "normal",
-    reason: "",
-    updatedAt: Date.now(),
-    expiresAt: 0,
-    flags: createDefaultFlags()
-  };
+function sanitizeFlags(flags = {}) {
+  const base = createDefaultFlags();
+  const source = flags && typeof flags === "object" ? flags : {};
+  const output = {};
+
+  for (const key of ALLOWED_FLAGS) {
+    output[key] = safeBoolean(source[key] ?? base[key]);
+  }
+
+  return output;
 }
 
-function getDefaultFlagsForMode(mode) {
+function getDefaultFlagsForMode(mode = "normal") {
   const normalizedMode = normalizeMode(mode);
 
   if (normalizedMode === "lockdown") {
@@ -147,67 +141,85 @@ function getDefaultFlagsForMode(mode) {
   return createDefaultFlags();
 }
 
+function createDefaultContainmentState() {
+  return {
+    mode: "normal",
+    reason: "",
+    updatedAt: Date.now(),
+    expiresAt: 0,
+    flags: createDefaultFlags()
+  };
+}
+
 function normalizeContainmentState(raw) {
   const base = createDefaultContainmentState();
-  const nowMax = getNowMax();
   const state = raw && typeof raw === "object" ? raw : {};
+  const nowMax = getNowMax();
 
-  const normalizedMode = normalizeMode(state.mode || base.mode);
-  const mergedFlags = sanitizeFlags({
-    ...base.flags,
+  const mode = normalizeMode(state.mode || base.mode);
+  const reason = safeString(state.reason || "", 300);
+  const updatedAt = safeInt(state.updatedAt, base.updatedAt, 0, nowMax);
+  const expiresAt = safeInt(state.expiresAt, 0, 0, nowMax);
+
+  let flags = sanitizeFlags({
+    ...getDefaultFlagsForMode(mode),
     ...(state.flags || {})
   });
 
-  if (normalizedMode === "lockdown") {
-    mergedFlags.lockdown = true;
-  }
-
-  if (normalizedMode === "normal") {
+  if (mode === "normal") {
     return createDefaultContainmentState();
   }
 
+  if (mode === "lockdown") {
+    flags = {
+      ...getDefaultFlagsForMode("lockdown"),
+      ...flags,
+      lockdown: true
+    };
+  }
+
   return {
-    mode: normalizedMode,
-    reason: safeString(state.reason || "", 300),
-    updatedAt: safeInt(state.updatedAt, Date.now(), 0, nowMax),
-    expiresAt: safeInt(state.expiresAt, 0, 0, nowMax),
-    flags: mergedFlags
+    mode,
+    reason,
+    updatedAt,
+    expiresAt,
+    flags: sanitizeFlags(flags)
   };
 }
 
 function getStrongerMode(a = "normal", b = "normal") {
   const modeA = normalizeMode(a);
   const modeB = normalizeMode(b);
-
   return MODE_RANK[modeA] >= MODE_RANK[modeB] ? modeA : modeB;
 }
 
 function mergeFlagsForEscalation(currentFlags = {}, nextFlags = {}) {
+  const current = sanitizeFlags(currentFlags);
+  const next = sanitizeFlags(nextFlags);
   const output = {};
 
   for (const key of ALLOWED_FLAGS) {
-    output[key] = safeBoolean(currentFlags?.[key]) || safeBoolean(nextFlags?.[key]);
+    output[key] = current[key] || next[key];
   }
 
   return output;
 }
 
 function isContainmentExpired(state, now = Date.now()) {
-  return state.expiresAt > 0 && now > state.expiresAt;
+  const expiresAt = safeInt(state?.expiresAt, 0, 0, getNowMax());
+  return expiresAt > 0 && now > expiresAt;
 }
 
 function statesAreEquivalent(a = {}, b = {}) {
-  const stateA = normalizeContainmentState(a);
-  const stateB = normalizeContainmentState(b);
+  const left = normalizeContainmentState(a);
+  const right = normalizeContainmentState(b);
 
-  if (stateA.mode !== stateB.mode) return false;
-  if (safeString(stateA.reason || "", 300) !== safeString(stateB.reason || "", 300)) return false;
-  if (safeInt(stateA.expiresAt, 0, 0, getNowMax()) !== safeInt(stateB.expiresAt, 0, 0, getNowMax())) {
-    return false;
-  }
+  if (left.mode !== right.mode) return false;
+  if (left.reason !== right.reason) return false;
+  if (left.expiresAt !== right.expiresAt) return false;
 
   for (const key of ALLOWED_FLAGS) {
-    if (safeBoolean(stateA.flags?.[key]) !== safeBoolean(stateB.flags?.[key])) {
+    if (safeBoolean(left.flags?.[key]) !== safeBoolean(right.flags?.[key])) {
       return false;
     }
   }
@@ -216,16 +228,18 @@ function statesAreEquivalent(a = {}, b = {}) {
 }
 
 function buildContainmentMetadata(state = {}) {
+  const normalized = normalizeContainmentState(state);
+
   return {
-    mode: normalizeMode(state.mode || "normal"),
-    expiresAt: safeInt(state.expiresAt, 0, 0, getNowMax()),
-    freezeRegistrations: safeBoolean(state.flags?.freezeRegistrations),
-    disableProfileEdits: safeBoolean(state.flags?.disableProfileEdits),
-    lockAdminWrites: safeBoolean(state.flags?.lockAdminWrites),
-    readOnlyMode: safeBoolean(state.flags?.readOnlyMode),
-    disableUploads: safeBoolean(state.flags?.disableUploads),
-    forceCaptcha: safeBoolean(state.flags?.forceCaptcha),
-    lockdown: safeBoolean(state.flags?.lockdown)
+    mode: normalized.mode,
+    expiresAt: normalized.expiresAt,
+    freezeRegistrations: normalized.flags.freezeRegistrations,
+    disableProfileEdits: normalized.flags.disableProfileEdits,
+    lockAdminWrites: normalized.flags.lockAdminWrites,
+    readOnlyMode: normalized.flags.readOnlyMode,
+    disableUploads: normalized.flags.disableUploads,
+    forceCaptcha: normalized.flags.forceCaptcha,
+    lockdown: normalized.flags.lockdown
   };
 }
 
@@ -240,9 +254,9 @@ async function recordContainmentEvent({
 }) {
   try {
     await appendSecurityEvent({
-      type,
-      severity,
-      action,
+      type: safeString(type || "containment_updated", 60),
+      severity: safeString(severity || "warning", 20).toLowerCase(),
+      action: safeString(action || "contain", 30).toLowerCase(),
       mode: normalizeMode(nextState?.mode || "normal"),
       reason: safeString(reason || "", 300),
       message: safeString(message || "", 500),
@@ -269,9 +283,6 @@ async function getStoredContainmentState() {
 
     if (typeof raw === "string") {
       const parsed = safeJsonParse(raw, null);
-      if (!parsed || typeof parsed !== "object") {
-        return createDefaultContainmentState();
-      }
       return normalizeContainmentState(parsed);
     }
 
@@ -289,9 +300,11 @@ async function getStoredContainmentState() {
 async function storeContainmentState(state) {
   try {
     const normalized = normalizeContainmentState(state);
+
     await redis.set(CONTAINMENT_KEY, JSON.stringify(normalized), {
       ex: CONTAINMENT_TTL_SECONDS
     });
+
     return true;
   } catch (error) {
     console.error("Containment write failed:", error);
@@ -302,25 +315,26 @@ async function storeContainmentState(state) {
 export async function getContainmentState() {
   const state = await getStoredContainmentState();
 
-  if (isContainmentExpired(state)) {
-    const previousState = normalizeContainmentState(state);
-    const reset = createDefaultContainmentState();
-    await storeContainmentState(reset);
-
-    await recordContainmentEvent({
-      type: "containment_expired_reset",
-      severity: "info",
-      action: "observe",
-      reason: "containment_expired",
-      previousState,
-      nextState: reset,
-      message: "Containment state expired and was reset to normal."
-    });
-
-    return reset;
+  if (!isContainmentExpired(state)) {
+    return normalizeContainmentState(state);
   }
 
-  return normalizeContainmentState(state);
+  const previousState = normalizeContainmentState(state);
+  const resetState = createDefaultContainmentState();
+
+  await storeContainmentState(resetState);
+
+  await recordContainmentEvent({
+    type: "containment_expired_reset",
+    severity: "info",
+    action: "observe",
+    reason: "containment_expired",
+    previousState,
+    nextState: resetState,
+    message: "Containment state expired and was reset to normal."
+  });
+
+  return resetState;
 }
 
 export async function setContainmentState({
@@ -330,74 +344,81 @@ export async function setContainmentState({
   flags = {},
   allowDowngrade = false
 } = {}) {
-  const normalizedMode = normalizeMode(mode);
-  const normalizedReason = safeString(reason || "", 300);
+  const requestedMode = normalizeMode(mode);
+  const requestedReason = safeString(reason || "", 300);
+  const requestedDurationMs = Math.max(0, safeNumber(durationMs, 0));
+  const requestedFlags = sanitizeFlags(flags);
   const now = Date.now();
-  const safeDurationMs = Math.max(0, safeNumber(durationMs, 0));
-  const sanitizedRequestedFlags = sanitizeFlags(flags);
 
   const currentState = await getContainmentState();
 
-  let finalMode = normalizedMode;
+  let finalMode = requestedMode;
   let finalFlags = {
-    ...getDefaultFlagsForMode(normalizedMode),
-    ...sanitizedRequestedFlags
+    ...getDefaultFlagsForMode(requestedMode),
+    ...requestedFlags
   };
 
   if (!allowDowngrade) {
-    const strongerMode = getStrongerMode(currentState.mode, normalizedMode);
+    const strongerMode = getStrongerMode(currentState.mode, requestedMode);
 
-    if (strongerMode !== normalizedMode) {
+    if (strongerMode !== requestedMode) {
       finalMode = strongerMode;
       finalFlags = mergeFlagsForEscalation(
         currentState.flags,
         {
-          ...getDefaultFlagsForMode(normalizedMode),
-          ...sanitizedRequestedFlags
+          ...getDefaultFlagsForMode(requestedMode),
+          ...requestedFlags
         }
       );
-    } else if (strongerMode === currentState.mode && strongerMode === normalizedMode) {
+    } else if (
+      strongerMode === currentState.mode &&
+      strongerMode === requestedMode
+    ) {
       finalFlags = mergeFlagsForEscalation(currentState.flags, finalFlags);
     }
   }
 
   if (finalMode === "normal") {
     finalFlags = createDefaultFlags();
-  }
-
-  if (finalMode === "lockdown") {
+  } else if (finalMode === "lockdown") {
     finalFlags = {
       ...getDefaultFlagsForMode("lockdown"),
       ...mergeFlagsForEscalation(getDefaultFlagsForMode("lockdown"), finalFlags),
       lockdown: true
     };
+  } else {
+    finalFlags = sanitizeFlags(finalFlags);
   }
 
-  const nextState = {
+  const nextState = normalizeContainmentState({
     mode: finalMode,
-    reason: normalizedReason,
+    reason: requestedReason,
     updatedAt: now,
-    expiresAt: safeDurationMs > 0 ? now + safeDurationMs : 0,
-    flags: sanitizeFlags(finalFlags)
-  };
+    expiresAt: requestedDurationMs > 0 ? now + requestedDurationMs : 0,
+    flags: finalFlags
+  });
 
   const ok = await storeContainmentState(nextState);
 
   if (ok && !statesAreEquivalent(currentState, nextState)) {
     await recordContainmentEvent({
-      type: finalMode === "normal" ? "containment_cleared" : "containment_updated",
+      type: nextState.mode === "normal" ? "containment_cleared" : "containment_updated",
       severity:
-        finalMode === "lockdown"
+        nextState.mode === "lockdown"
           ? "critical"
-          : finalMode === "normal"
+          : nextState.mode === "normal"
             ? "info"
             : "warning",
-      action: finalMode === "normal" ? "observe" : "contain",
-      reason: normalizedReason || (finalMode === "normal" ? "containment_cleared" : "containment_updated"),
+      action: nextState.mode === "normal" ? "observe" : "contain",
+      reason:
+        requestedReason ||
+        (nextState.mode === "normal"
+          ? "containment_cleared"
+          : "containment_updated"),
       previousState: currentState,
       nextState,
       message:
-        finalMode === "normal"
+        nextState.mode === "normal"
           ? "Containment state returned to normal."
           : "Containment state updated."
     });
@@ -411,24 +432,24 @@ export async function setContainmentState({
 
 export async function clearContainmentState() {
   const previousState = await getContainmentState();
-  const state = createDefaultContainmentState();
-  const ok = await storeContainmentState(state);
+  const clearedState = createDefaultContainmentState();
+  const ok = await storeContainmentState(clearedState);
 
-  if (ok && !statesAreEquivalent(previousState, state)) {
+  if (ok && !statesAreEquivalent(previousState, clearedState)) {
     await recordContainmentEvent({
       type: "containment_cleared",
       severity: "info",
       action: "observe",
       reason: "manual_clear",
       previousState,
-      nextState: state,
+      nextState: clearedState,
       message: "Containment state was cleared manually."
     });
   }
 
   return {
     ok,
-    state
+    state: clearedState
   };
 }
 
@@ -439,8 +460,8 @@ export async function evaluateContainment({
   actionType = ""
 } = {}) {
   const state = await getContainmentState();
-  const normalizedRoute = normalizeRoute(route || "");
-  const normalizedActionType = normalizeActionType(actionType || "");
+  const normalizedRoute = normalizeRoute(route);
+  const normalizedActionType = normalizeActionType(actionType);
 
   let blocked = false;
   let reason = "";
@@ -450,39 +471,40 @@ export async function evaluateContainment({
     blocked = true;
     action = "block";
     reason = "lockdown_active";
-  }
-
-  if (!blocked && state.flags.readOnlyMode && isWriteAction) {
+  } else if (state.flags.readOnlyMode && isWriteAction) {
     blocked = true;
     action = "block";
     reason = "read_only_mode_active";
-  }
-
-  if (!blocked && state.flags.freezeRegistrations && normalizedRoute.includes("signup")) {
+  } else if (
+    state.flags.freezeRegistrations &&
+    normalizedRoute.includes("signup")
+  ) {
     blocked = true;
     action = "block";
     reason = "registrations_frozen";
-  }
-
-  if (!blocked && state.flags.disableProfileEdits && normalizedRoute.includes("profile")) {
+  } else if (
+    state.flags.disableProfileEdits &&
+    normalizedRoute.includes("profile")
+  ) {
     blocked = true;
     action = "block";
     reason = "profile_edits_disabled";
-  }
-
-  if (!blocked && state.flags.disableUploads && normalizedActionType === "upload") {
+  } else if (
+    state.flags.disableUploads &&
+    normalizedActionType === "upload"
+  ) {
     blocked = true;
     action = "block";
     reason = "uploads_disabled";
-  }
-
-  if (!blocked && state.flags.lockAdminWrites && isAdminRoute && isWriteAction) {
+  } else if (
+    state.flags.lockAdminWrites &&
+    isAdminRoute &&
+    isWriteAction
+  ) {
     blocked = true;
     action = "block";
     reason = "admin_writes_locked";
-  }
-
-  if (!blocked && state.flags.forceCaptcha) {
+  } else if (state.flags.forceCaptcha) {
     action = "challenge";
     reason = "force_captcha_enabled";
   }
@@ -492,8 +514,8 @@ export async function evaluateContainment({
     blocked,
     action,
     reason,
-    flags: state.flags,
-    expiresAt: state.expiresAt,
-    updatedAt: state.updatedAt
+    flags: sanitizeFlags(state.flags),
+    expiresAt: safeInt(state.expiresAt, 0, 0, getNowMax()),
+    updatedAt: safeInt(state.updatedAt, Date.now(), 0, getNowMax())
   };
 }

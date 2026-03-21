@@ -1,4 +1,4 @@
-import { redis } from "./_redis.js";
+import { getRedis } from "./_redis.js";
 import { writeSecurityLog } from "./_security-log-writer.js";
 import { createActorContext } from "./_actor-context.js";
 import { runSecurityOrchestrator } from "./_security-orchestrator.js";
@@ -20,21 +20,19 @@ const STALE_RECORD_TTL_MS = 24 * 60 * 60 * 1000;
 
 const ROUTE = "/api/signup-attempt";
 
-const ALLOWED_ORIGINS = new Set([
-  "127.0.0.1",
-  "https://aethra-hb2h.vercel.app",
-  "localhost"
-]);
-
 const ALLOWED_ACTIONS = new Set(["check", "fail"]);
 const GOOGLE_PLACEHOLDER_EMAIL = "google-signup";
 
-function safeJsonParse(raw, fallback = null) {
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return fallback;
-  }
+/* ---------- helpers ---------- */
+
+function json(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      "content-type": "application/json",
+      "cache-control": "no-store"
+    }
+  });
 }
 
 function normalizeEmail(email) {
@@ -44,39 +42,18 @@ function normalizeEmail(email) {
 function normalizeIp(ip) {
   let value = safeString(ip || "unknown", 100);
 
-  if (!value) return "unknown";
-
-  if (value.startsWith("::ffff:")) {
-    value = value.slice(7);
-  }
+  if (value.startsWith("::ffff:")) value = value.slice(7);
 
   value = value.replace(/[^a-fA-F0-9:.,]/g, "").slice(0, 100);
   return value || "unknown";
 }
 
-function normalizeKeyPart(value, fallback = "", maxLength = 160) {
-  const cleaned = safeString(value || "", maxLength).replace(/[^a-zA-Z0-9._:@/-]/g, "");
-  return cleaned || fallback;
-}
-
-function isValidEmail(email) {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
-}
-
-function getKey(email, ip) {
-  return `${normalizeKeyPart(email, "unknown-email", 220)}::${normalizeKeyPart(ip, "unknown-ip", 120)}`;
-}
-
 function buildSignupAttemptKey(email, ip) {
-  return `signup-attempt:${safeString(getKey(email, ip), 260)}`;
+  return `signup-attempt:${email}::${ip}`;
 }
 
 function buildIpAttemptKey(ip) {
-  return `signup-attempt-ip:${normalizeKeyPart(ip, "unknown-ip", 120)}`;
-}
-
-function isOriginAllowed(origin = "") {
-  return ALLOWED_ORIGINS.has(safeString(origin, 200).trim().toLowerCase());
+  return `signup-attempt-ip:${ip}`;
 }
 
 function createDefaultRecord(now = Date.now()) {
@@ -88,142 +65,67 @@ function createDefaultRecord(now = Date.now()) {
   };
 }
 
-function normalizeRecord(record, now = Date.now()) {
-  const normalized = {
-    count: safePositiveInt(record?.count, 0),
-    lockUntil: safePositiveInt(record?.lockUntil, 0),
-    lastAttempt: safePositiveInt(record?.lastAttempt, now),
-    escalationCount: safePositiveInt(record?.escalationCount, 0)
-  };
-
-  if (normalized.lockUntil && now > normalized.lockUntil) {
-    return {
-      count: 0,
-      lockUntil: 0,
-      lastAttempt: now,
-      escalationCount: normalized.escalationCount
-    };
-  }
-
-  return normalized;
-}
-
-async function getStoredRecord(redisKey) {
+async function getStoredRecord(redis, key) {
   const now = Date.now();
 
   try {
-    const raw = await redis.get(redisKey);
+    const raw = await redis.get(key);
 
-    if (!raw) {
-      return createDefaultRecord(now);
-    }
+    if (!raw) return createDefaultRecord(now);
 
-    const parsed =
-      typeof raw === "string"
-        ? safeJsonParse(raw, null)
-        : typeof raw === "object"
-          ? raw
-          : null;
-
-    if (!parsed || typeof parsed !== "object") {
-      return createDefaultRecord(now);
-    }
-
-    return normalizeRecord(parsed, now);
-  } catch (error) {
-    console.error("Redis signup-attempt read failed:", error);
+    return typeof raw === "string" ? JSON.parse(raw) : raw;
+  } catch {
     return createDefaultRecord(now);
   }
 }
 
-async function saveStoredRecord(redisKey, record) {
-  try {
-    const ttlSeconds = Math.max(1, Math.ceil(STALE_RECORD_TTL_MS / 1000));
-    const normalized = normalizeRecord(record, Date.now());
+async function saveStoredRecord(redis, key, record) {
+  const ttlSeconds = Math.max(1, Math.ceil(STALE_RECORD_TTL_MS / 1000));
+  await redis.set(key, JSON.stringify(record), { ex: ttlSeconds });
+}
 
-    await redis.set(redisKey, JSON.stringify(normalized), { ex: ttlSeconds });
-
-    return true;
-  } catch (error) {
-    console.error("Redis signup-attempt write failed:", error);
-    return false;
-  }
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
 function isGooglePlaceholderEmail(email) {
   return email === GOOGLE_PLACEHOLDER_EMAIL;
 }
 
-function buildLockResponse(isLocked, remainingMs = 0, extra = {}) {
-  return {
-    success: true,
-    isLocked,
-    remainingMs: isLocked ? Math.max(0, safePositiveInt(remainingMs, 0)) : 0,
-    ...extra
-  };
-}
-
 function getEscalatedLockMs(baseMs, escalationCount) {
-  const multiplier = Math.min(4, 1 + safePositiveInt(escalationCount, 0) * 0.5);
+  const multiplier = Math.min(
+    4,
+    1 + safePositiveInt(escalationCount, 0) * 0.5
+  );
   return Math.floor(baseMs * multiplier);
 }
 
-function pickSecurityAction(security) {
-  return safeString(
-    security?.risk?.finalAction || security?.risk?.action || "allow",
-    20
-  ).toLowerCase();
-}
+/* ---------- main handler ---------- */
 
-export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    return res.status(405).json(buildMethodNotAllowedResponse());
+export async function onRequest(context) {
+  const { request, env } = context;
+  const redis = getRedis(env);
+
+  if (request.method !== "POST") {
+    return json(buildMethodNotAllowedResponse(), 405);
   }
 
   try {
-    const body = sanitizeBody(req.body, 20);
+    const bodyRaw = await request.json();
+    const body = sanitizeBody(bodyRaw, 20);
 
     const rawEmail = normalizeEmail(body.email);
     const action = safeString(body.action, 50).toLowerCase();
-    const actionLabel = safeString(body.actionLabel, 100);
-    const behavior =
-      body.behavior && typeof body.behavior === "object" && !Array.isArray(body.behavior)
-        ? body.behavior
-        : {};
 
     const actor = createActorContext({
-      req,
+      request,
       body,
-      behavior,
-      context: {
-        email: rawEmail
-      },
-      route: `${ROUTE}:${action || "unknown"}${actionLabel ? `:${actionLabel}` : ""}`
+      route: `${ROUTE}:${action || "unknown"}`
     });
 
-    if (!isOriginAllowed(actor.origin)) {
-      await writeSecurityLog({
-        type: "forbidden_signup_origin",
-        level: "warning",
-        message: "Blocked request from forbidden origin on signup-attempt API",
-        ip: actor.ip,
-        route: ROUTE,
-        metadata: {
-          source: "server_enforced",
-          origin: actor.origin,
-          requestUserAgent: actor.userAgent
-        }
-      });
-
-      return res.status(403).json(
-        buildBlockedResponse("Forbidden origin.", { action: "block" })
-      );
-    }
-
     const security = await runSecurityOrchestrator({
-      req,
+      request,
       body,
-      behavior,
       route: actor.route,
       context: {
         ip: actor.ip,
@@ -240,241 +142,112 @@ export default async function handler(req, res) {
     });
 
     const ip = normalizeIp(security.actor.ip);
-    const securityAction = pickSecurityAction(security);
-
-    if (security.signals.rateLimitResult && !security.signals.rateLimitResult.allowed) {
-      await writeSecurityLog({
-        type: "signup_attempt_rate_limited",
-        level: "warning",
-        message: "Rate limit exceeded for signup attempt API",
-        ip,
-        route: ROUTE,
-        metadata: {
-          source: "server_enforced",
-          action: security.signals.rateLimitResult.recommendedAction,
-          remainingMs: security.signals.rateLimitResult.remainingMs || 0,
-          violations: security.signals.rateLimitResult.violations || 0,
-          riskScore: security.risk.riskScore,
-          riskLevel: security.risk.level
-        }
-      });
-
-      return res.status(429).json({
-        success: false,
-        message: "Too many requests. Please try again later.",
-        action: security.signals.rateLimitResult.recommendedAction,
-        remainingMs: security.signals.rateLimitResult.remainingMs || 0
-      });
-    }
+    const securityAction = security?.risk?.finalAction || "allow";
 
     if (!ALLOWED_ACTIONS.has(action)) {
-      await writeSecurityLog({
-        type: "invalid_signup_action",
-        level: "warning",
-        message: "Invalid action sent to signup-attempt API",
-        email: rawEmail,
-        ip,
-        route: ROUTE,
-        metadata: {
-          source: "server_enforced",
-          action
-        }
-      });
-
-      return res.status(400).json({
+      return json({
         success: false,
         message: "Invalid action."
-      });
+      }, 400);
     }
 
-    const emailIsAllowed = isValidEmail(rawEmail) || isGooglePlaceholderEmail(rawEmail);
+    const emailAllowed =
+      isValidEmail(rawEmail) || isGooglePlaceholderEmail(rawEmail);
 
-    if (!rawEmail || !emailIsAllowed) {
-      await writeSecurityLog({
-        type: "invalid_signup_request",
-        level: "warning",
-        message: "Invalid email sent to signup-attempt API",
-        email: rawEmail,
-        ip,
-        route: ROUTE,
-        metadata: {
-          source: "server_enforced"
-        }
-      });
-
-      return res.status(400).json({
+    if (!rawEmail || !emailAllowed) {
+      return json({
         success: false,
         message: "Invalid email."
-      });
+      }, 400);
     }
 
     const now = Date.now();
 
-    if (securityAction === "block") {
-      await writeSecurityLog({
-        type: "blocked_suspicious_signup_request",
-        level: "critical",
-        message: "Blocked signup attempt API request due to suspicious behavior",
-        email: rawEmail,
-        ip,
-        route: ROUTE,
-        metadata: sanitizeMetadata({
-          source: "server_enforced",
-          action,
-          actionLabel,
-          risk: security.risk,
-          botResult: security.signals.botResult,
-          abuseResult: security.signals.abuseResult,
-          threatResult: security.signals.threatResult
-        })
-      });
-
-      return res.status(429).json(
-        buildBlockedResponse("Suspicious activity detected. Please try again later.", {
-          action: "block"
-        })
-      );
-    }
-
-    if (securityAction === "challenge" || securityAction === "throttle") {
-      await writeSecurityLog({
-        type: "temporary_signup_security_challenge",
-        level: "warning",
-        message: "Suspicious signup behavior detected",
-        email: rawEmail,
-        ip,
-        route: ROUTE,
-        metadata: sanitizeMetadata({
-          source: "server_enforced",
-          action,
-          actionLabel,
-          risk: security.risk,
-          botResult: security.signals.botResult,
-          abuseResult: security.signals.abuseResult,
-          threatResult: security.signals.threatResult
-        })
-      });
-    }
-
-    const ipRedisKey = buildIpAttemptKey(ip);
-    const ipRecord = await getStoredRecord(ipRedisKey);
+    const ipKey = buildIpAttemptKey(ip);
+    const ipRecord = await getStoredRecord(redis, ipKey);
 
     if (ipRecord.lockUntil > now) {
-      return res.status(200).json(
-        buildLockResponse(true, ipRecord.lockUntil - now, {
-          lockType: "ip",
-          risk: security.risk
-        })
-      );
+      return json({
+        success: true,
+        isLocked: true,
+        remainingMs: ipRecord.lockUntil - now,
+        lockType: "ip"
+      });
     }
 
-    const userRedisKey = buildSignupAttemptKey(rawEmail, ip);
-    const record = await getStoredRecord(userRedisKey);
+    const userKey = buildSignupAttemptKey(rawEmail, ip);
+    const record = await getStoredRecord(redis, userKey);
 
     if (action === "check") {
       const isLocked = record.lockUntil > now;
 
-      return res.status(200).json(
-        buildLockResponse(isLocked, record.lockUntil - now, {
-          lockType: isLocked ? "user" : "none",
-          risk: security.risk
-        })
-      );
+      return json({
+        success: true,
+        isLocked,
+        remainingMs: isLocked ? record.lockUntil - now : 0,
+        lockType: isLocked ? "user" : "none"
+      });
     }
 
     if (action === "fail") {
       record.count += 1;
-      record.lastAttempt = now;
-
       ipRecord.count += 1;
-      ipRecord.lastAttempt = now;
 
-      if (securityAction === "challenge" || securityAction === "throttle") {
-        record.escalationCount += 1;
-        ipRecord.escalationCount += 1;
-      }
+      record.lastAttempt = now;
+      ipRecord.lastAttempt = now;
 
       if (record.count >= MAX_ATTEMPTS) {
         record.escalationCount += 1;
-        record.lockUntil = now + getEscalatedLockMs(LOCK_WINDOW_MS, record.escalationCount);
-
-        await writeSecurityLog({
-          type: "signup_lockout",
-          level: "critical",
-          message: "Too many signup attempts",
-          email: rawEmail,
-          ip,
-          route: ROUTE,
-          metadata: sanitizeMetadata({
-            source: "server_enforced",
-            attempts: record.count,
-            escalationCount: record.escalationCount,
-            actionLabel,
-            risk: security.risk,
-            threatResult: security.signals.threatResult
-          })
-        });
+        record.lockUntil =
+          now + getEscalatedLockMs(LOCK_WINDOW_MS, record.escalationCount);
       }
 
       if (ipRecord.count >= MAX_IP_ATTEMPTS) {
         ipRecord.escalationCount += 1;
-        ipRecord.lockUntil = now + getEscalatedLockMs(IP_LOCK_WINDOW_MS, ipRecord.escalationCount);
-
-        await writeSecurityLog({
-          type: "ip_signup_lock",
-          level: "critical",
-          message: "IP temporarily blocked due to excessive signup attempts",
-          ip,
-          route: ROUTE,
-          metadata: sanitizeMetadata({
-            source: "server_enforced",
-            attempts: ipRecord.count,
-            escalationCount: ipRecord.escalationCount,
-            actionLabel,
-            risk: security.risk
-          })
-        });
+        ipRecord.lockUntil =
+          now + getEscalatedLockMs(IP_LOCK_WINDOW_MS, ipRecord.escalationCount);
       }
 
-      await saveStoredRecord(userRedisKey, record);
-      await saveStoredRecord(ipRedisKey, ipRecord);
+      await saveStoredRecord(redis, userKey, record);
+      await saveStoredRecord(redis, ipKey, ipRecord);
 
-      const isLocked = record.lockUntil > now;
+      const isUserLocked = record.lockUntil > now;
+      const isIpLocked = ipRecord.lockUntil > now;
 
-      return res.status(200).json(
-        buildLockResponse(isLocked, record.lockUntil - now, {
-          lockType: isLocked ? "user" : (ipRecord.lockUntil > now ? "ip" : "none"),
-          attempts: record.count,
-          risk: security.risk
-        })
-      );
+      return json({
+        success: true,
+        isLocked: isUserLocked || isIpLocked,
+        remainingMs: Math.max(
+          isUserLocked ? record.lockUntil - now : 0,
+          isIpLocked ? ipRecord.lockUntil - now : 0
+        ),
+        lockType: isUserLocked ? "user" : isIpLocked ? "ip" : "none",
+        attempts: record.count
+      });
     }
 
-    return res.status(400).json({
+    return json({
       success: false,
       message: "Invalid request."
-    });
+    }, 400);
+
   } catch (error) {
     console.error("Signup attempt API error:", error);
 
-    try {
-      await writeSecurityLog({
-        type: "signup_attempt_api_error",
-        level: "error",
-        message: "Unhandled server error in signup-attempt API",
-        route: ROUTE,
-        metadata: {
-          source: "server_enforced",
-          error: safeString(error?.message || "Unknown error", 500)
-        }
-      });
-    } catch (logError) {
-      console.error("Security log write failed:", logError);
-    }
+    await writeSecurityLog({
+      env,
+      type: "signup_attempt_api_error",
+      level: "error",
+      message: "Unhandled server error in signup-attempt API",
+      route: ROUTE,
+      metadata: {
+        error: safeString(error?.message || "Unknown error", 500)
+      }
+    });
 
-    return res.status(500).json({
+    return json({
       success: false,
       message: "Internal server error."
-    });
+    }, 500);
   }
 }

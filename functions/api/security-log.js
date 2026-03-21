@@ -1,26 +1,61 @@
 import { writeSecurityLog } from "./_security-log-writer.js";
 
-export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    return res.status(405).json({
-      success: false,
-      message: "Method not allowed"
-    });
+function jsonResponse(payload, status = 200) {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store"
+    }
+  });
+}
+
+export async function onRequest(context) {
+  const { request, env } = context;
+
+  if (request.method !== "POST") {
+    return jsonResponse(
+      {
+        success: false,
+        message: "Method not allowed"
+      },
+      405
+    );
   }
 
   try {
-    const ok = await writeSecurityLog(req.body || {});
+    let body = {};
 
-    return res.status(200).json({
+    try {
+      body = await request.json();
+    } catch {
+      return jsonResponse(
+        {
+          success: false,
+          message: "Invalid JSON body"
+        },
+        400
+      );
+    }
+
+    const ok = await writeSecurityLog({
+      env,
+      ...(body && typeof body === "object" ? body : {})
+    });
+
+    return jsonResponse({
       success: true,
       logged: ok === true
     });
   } catch (error) {
     console.error("security-log route error:", error);
 
-    return res.status(500).json({
-      success: false,
-      message: "Internal server error"
-    });
+    return jsonResponse(
+      {
+        success: false,
+        message: "Internal server error"
+      },
+      500
+    );
   }
 }

@@ -1,4 +1,8 @@
+<<<<<<< HEAD
 import { redis } from "./_redis.js";
+=======
+import { getRedis } from "./_redis.js";
+>>>>>>> 462287806a8da117fc6781c19b96bf5570233eaa
 import { appendSecurityEvent } from "./_security-event-store.js";
 
 const RISK_STATE_PREFIX = "security:risk-state";
@@ -29,7 +33,7 @@ const ALLOWED_ACTIONS = new Set([
 ]);
 
 function safeString(value, maxLength = 200) {
-  return String(value || "")
+  return String(value ?? "")
     .replace(/[\u0000-\u001F\u007F]/g, "")
     .trim()
     .slice(0, maxLength);
@@ -193,7 +197,9 @@ function applyTimeDecay(state, now = Date.now()) {
   return normalized;
 }
 
-async function getStoredRiskState(actorType, actorId) {
+async function getStoredRiskState(env, actorType, actorId) {
+  const redis = getRedis(env);
+
   const safeActorType = normalizeActorType(actorType);
   const safeActorId = normalizeActorId(actorId);
 
@@ -228,7 +234,9 @@ async function getStoredRiskState(actorType, actorId) {
   }
 }
 
-async function storeRiskState(state) {
+async function storeRiskState(env, state) {
+  const redis = getRedis(env);
+
   const normalized = normalizeRiskState(
     state,
     state?.actorType || "session",
@@ -311,21 +319,23 @@ async function recordRiskStateEvent(previousState, nextState, reason = "risk_sta
 }
 
 export async function getRiskState({
+  env = {},
   actorType = "session",
   actorId = ""
 } = {}) {
-  const rawState = await getStoredRiskState(actorType, actorId);
+  const rawState = await getStoredRiskState(env, actorType, actorId);
   const decayedState = applyTimeDecay(rawState, Date.now());
 
   if (decayedState.actorId && decayedState.currentRiskScore !== rawState.currentRiskScore) {
     decayedState.lastEvaluatedAt = Date.now();
-    await storeRiskState(decayedState);
+    await storeRiskState(env, decayedState);
   }
 
   return decayedState;
 }
 
 export async function updateRiskState({
+  env = {},
   actorType = "session",
   actorId = "",
   riskResult = null,
@@ -344,7 +354,7 @@ export async function updateRiskState({
 
   const now = Date.now();
   const currentState = applyTimeDecay(
-    await getStoredRiskState(safeActorType, safeActorId),
+    await getStoredRiskState(env, safeActorType, safeActorId),
     now
   );
 
@@ -417,7 +427,7 @@ export async function updateRiskState({
     safeActorId
   );
 
-  const ok = await storeRiskState(nextState);
+  const ok = await storeRiskState(env, nextState);
 
   if (ok && shouldRecordRiskChange(currentState, nextState)) {
     await recordRiskStateEvent(currentState, nextState, reason || "risk_state_updated");
@@ -430,6 +440,7 @@ export async function updateRiskState({
 }
 
 export async function clearRiskState({
+  env = {},
   actorType = "session",
   actorId = "",
   reason = "manual_clear"
@@ -444,9 +455,9 @@ export async function clearRiskState({
     };
   }
 
-  const previousState = await getStoredRiskState(safeActorType, safeActorId);
+  const previousState = await getStoredRiskState(env, safeActorType, safeActorId);
   const nextState = createDefaultRiskState(safeActorType, safeActorId);
-  const ok = await storeRiskState(nextState);
+  const ok = await storeRiskState(env, nextState);
 
   if (ok) {
     try {

@@ -7,6 +7,7 @@ const SECURITY_EVENTS_TTL_SECONDS = Math.max(
   1,
   Math.ceil(SECURITY_EVENTS_TTL_MS / 1000)
 );
+const MAX_FUTURE_EVENT_MS = 60 * 1000;
 
 const ALLOWED_SEVERITIES = new Set([
   "info",
@@ -25,7 +26,7 @@ const ALLOWED_ACTIONS = new Set([
 ]);
 
 function safeString(value, maxLength = 200) {
-  return String(value || "")
+  return String(value ?? "")
     .replace(/[\u0000-\u001F\u007F]/g, "")
     .trim()
     .slice(0, maxLength);
@@ -69,19 +70,67 @@ function normalizeRoute(value = "") {
     .split("?")[0]
     .split("#")[0]
     .replace(/\/{2,}/g, "/")
-    .replace(/[^a-zA-Z0-9/_-]/g, "")
+    .replace(/[^a-zA-Z0-9/_:-]/g, "")
     .toLowerCase()
     .slice(0, 200);
 }
 
 function normalizeIp(value = "") {
-  return safeString(value || "", 100);
+  let ip = safeString(value || "", 100);
+
+  if (!ip) return "";
+
+  if (ip.startsWith("::ffff:")) {
+    ip = ip.slice(7);
+  }
+
+  ip = ip.replace(/[^a-fA-F0-9:.,]/g, "").slice(0, 100);
+  return ip;
 }
 
 function normalizeEventType(value = "") {
   return safeString(value || "security_event", 80)
     .toLowerCase()
     .replace(/[^a-z0-9_:-]/g, "_");
+}
+
+function sanitizeMetadataValue(value, depth = 0) {
+  if (depth > 2) {
+    return "[complex]";
+  }
+
+  if (
+    value === null ||
+    typeof value === "number" ||
+    typeof value === "boolean"
+  ) {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    return safeString(value, 300);
+  }
+
+  if (Array.isArray(value)) {
+    return value
+      .slice(0, 10)
+      .map((item) => sanitizeMetadataValue(item, depth + 1));
+  }
+
+  if (value && typeof value === "object") {
+    const output = {};
+    const entries = Object.entries(value).slice(0, 10);
+
+    for (const [rawKey, rawValue] of entries) {
+      const key = safeString(rawKey, 50).replace(/[^a-zA-Z0-9_:-]/g, "_");
+      if (!key) continue;
+      output[key] = sanitizeMetadataValue(rawValue, depth + 1);
+    }
+
+    return output;
+  }
+
+  return safeString(value, 120);
 }
 
 function sanitizeMetadata(metadata = {}) {
@@ -95,51 +144,30 @@ function sanitizeMetadata(metadata = {}) {
   for (const [rawKey, rawValue] of entries) {
     const key = safeString(rawKey, 50).replace(/[^a-zA-Z0-9_:-]/g, "_");
     if (!key) continue;
-
-    if (
-      rawValue === null ||
-      typeof rawValue === "string" ||
-      typeof rawValue === "number" ||
-      typeof rawValue === "boolean"
-    ) {
-      output[key] =
-        typeof rawValue === "string" ? safeString(rawValue, 300) : rawValue;
-      continue;
-    }
-
-    if (Array.isArray(rawValue)) {
-      output[key] = rawValue
-        .slice(0, 10)
-        .map((item) => {
-          if (
-            item === null ||
-            typeof item === "string" ||
-            typeof item === "number" ||
-            typeof item === "boolean"
-          ) {
-            return typeof item === "string" ? safeString(item, 120) : item;
-          }
-          return "[complex]";
-        });
-      continue;
-    }
-
-    output[key] = "[complex]";
+    output[key] = sanitizeMetadataValue(rawValue, 0);
   }
 
   return output;
 }
 
 function createEventId() {
-  return `evt_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+  const bytes = new Uint8Array(6);
+  crypto.getRandomValues(bytes);
+
+  const randomHex = Array.from(bytes)
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+
+  return `evt_${Date.now()}_${randomHex}`;
 }
 
 function normalizeStoredEvent(raw) {
   const event = raw && typeof raw === "object" ? raw : {};
+  const maxTimestamp = Date.now() + MAX_FUTURE_EVENT_MS;
 
   return {
     id: safeString(event.id || createEventId(), 50),
-    timestamp: safeInt(event.timestamp, Date.now(), 0, Date.now() + 60_000),
+    timestamp: safeInt(event.timestamp, Date.now(), 0, maxTimestamp),
     type: normalizeEventType(event.type || "security_event"),
     severity: normalizeSeverity(event.severity || "info"),
     action: normalizeAction(event.action || "observe"),
@@ -180,10 +208,19 @@ async function getStoredEvents() {
   }
 }
 
+function sortEventsNewestFirst(events = []) {
+  return [...events].sort(
+    (a, b) => safeInt(b?.timestamp, 0) - safeInt(a?.timestamp, 0)
+  );
+}
+
 async function storeEvents(events = []) {
   try {
     const normalizedEvents = Array.isArray(events)
-      ? events.map(normalizeStoredEvent).slice(0, SECURITY_EVENTS_MAX_ITEMS)
+      ? sortEventsNewestFirst(events.map(normalizeStoredEvent)).slice(
+          0,
+          SECURITY_EVENTS_MAX_ITEMS
+        )
       : [];
 
     await redis.set(SECURITY_EVENTS_KEY, JSON.stringify(normalizedEvents), {
@@ -227,7 +264,7 @@ export async function appendSecurityEvent({
   });
 
   const currentEvents = await getStoredEvents();
-  const nextEvents = [event, ...currentEvents].slice(0, SECURITY_EVENTS_MAX_ITEMS);
+  const nextEvents = [event, ...currentEvents];
   const ok = await storeEvents(nextEvents);
 
   return {
@@ -247,7 +284,7 @@ export async function getRecentSecurityEvents({
   const normalizedAction = action ? normalizeAction(action) : "";
   const normalizedType = type ? normalizeEventType(type) : "";
 
-  const events = await getStoredEvents();
+  const events = sortEventsNewestFirst(await getStoredEvents());
 
   const filtered = events.filter((event) => {
     if (normalizedSeverity && event.severity !== normalizedSeverity) {

@@ -1,21 +1,46 @@
+<<<<<<< HEAD
 import { buildSecurityMetrics } from "./_security-metrics.js";
 import { getRecentSecurityEvents, appendSecurityEvent } from "./_security-event-store.js";
 import { writeSecurityLog } from "./_security-log-writer.js";
 import { safeString, buildMethodNotAllowedResponse } from "./_api-security.js";
 import { getAdaptiveThreatMode } from "./_adaptive-threat-mode.js";
 import { getContainmentState } from "./_security-containment.js";
+=======
+import { buildSecurityMetrics } from "./_security-metrics.js";
+import {
+  getRecentSecurityEvents,
+  appendSecurityEvent
+} from "./_security-event-store.js";
+import { writeSecurityLog } from "./_security-log-writer.js";
+import {
+  safeString,
+  buildMethodNotAllowedResponse
+} from "./_api-security.js";
+import { getAdaptiveThreatMode } from "./_adaptive-threat-mode.js";
+import { getContainmentState } from "./_security-containment.js";
+>>>>>>> 462287806a8da117fc6781c19b96bf5570233eaa
 
 const ROUTE = "/api/security-metrics";
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 100;
 
-function getClientIp(req) {
-  const forwarded = req.headers["x-forwarded-for"];
+function jsonResponse(payload, status = 200) {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store"
+    }
+  });
+}
+
+function getClientIp(request) {
+  const forwarded = request.headers.get("x-forwarded-for");
   if (typeof forwarded === "string" && forwarded.trim()) {
     return forwarded.split(",")[0].trim().slice(0, 100);
   }
 
-  const realIp = req.headers["x-real-ip"];
+  const realIp = request.headers.get("x-real-ip");
   if (typeof realIp === "string" && realIp.trim()) {
     return realIp.trim().slice(0, 100);
   }
@@ -45,7 +70,8 @@ async function recordUnauthorizedAccess({ ip, method }) {
       route: ROUTE,
       ip,
       reason: "invalid_admin_key",
-      message: "Unauthorized attempt to access protected security metrics endpoint.",
+      message:
+        "Unauthorized attempt to access protected security metrics endpoint.",
       metadata: {
         method
       }
@@ -55,49 +81,53 @@ async function recordUnauthorizedAccess({ ip, method }) {
   }
 }
 
-export default async function handler(req, res) {
-  if (req.method !== "GET") {
+export async function onRequest(context) {
+  const { request, env } = context;
+
+  if (request.method !== "GET") {
     const response = buildMethodNotAllowedResponse(["GET"]);
-    return res.status(response.status).json(response.body);
+    return jsonResponse(response.body, response.status);
   }
 
-  const clientIp = getClientIp(req);
+  const clientIp = getClientIp(request);
 
   try {
     const adminKey = safeString(
-      req.headers["x-security-admin-key"] || "",
+      request.headers.get("x-security-admin-key") || "",
       200
     );
 
     if (
-      !process.env.SECURITY_ADMIN_API_KEY ||
-      adminKey !== process.env.SECURITY_ADMIN_API_KEY
+      !env.SECURITY_ADMIN_API_KEY ||
+      adminKey !== env.SECURITY_ADMIN_API_KEY
     ) {
       await writeSecurityLog({
+        env,
         type: "security_metrics_unauthorized",
         level: "warning",
         route: ROUTE,
         ip: clientIp,
         message: "Unauthorized attempt to access security metrics endpoint.",
         metadata: {
-          method: req.method
+          method: request.method
         }
       });
 
       await recordUnauthorizedAccess({
         ip: clientIp,
-        method: req.method
+        method: request.method
       });
 
-      return res.status(404).json(buildUnauthorizedResponse());
+      return jsonResponse(buildUnauthorizedResponse(), 404);
     }
 
-    const limit = parseLimit(req.query?.limit);
+    const url = new URL(request.url);
+    const limit = parseLimit(url.searchParams.get("limit"));
 
     const [adaptiveState, containmentState, events] = await Promise.all([
-      getAdaptiveThreatMode(),
-      getContainmentState(),
-      getRecentSecurityEvents({ limit })
+      getAdaptiveThreatMode(env),
+      getContainmentState(env),
+      getRecentSecurityEvents({ env, limit })
     ]);
 
     const payload = buildSecurityMetrics({
@@ -108,6 +138,7 @@ export default async function handler(req, res) {
     });
 
     await writeSecurityLog({
+      env,
       type: "security_metrics_accessed",
       level: "info",
       route: ROUTE,
@@ -120,9 +151,10 @@ export default async function handler(req, res) {
       }
     });
 
-    return res.status(200).json(payload);
+    return jsonResponse(payload, 200);
   } catch (error) {
     await writeSecurityLog({
+      env,
       type: "security_metrics_error",
       level: "error",
       route: ROUTE,
@@ -133,9 +165,12 @@ export default async function handler(req, res) {
       }
     });
 
-    return res.status(500).json({
-      ok: false,
-      error: "internal_error"
-    });
+    return jsonResponse(
+      {
+        ok: false,
+        error: "internal_error"
+      },
+      500
+    );
   }
 }

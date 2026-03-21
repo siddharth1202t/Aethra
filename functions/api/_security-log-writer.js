@@ -1,10 +1,4 @@
-import crypto from "node:crypto";
-import { initializeApp, cert, getApps } from "firebase-admin/app";
-import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { updateSecurityState } from "./_security-state-manager.js";
-
-let adminDb = null;
-let adminInitFailed = false;
 
 const ALLOWED_LEVELS = new Set([
   "info",
@@ -30,8 +24,17 @@ const MAX_METADATA_ITEMS = 30;
 const MAX_METADATA_ARRAY_ITEMS = 25;
 const MAX_METADATA_DEPTH = 4;
 
+const GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token";
+const FIRESTORE_BASE_URL = "https://firestore.googleapis.com/v1";
+const FIRESTORE_SCOPE = "https://www.googleapis.com/auth/datastore";
+
+let tokenCache = {
+  accessToken: "",
+  expiresAt: 0
+};
+
 function safeString(value, maxLength = 300) {
-  return String(value || "")
+  return String(value ?? "")
     .replace(/[\u0000-\u001F\u007F]/g, "")
     .trim()
     .slice(0, maxLength);
@@ -60,10 +63,7 @@ function isPlainObject(value) {
 function normalizeEmail(value = "") {
   const email = safeString(value || "", MAX_EMAIL_LENGTH).toLowerCase();
   if (!email) return "";
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    return "";
-  }
-  return email;
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : "";
 }
 
 function normalizeEmailHash(value = "") {
@@ -176,32 +176,42 @@ function sanitizeMetadata(value, depth = 0) {
   return safeString(value, 500);
 }
 
-function getRequiredEnv(name) {
-  return safeString(process.env[name] || "", 5000);
+function getRequiredEnv(env, name, maxLength = 10000) {
+  return safeString(env?.[name] || "", maxLength);
 }
 
-function hasFirebaseAdminEnv() {
+function hasFirebaseAdminEnv(env) {
   return Boolean(
-    getRequiredEnv("FIREBASE_PROJECT_ID") &&
-      getRequiredEnv("FIREBASE_CLIENT_EMAIL") &&
-      safeString(process.env.FIREBASE_PRIVATE_KEY || "", 10000)
+    getRequiredEnv(env, "FIREBASE_PROJECT_ID", 200) &&
+      getRequiredEnv(env, "FIREBASE_CLIENT_EMAIL", 500) &&
+      getRequiredEnv(env, "FIREBASE_PRIVATE_KEY", 20000)
   );
 }
 
 function createEventId() {
-  return normalizeEventId(
-    `sec_${Date.now()}_${crypto.randomBytes(6).toString("hex")}`
-  );
+  const bytes = new Uint8Array(6);
+  crypto.getRandomValues(bytes);
+
+  const randomHex = Array.from(bytes)
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+
+  return normalizeEventId(`sec_${Date.now()}_${randomHex}`);
 }
 
-function sha256Hex(input = "") {
-  return crypto
-    .createHash("sha256")
-    .update(String(input || ""))
-    .digest("hex");
+function bytesToHex(bytes) {
+  return Array.from(bytes)
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
 }
 
-function deriveEmailHash(email = "", providedHash = "") {
+async function sha256Hex(input = "") {
+  const bytes = new TextEncoder().encode(String(input || ""));
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return bytesToHex(new Uint8Array(digest));
+}
+
+async function deriveEmailHash(email = "", providedHash = "") {
   const normalizedProvided = normalizeEmailHash(providedHash);
   if (normalizedProvided) {
     return normalizedProvided;
@@ -212,19 +222,19 @@ function deriveEmailHash(email = "", providedHash = "") {
     return "";
   }
 
-  return sha256Hex(normalizedEmail).slice(0, MAX_EMAIL_HASH_LENGTH);
+  return (await sha256Hex(normalizedEmail)).slice(0, MAX_EMAIL_HASH_LENGTH);
 }
 
-function deriveIpHash(ip = "") {
+async function deriveIpHash(ip = "") {
   const normalizedIp = normalizeIp(ip);
   if (!normalizedIp || normalizedIp === "unknown") {
     return "";
   }
 
-  return sha256Hex(normalizedIp).slice(0, 32);
+  return (await sha256Hex(normalizedIp)).slice(0, 32);
 }
 
-function buildEventFingerprint({
+async function buildEventFingerprint({
   type = "",
   userId = "",
   emailHash = "",
@@ -233,15 +243,17 @@ function buildEventFingerprint({
   source = ""
 }) {
   return normalizeFingerprint(
-    sha256Hex(
-      [
-        safeString(type, 60),
-        normalizeUserId(userId),
-        normalizeEmailHash(emailHash),
-        safeString(ipHash, 64),
-        normalizeRoute(route),
-        safeString(source, 50)
-      ].join("|")
+    (
+      await sha256Hex(
+        [
+          safeString(type, 60),
+          normalizeUserId(userId),
+          normalizeEmailHash(emailHash),
+          safeString(ipHash, 64),
+          normalizeRoute(route),
+          safeString(source, 50)
+        ].join("|")
+      )
     ).slice(0, MAX_FINGERPRINT_LENGTH)
   );
 }
@@ -253,48 +265,224 @@ function getSeverityScore(level) {
   return 10;
 }
 
-function getAdminDb() {
-  if (adminDb) {
-    return adminDb;
+function base64UrlEncodeBytes(bytes) {
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
   }
 
-  if (adminInitFailed) {
-    return null;
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function base64UrlEncodeString(input = "") {
+  return base64UrlEncodeBytes(new TextEncoder().encode(input));
+}
+
+function pemToArrayBuffer(pem = "") {
+  const cleaned = String(pem || "")
+    .replace(/-----BEGIN PRIVATE KEY-----/g, "")
+    .replace(/-----END PRIVATE KEY-----/g, "")
+    .replace(/\s+/g, "");
+
+  const binary = atob(cleaned);
+  const bytes = new Uint8Array(binary.length);
+
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
   }
 
-  try {
-    if (!hasFirebaseAdminEnv()) {
-      adminInitFailed = true;
-      console.error("Firebase Admin env vars are missing for security log writer.");
-      return null;
+  return bytes.buffer;
+}
+
+async function importPrivateKey(privateKeyPem) {
+  return crypto.subtle.importKey(
+    "pkcs8",
+    pemToArrayBuffer(privateKeyPem),
+    {
+      name: "RSASSA-PKCS1-v1_5",
+      hash: "SHA-256"
+    },
+    false,
+    ["sign"]
+  );
+}
+
+async function createServiceJwt(env) {
+  const clientEmail = getRequiredEnv(env, "FIREBASE_CLIENT_EMAIL", 500);
+  const privateKey = getRequiredEnv(env, "FIREBASE_PRIVATE_KEY", 20000).replace(/\\n/g, "\n");
+
+  const now = Math.floor(Date.now() / 1000);
+  const header = {
+    alg: "RS256",
+    typ: "JWT"
+  };
+
+  const claimSet = {
+    iss: clientEmail,
+    scope: FIRESTORE_SCOPE,
+    aud: GOOGLE_OAUTH_TOKEN_URL,
+    exp: now + 3600,
+    iat: now
+  };
+
+  const encodedHeader = base64UrlEncodeString(JSON.stringify(header));
+  const encodedClaimSet = base64UrlEncodeString(JSON.stringify(claimSet));
+  const unsignedToken = `${encodedHeader}.${encodedClaimSet}`;
+
+  const cryptoKey = await importPrivateKey(privateKey);
+  const signature = await crypto.subtle.sign(
+    "RSASSA-PKCS1-v1_5",
+    cryptoKey,
+    new TextEncoder().encode(unsignedToken)
+  );
+
+  const encodedSignature = base64UrlEncodeBytes(new Uint8Array(signature));
+  return `${unsignedToken}.${encodedSignature}`;
+}
+
+async function getAccessToken(env) {
+  const now = Date.now();
+
+  if (
+    tokenCache.accessToken &&
+    tokenCache.expiresAt > now + 60 * 1000
+  ) {
+    return tokenCache.accessToken;
+  }
+
+  const assertion = await createServiceJwt(env);
+
+  const response = await fetch(GOOGLE_OAUTH_TOKEN_URL, {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded"
+    },
+    body: new URLSearchParams({
+      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+      assertion
+    })
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => "");
+    throw new Error(`OAuth token request failed: ${response.status} ${safeString(errorText, 300)}`);
+  }
+
+  const data = await response.json();
+  const accessToken = safeString(data?.access_token || "", 5000);
+  const expiresInMs = safeInt(data?.expires_in, 3600, 60, 3600) * 1000;
+
+  if (!accessToken) {
+    throw new Error("OAuth token missing access_token.");
+  }
+
+  tokenCache = {
+    accessToken,
+    expiresAt: now + expiresInMs
+  };
+
+  return accessToken;
+}
+
+function toFirestoreValue(value) {
+  if (value === null || value === undefined) {
+    return { nullValue: null };
+  }
+
+  if (typeof value === "string") {
+    return { stringValue: value };
+  }
+
+  if (typeof value === "boolean") {
+    return { booleanValue: value };
+  }
+
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      return { nullValue: null };
     }
 
-    if (!getApps().length) {
-      initializeApp({
-        credential: cert({
-          projectId: getRequiredEnv("FIREBASE_PROJECT_ID"),
-          clientEmail: getRequiredEnv("FIREBASE_CLIENT_EMAIL"),
-          privateKey: String(process.env.FIREBASE_PRIVATE_KEY || "")
-            .replace(/\\n/g, "\n")
-            .trim()
-        })
-      });
+    if (Number.isInteger(value)) {
+      return { integerValue: String(value) };
     }
 
-    adminDb = getFirestore();
-    return adminDb;
-  } catch (error) {
-    adminInitFailed = true;
-    console.error("Firebase Admin initialization failed:", error);
-    return null;
+    return { doubleValue: value };
   }
+
+  if (Array.isArray(value)) {
+    return {
+      arrayValue: {
+        values: value.map((item) => toFirestoreValue(item))
+      }
+    };
+  }
+
+  if (isPlainObject(value)) {
+    const fields = {};
+    for (const [key, val] of Object.entries(value)) {
+      const safeKey = safeString(key, MAX_METADATA_KEY_LENGTH);
+      if (safeKey) {
+        fields[safeKey] = toFirestoreValue(val);
+      }
+    }
+
+    return {
+      mapValue: { fields }
+    };
+  }
+
+  return { stringValue: safeString(value, 500) };
+}
+
+function toFirestoreDocumentFields(data) {
+  const fields = {};
+
+  for (const [key, value] of Object.entries(data)) {
+    const safeKey = safeString(key, MAX_METADATA_KEY_LENGTH);
+    if (safeKey) {
+      fields[safeKey] = toFirestoreValue(value);
+    }
+  }
+
+  return fields;
+}
+
+async function writeFirestoreDocument(env, collectionName, documentId, payload) {
+  const projectId = getRequiredEnv(env, "FIREBASE_PROJECT_ID", 200);
+  const accessToken = await getAccessToken(env);
+
+  const url =
+    `${FIRESTORE_BASE_URL}/projects/${encodeURIComponent(projectId)}` +
+    `/databases/(default)/documents/${encodeURIComponent(collectionName)}` +
+    `?documentId=${encodeURIComponent(documentId)}`;
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      fields: toFirestoreDocumentFields(payload)
+    })
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => "");
+    throw new Error(
+      `Firestore write failed: ${response.status} ${safeString(errorText, 500)}`
+    );
+  }
+
+  return true;
 }
 
 export async function writeSecurityLog(data = {}) {
   try {
-    const db = getAdminDb();
+    const env = data?.env || null;
 
-    if (!db) {
+    if (!env || !hasFirebaseAdminEnv(env)) {
+      console.error("Security log writer missing Cloudflare env credentials.");
       return false;
     }
 
@@ -303,10 +491,10 @@ export async function writeSecurityLog(data = {}) {
     const message = safeString(data.message || "", MAX_MESSAGE_LENGTH);
 
     const email = normalizeEmail(data.email || "");
-    const emailHash = deriveEmailHash(email, data.emailHash || "");
+    const emailHash = await deriveEmailHash(email, data.emailHash || "");
     const userId = normalizeUserId(data.userId || "");
     const ip = normalizeIp(data.ip || "unknown");
-    const ipHash = deriveIpHash(ip);
+    const ipHash = await deriveIpHash(ip);
 
     const route = normalizeRoute(data.route || "unknown-route");
     const routeGroup = getRouteGroup(route);
@@ -319,7 +507,9 @@ export async function writeSecurityLog(data = {}) {
       MAX_SOURCE_LENGTH
     ).toLowerCase();
 
-    const eventId = normalizeEventId(data.eventId || createEventId()) || createEventId();
+    const eventId =
+      normalizeEventId(data.eventId || createEventId()) || createEventId();
+
     const severityScore = safeInt(
       data.severityScore,
       getSeverityScore(level),
@@ -329,14 +519,16 @@ export async function writeSecurityLog(data = {}) {
 
     const fingerprint =
       normalizeFingerprint(data.fingerprint || "") ||
-      buildEventFingerprint({
+      (await buildEventFingerprint({
         type,
         userId,
         emailHash,
         ipHash,
         route,
         source
-      });
+      }));
+
+    const now = Date.now();
 
     const log = {
       eventId,
@@ -354,28 +546,35 @@ export async function writeSecurityLog(data = {}) {
       source,
       fingerprint,
       metadata,
-      createdAt: FieldValue.serverTimestamp(),
-      createdAtMs: Date.now()
+      createdAtMs: now,
+      createdAtIso: new Date(now).toISOString()
     };
 
-    await db.collection("securityLogs").doc(eventId).set(log, { merge: false });
+    await writeFirestoreDocument(env, "securityLogs", eventId, log);
 
-    await updateSecurityState(db, {
-      type,
-      level,
-      userId,
-      emailHash,
-      ipHash,
-      sessionId: safeString(
-        metadataInput?.sessionId ||
-          metadata?.sessionId ||
-          metadataInput?.client?.sessionId ||
-          "",
-        128
-      ),
-      routeGroup,
-      source
-    });
+    try {
+      await updateSecurityState({
+        env,
+        event: {
+          type,
+          level,
+          userId,
+          emailHash,
+          ipHash,
+          sessionId: safeString(
+            metadataInput?.sessionId ||
+              metadata?.sessionId ||
+              metadataInput?.client?.sessionId ||
+              "",
+            128
+          ),
+          routeGroup,
+          source
+        }
+      });
+    } catch (stateError) {
+      console.error("updateSecurityState failed:", stateError);
+    }
 
     return true;
   } catch (error) {

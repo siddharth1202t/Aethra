@@ -1,25 +1,43 @@
 import { safeNumber, safeString } from "./_api-security.js";
-import { redis } from "./_redis.js";
+import { getRedis } from "./_redis.js";
 
 const DEFAULT_MAX_AGE_MS = 2 * 60 * 1000;
 const DEFAULT_FUTURE_TOLERANCE_MS = 15 * 1000;
+const MIN_REQUEST_TIMESTAMP_MS = 1_500_000_000_000;
+const MAX_REQUEST_FUTURE_SKEW_MS = 24 * 60 * 60 * 1000;
+
 const MAX_NONCE_LENGTH = 200;
+const MIN_NONCE_LENGTH = 8;
 const NONCE_TTL_MS = 10 * 60 * 1000;
+const MIN_NONCE_TTL_MS = 30 * 1000;
 
 function sanitizeKeyPart(value = "", maxLength = 200, fallback = "") {
   const cleaned = safeString(value || "", maxLength)
     .trim()
     .replace(/[\u0000-\u001F\u007F]/g, "")
     .replace(/[^a-zA-Z0-9._:@/-]/g, "");
+
   return cleaned || fallback;
 }
 
-function normalizeNonce(value) {
+function normalizeNonce(value = "") {
   return sanitizeKeyPart(value || "", MAX_NONCE_LENGTH, "");
 }
 
-function normalizeScope(value) {
+function normalizeScope(value = "") {
   return sanitizeKeyPart(value || "default", 100, "default").toLowerCase();
+}
+
+function normalizeTtlMs(value, fallback = NONCE_TTL_MS) {
+  return Math.max(MIN_NONCE_TTL_MS, safeNumber(value, fallback));
+}
+
+function normalizeMaxAgeMs(value, fallback = DEFAULT_MAX_AGE_MS) {
+  return Math.max(1_000, safeNumber(value, fallback));
+}
+
+function normalizeFutureToleranceMs(value, fallback = DEFAULT_FUTURE_TOLERANCE_MS) {
+  return Math.max(0, safeNumber(value, fallback));
 }
 
 function buildNonceKey(scope, nonce) {
@@ -33,10 +51,10 @@ export function validateRequestFreshness({
 } = {}) {
   const now = Date.now();
   const safeRequestAt = safeNumber(requestAt, 0);
-  const safeMaxAgeMs = Math.max(1_000, safeNumber(maxAgeMs, DEFAULT_MAX_AGE_MS));
-  const safeFutureToleranceMs = Math.max(
-    0,
-    safeNumber(futureToleranceMs, DEFAULT_FUTURE_TOLERANCE_MS)
+  const safeMaxAgeMs = normalizeMaxAgeMs(maxAgeMs, DEFAULT_MAX_AGE_MS);
+  const safeFutureToleranceMs = normalizeFutureToleranceMs(
+    futureToleranceMs,
+    DEFAULT_FUTURE_TOLERANCE_MS
   );
 
   if (!safeRequestAt || !Number.isFinite(safeRequestAt)) {
@@ -48,8 +66,10 @@ export function validateRequestFreshness({
     };
   }
 
-  // reject absurd timestamps far in the past/future even before age evaluation
-  if (safeRequestAt < 1_500_000_000_000 || safeRequestAt > now + 24 * 60 * 60 * 1000) {
+  if (
+    safeRequestAt < MIN_REQUEST_TIMESTAMP_MS ||
+    safeRequestAt > now + MAX_REQUEST_FUTURE_SKEW_MS
+  ) {
     return {
       ok: false,
       code: "invalid_request_timestamp",
@@ -87,13 +107,15 @@ export function validateRequestFreshness({
 }
 
 export async function checkAndStoreNonce({
+  env = {},
   nonce,
   scope = "default",
   ttlMs = NONCE_TTL_MS
 } = {}) {
   const normalizedNonce = normalizeNonce(nonce);
   const normalizedScope = normalizeScope(scope);
-  const safeTtlMs = Math.max(30 * 1000, safeNumber(ttlMs, NONCE_TTL_MS));
+  const safeTtlMs = normalizeTtlMs(ttlMs, NONCE_TTL_MS);
+  const redis = getRedis(env);
 
   if (!normalizedNonce) {
     return {
@@ -102,7 +124,7 @@ export async function checkAndStoreNonce({
     };
   }
 
-  if (normalizedNonce.length < 8) {
+  if (normalizedNonce.length < MIN_NONCE_LENGTH) {
     return {
       ok: false,
       code: "weak_nonce"
@@ -121,7 +143,8 @@ export async function checkAndStoreNonce({
     if (result !== "OK") {
       return {
         ok: false,
-        code: "replayed_nonce"
+        code: "replayed_nonce",
+        scope: normalizedScope
       };
     }
 
@@ -135,12 +158,14 @@ export async function checkAndStoreNonce({
 
     return {
       ok: false,
-      code: "nonce_store_error"
+      code: "nonce_store_error",
+      scope: normalizedScope
     };
   }
 }
 
 export async function validateFreshRequest({
+  env = {},
   requestAt,
   nonce = "",
   scope = "default",
@@ -174,6 +199,7 @@ export async function validateFreshRequest({
   }
 
   const nonceResult = await checkAndStoreNonce({
+    env,
     nonce,
     scope,
     ttlMs: nonceTtlMs
@@ -184,7 +210,8 @@ export async function validateFreshRequest({
       ok: false,
       code: nonceResult.code,
       ageMs: freshness.ageMs,
-      now: freshness.now
+      now: freshness.now,
+      scope: nonceResult.scope || normalizeScope(scope)
     };
   }
 
@@ -193,6 +220,6 @@ export async function validateFreshRequest({
     code: "fresh_with_nonce",
     ageMs: freshness.ageMs,
     now: freshness.now,
-    scope: normalizeScope(scope)
+    scope: nonceResult.scope || normalizeScope(scope)
   };
 }

@@ -1,20 +1,32 @@
-import { getFirestore, FieldValue } from "firebase-admin/firestore";
-
 const MAX_ID_LENGTH = 128;
 const MAX_TYPE_LENGTH = 60;
 const MAX_ROUTE_GROUP_LENGTH = 80;
 const MAX_SOURCE_LENGTH = 50;
 const MAX_LEVEL_LENGTH = 20;
 
+const GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token";
+const FIRESTORE_BASE_URL = "https://firestore.googleapis.com/v1";
+const FIRESTORE_SCOPE = "https://www.googleapis.com/auth/datastore";
+
+let tokenCache = {
+  accessToken: "",
+  expiresAt: 0
+};
+
 function safeString(value, maxLength = 300) {
-  return String(value || "")
+  return String(value ?? "")
     .replace(/[\u0000-\u001F\u007F]/g, "")
     .trim()
     .slice(0, maxLength);
 }
 
+function safeNumber(value, fallback = 0) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : fallback;
+}
+
 function safeInt(value, fallback = 0, min = 0, max = 1_000_000) {
-  const num = Math.floor(Number(value));
+  const num = Math.floor(safeNumber(value, fallback));
   if (!Number.isFinite(num)) return fallback;
   return Math.min(max, Math.max(min, num));
 }
@@ -32,10 +44,9 @@ function normalizeHash(value = "", maxLength = 64) {
 
 function normalizeLevel(value = "") {
   const level = safeString(value || "warning", MAX_LEVEL_LENGTH).toLowerCase();
-  if (["info", "warning", "error", "critical"].includes(level)) {
-    return level;
-  }
-  return "warning";
+  return ["info", "warning", "error", "critical"].includes(level)
+    ? level
+    : "warning";
 }
 
 function normalizeType(value = "") {
@@ -48,6 +59,14 @@ function normalizeRouteGroup(value = "") {
 
 function normalizeSource(value = "") {
   return safeString(value || "unspecified", MAX_SOURCE_LENGTH).toLowerCase();
+}
+
+function hasFirebaseAdminEnv(env) {
+  return Boolean(
+    safeString(env?.FIREBASE_PROJECT_ID || "", 200) &&
+      safeString(env?.FIREBASE_CLIENT_EMAIL || "", 500) &&
+      safeString(env?.FIREBASE_PRIVATE_KEY || "", 20000)
+  );
 }
 
 function getSeverityWeight(level = "") {
@@ -117,11 +136,281 @@ function shouldIncrementCounter(type = "", matchers = []) {
   return matchers.some((matcher) => normalizedType.includes(matcher));
 }
 
-function buildEntityDocPath(kind, id) {
-  return `securityState/${kind}_${id}`;
+function buildEntityDocId(kind, id) {
+  return normalizeId(`${kind}_${id}`, MAX_ID_LENGTH);
 }
 
-function buildBasePatch(event = {}) {
+function base64UrlEncodeBytes(bytes) {
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function base64UrlEncodeString(input = "") {
+  return base64UrlEncodeBytes(new TextEncoder().encode(input));
+}
+
+function pemToArrayBuffer(pem = "") {
+  const cleaned = String(pem || "")
+    .replace(/-----BEGIN PRIVATE KEY-----/g, "")
+    .replace(/-----END PRIVATE KEY-----/g, "")
+    .replace(/\s+/g, "");
+
+  const binary = atob(cleaned);
+  const bytes = new Uint8Array(binary.length);
+
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+
+  return bytes.buffer;
+}
+
+async function importPrivateKey(privateKeyPem) {
+  return crypto.subtle.importKey(
+    "pkcs8",
+    pemToArrayBuffer(privateKeyPem),
+    {
+      name: "RSASSA-PKCS1-v1_5",
+      hash: "SHA-256"
+    },
+    false,
+    ["sign"]
+  );
+}
+
+async function createServiceJwt(env) {
+  const clientEmail = safeString(env?.FIREBASE_CLIENT_EMAIL || "", 500);
+  const privateKey = safeString(env?.FIREBASE_PRIVATE_KEY || "", 20000).replace(/\\n/g, "\n");
+
+  const now = Math.floor(Date.now() / 1000);
+  const header = { alg: "RS256", typ: "JWT" };
+  const claimSet = {
+    iss: clientEmail,
+    scope: FIRESTORE_SCOPE,
+    aud: GOOGLE_OAUTH_TOKEN_URL,
+    exp: now + 3600,
+    iat: now
+  };
+
+  const encodedHeader = base64UrlEncodeString(JSON.stringify(header));
+  const encodedClaimSet = base64UrlEncodeString(JSON.stringify(claimSet));
+  const unsignedToken = `${encodedHeader}.${encodedClaimSet}`;
+
+  const cryptoKey = await importPrivateKey(privateKey);
+  const signature = await crypto.subtle.sign(
+    "RSASSA-PKCS1-v1_5",
+    cryptoKey,
+    new TextEncoder().encode(unsignedToken)
+  );
+
+  const encodedSignature = base64UrlEncodeBytes(new Uint8Array(signature));
+  return `${unsignedToken}.${encodedSignature}`;
+}
+
+async function getAccessToken(env) {
+  const now = Date.now();
+
+  if (tokenCache.accessToken && tokenCache.expiresAt > now + 60 * 1000) {
+    return tokenCache.accessToken;
+  }
+
+  const assertion = await createServiceJwt(env);
+
+  const response = await fetch(GOOGLE_OAUTH_TOKEN_URL, {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded"
+    },
+    body: new URLSearchParams({
+      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+      assertion
+    })
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => "");
+    throw new Error(
+      `OAuth token request failed: ${response.status} ${safeString(errorText, 300)}`
+    );
+  }
+
+  const data = await response.json();
+  const accessToken = safeString(data?.access_token || "", 5000);
+  const expiresInMs = safeInt(data?.expires_in, 3600, 60, 3600) * 1000;
+
+  if (!accessToken) {
+    throw new Error("OAuth token missing access_token.");
+  }
+
+  tokenCache = {
+    accessToken,
+    expiresAt: now + expiresInMs
+  };
+
+  return accessToken;
+}
+
+function fromFirestoreValue(value) {
+  if (!value || typeof value !== "object") return null;
+
+  if ("stringValue" in value) return value.stringValue;
+  if ("integerValue" in value) return Number(value.integerValue);
+  if ("doubleValue" in value) return Number(value.doubleValue);
+  if ("booleanValue" in value) return Boolean(value.booleanValue);
+  if ("nullValue" in value) return null;
+
+  if ("arrayValue" in value) {
+    const values = value.arrayValue?.values || [];
+    return values.map(fromFirestoreValue);
+  }
+
+  if ("mapValue" in value) {
+    const fields = value.mapValue?.fields || {};
+    const output = {};
+    for (const [key, val] of Object.entries(fields)) {
+      output[key] = fromFirestoreValue(val);
+    }
+    return output;
+  }
+
+  return null;
+}
+
+function fromFirestoreDocument(doc) {
+  const fields = doc?.fields || {};
+  const output = {};
+
+  for (const [key, value] of Object.entries(fields)) {
+    output[key] = fromFirestoreValue(value);
+  }
+
+  return output;
+}
+
+function toFirestoreValue(value) {
+  if (value === null || value === undefined) {
+    return { nullValue: null };
+  }
+
+  if (typeof value === "string") {
+    return { stringValue: value };
+  }
+
+  if (typeof value === "boolean") {
+    return { booleanValue: value };
+  }
+
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      return { nullValue: null };
+    }
+
+    if (Number.isInteger(value)) {
+      return { integerValue: String(value) };
+    }
+
+    return { doubleValue: value };
+  }
+
+  if (Array.isArray(value)) {
+    return {
+      arrayValue: {
+        values: value.map((item) => toFirestoreValue(item))
+      }
+    };
+  }
+
+  if (typeof value === "object") {
+    const fields = {};
+    for (const [key, val] of Object.entries(value)) {
+      const safeKey = safeString(key, 100);
+      if (safeKey) {
+        fields[safeKey] = toFirestoreValue(val);
+      }
+    }
+    return { mapValue: { fields } };
+  }
+
+  return { stringValue: safeString(value, 500) };
+}
+
+function toFirestoreDocumentFields(data) {
+  const fields = {};
+
+  for (const [key, value] of Object.entries(data)) {
+    const safeKey = safeString(key, 100);
+    if (safeKey) {
+      fields[safeKey] = toFirestoreValue(value);
+    }
+  }
+
+  return fields;
+}
+
+async function firestoreGetDocument(env, collectionName, documentId) {
+  const projectId = safeString(env?.FIREBASE_PROJECT_ID || "", 200);
+  const accessToken = await getAccessToken(env);
+
+  const url =
+    `${FIRESTORE_BASE_URL}/projects/${encodeURIComponent(projectId)}` +
+    `/databases/(default)/documents/${encodeURIComponent(collectionName)}/${encodeURIComponent(documentId)}`;
+
+  const response = await fetch(url, {
+    method: "GET",
+    headers: {
+      authorization: `Bearer ${accessToken}`
+    }
+  });
+
+  if (response.status === 404) {
+    return null;
+  }
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => "");
+    throw new Error(
+      `Firestore read failed: ${response.status} ${safeString(errorText, 500)}`
+    );
+  }
+
+  const data = await response.json();
+  return fromFirestoreDocument(data);
+}
+
+async function firestorePatchDocument(env, collectionName, documentId, payload) {
+  const projectId = safeString(env?.FIREBASE_PROJECT_ID || "", 200);
+  const accessToken = await getAccessToken(env);
+
+  const url =
+    `${FIRESTORE_BASE_URL}/projects/${encodeURIComponent(projectId)}` +
+    `/databases/(default)/documents/${encodeURIComponent(collectionName)}/${encodeURIComponent(documentId)}`;
+
+  const response = await fetch(url, {
+    method: "PATCH",
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      fields: toFirestoreDocumentFields(payload)
+    })
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => "");
+    throw new Error(
+      `Firestore patch failed: ${response.status} ${safeString(errorText, 500)}`
+    );
+  }
+
+  return true;
+}
+
+function buildBasePatch(existing = {}, event = {}) {
   const nowMs = Date.now();
   const level = normalizeLevel(event.level);
   const type = normalizeType(event.type);
@@ -138,43 +427,55 @@ function buildBasePatch(event = {}) {
     lastSource: source,
     lastRouteGroup: routeGroup,
     lastSeenAtMs: nowMs,
-    lastSeenAt: FieldValue.serverTimestamp(),
-    totalEvents: FieldValue.increment(1),
-    totalSeverityWeight: FieldValue.increment(severityWeight),
-    rollingRiskScoreDelta: FieldValue.increment(riskDelta)
+    lastSeenAtIso: new Date(nowMs).toISOString(),
+    totalEvents: safeInt(existing.totalEvents, 0) + 1,
+    totalSeverityWeight: safeInt(existing.totalSeverityWeight, 0) + severityWeight,
+    rollingRiskScoreDelta: Math.max(
+      0,
+      safeInt(existing.rollingRiskScoreDelta, 0) + riskDelta
+    )
   };
 }
 
-function buildCounterPatch(event = {}) {
+function buildCounterPatch(existing = {}, event = {}) {
   const type = normalizeType(event.type);
   const level = normalizeLevel(event.level);
 
-  const patch = {};
+  const patch = {
+    criticalEvents: safeInt(existing.criticalEvents, 0),
+    errorEvents: safeInt(existing.errorEvents, 0),
+    warningEvents: safeInt(existing.warningEvents, 0),
+    infoEvents: safeInt(existing.infoEvents, 0),
+    failedLoginCount: safeInt(existing.failedLoginCount, 0),
+    failedSignupCount: safeInt(existing.failedSignupCount, 0),
+    failedPasswordResetCount: safeInt(existing.failedPasswordResetCount, 0),
+    passwordResetRequestCount: safeInt(existing.passwordResetRequestCount, 0),
+    captchaFailureCount: safeInt(existing.captchaFailureCount, 0),
+    suspiciousEventCount: safeInt(existing.suspiciousEventCount, 0),
+    rateLimitHitCount: safeInt(existing.rateLimitHitCount, 0),
+    lockoutCount: safeInt(existing.lockoutCount, 0),
+    successfulAuthCount: safeInt(existing.successfulAuthCount, 0)
+  };
 
-  if (level === "critical") {
-    patch.criticalEvents = FieldValue.increment(1);
-  } else if (level === "error") {
-    patch.errorEvents = FieldValue.increment(1);
-  } else if (level === "warning") {
-    patch.warningEvents = FieldValue.increment(1);
-  } else {
-    patch.infoEvents = FieldValue.increment(1);
-  }
+  if (level === "critical") patch.criticalEvents += 1;
+  else if (level === "error") patch.errorEvents += 1;
+  else if (level === "warning") patch.warningEvents += 1;
+  else patch.infoEvents += 1;
 
   if (shouldIncrementCounter(type, ["login_failed"])) {
-    patch.failedLoginCount = FieldValue.increment(1);
+    patch.failedLoginCount += 1;
   }
 
   if (shouldIncrementCounter(type, ["signup_failed"])) {
-    patch.failedSignupCount = FieldValue.increment(1);
+    patch.failedSignupCount += 1;
   }
 
   if (shouldIncrementCounter(type, ["password_reset_failed"])) {
-    patch.failedPasswordResetCount = FieldValue.increment(1);
+    patch.failedPasswordResetCount += 1;
   }
 
   if (shouldIncrementCounter(type, ["password_reset_requested"])) {
-    patch.passwordResetRequestCount = FieldValue.increment(1);
+    patch.passwordResetRequestCount += 1;
   }
 
   if (
@@ -184,7 +485,7 @@ function buildCounterPatch(event = {}) {
       "captcha_failed"
     ])
   ) {
-    patch.captchaFailureCount = FieldValue.increment(1);
+    patch.captchaFailureCount += 1;
   }
 
   if (
@@ -196,15 +497,15 @@ function buildCounterPatch(event = {}) {
       "suspicious"
     ])
   ) {
-    patch.suspiciousEventCount = FieldValue.increment(1);
+    patch.suspiciousEventCount += 1;
   }
 
   if (shouldIncrementCounter(type, ["rate_limited"])) {
-    patch.rateLimitHitCount = FieldValue.increment(1);
+    patch.rateLimitHitCount += 1;
   }
 
   if (shouldIncrementCounter(type, ["lockout", "ip_login_lock"])) {
-    patch.lockoutCount = FieldValue.increment(1);
+    patch.lockoutCount += 1;
   }
 
   if (
@@ -214,20 +515,10 @@ function buildCounterPatch(event = {}) {
       "google_login_success"
     ])
   ) {
-    patch.successfulAuthCount = FieldValue.increment(1);
+    patch.successfulAuthCount += 1;
   }
 
   return patch;
-}
-
-async function readExistingState(db, docPath) {
-  try {
-    const snap = await db.doc(docPath).get();
-    return snap.exists ? snap.data() || {} : {};
-  } catch (error) {
-    console.error("Failed to read security state:", error);
-    return {};
-  }
 }
 
 function buildRiskPatch(existing = {}, event = {}) {
@@ -248,19 +539,19 @@ function buildRiskPatch(existing = {}, event = {}) {
 
 function buildStatePatch(existing = {}, event = {}) {
   return {
-    ...buildBasePatch(event),
-    ...buildCounterPatch(event),
+    ...buildBasePatch(existing, event),
+    ...buildCounterPatch(existing, event),
     ...buildRiskPatch(existing, event)
   };
 }
 
-async function updateEntityState(db, kind, refId, event) {
+async function updateEntityState(env, kind, refId, event) {
   if (!refId) {
     return false;
   }
 
-  const docPath = buildEntityDocPath(kind, refId);
-  const existing = await readExistingState(db, docPath);
+  const documentId = buildEntityDocId(kind, refId);
+  const existing = (await firestoreGetDocument(env, "securityState", documentId)) || {};
 
   const patch = buildStatePatch(existing, {
     ...event,
@@ -269,7 +560,7 @@ async function updateEntityState(db, kind, refId, event) {
   });
 
   try {
-    await db.doc(docPath).set(patch, { merge: true });
+    await firestorePatchDocument(env, "securityState", documentId, patch);
     return true;
   } catch (error) {
     console.error(`Failed to update security state for ${kind}:`, error);
@@ -304,14 +595,11 @@ function getEntityTargets(event = {}) {
   return targets;
 }
 
-export async function updateSecurityState(dbOrEvent, maybeEvent = null) {
-  const db =
-    maybeEvent === null ? getFirestore() : dbOrEvent;
+export async function updateSecurityState(input = {}) {
+  const env = input?.env || null;
+  const event = input?.event || null;
 
-  const event =
-    maybeEvent === null ? dbOrEvent : maybeEvent;
-
-  if (!db || !event || typeof event !== "object") {
+  if (!env || !hasFirebaseAdminEnv(env) || !event || typeof event !== "object") {
     return { ok: false, updated: 0 };
   }
 
@@ -324,7 +612,7 @@ export async function updateSecurityState(dbOrEvent, maybeEvent = null) {
   let updated = 0;
 
   for (const target of targets) {
-    const ok = await updateEntityState(db, target.kind, target.refId, event);
+    const ok = await updateEntityState(env, target.kind, target.refId, event);
     if (ok) {
       updated += 1;
     }

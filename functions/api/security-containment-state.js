@@ -33,95 +33,105 @@ function safeTimestamp(value, fallback = 0) {
   return Number.isFinite(num) && num >= 0 ? Math.floor(num) : fallback;
 }
 
-export async function onRequestGet(context) {
-  try {
-    const origin = normalizeOrigin(context.request.headers.get("origin") || "");
+function buildCorsHeaders(origin = "") {
+  const normalizedOrigin = normalizeOrigin(origin);
+  const allowOrigin = isOriginAllowed(normalizedOrigin) ? normalizedOrigin : "null";
 
-    if (origin && !isOriginAllowed(origin)) {
-      return new Response(
-        JSON.stringify({
+  return {
+    "access-control-allow-origin": allowOrigin,
+    "access-control-allow-methods": "GET, OPTIONS",
+    "access-control-allow-headers": "Content-Type",
+    "cache-control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+    pragma: "no-cache",
+    expires: "0",
+    vary: "Origin",
+    "content-type": "application/json; charset=utf-8"
+  };
+}
+
+function jsonResponse(origin, payload, status = 200) {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: buildCorsHeaders(origin)
+  });
+}
+
+function buildFlags(flags = {}) {
+  return {
+    freezeRegistrations: flags?.freezeRegistrations === true,
+    disableProfileEdits: flags?.disableProfileEdits === true,
+    lockAdminWrites: flags?.lockAdminWrites === true,
+    readOnlyMode: flags?.readOnlyMode === true,
+    disableUploads: flags?.disableUploads === true,
+    forceCaptcha: flags?.forceCaptcha === true,
+    lockdown: flags?.lockdown === true
+  };
+}
+
+export async function onRequestGet(context) {
+  const origin = context.request.headers.get("origin") || "";
+
+  try {
+    const normalizedOrigin = normalizeOrigin(origin);
+
+    if (normalizedOrigin && !isOriginAllowed(normalizedOrigin)) {
+      return jsonResponse(
+        origin,
+        {
           success: false,
           message: "Forbidden origin."
-        }),
-        {
-          status: 403,
-          headers: {
-            "content-type": "application/json"
-          }
-        }
+        },
+        403
       );
     }
 
     const state = await getContainmentState();
 
-    return new Response(
-      JSON.stringify({
-        success: true,
-        mode: safeString(state?.mode || "normal", 30).toLowerCase(),
-        updatedAt: safeTimestamp(state?.updatedAt, 0),
-        expiresAt: safeTimestamp(state?.expiresAt, 0),
-        flags: {
-          freezeRegistrations: state?.flags?.freezeRegistrations === true,
-          disableProfileEdits: state?.flags?.disableProfileEdits === true,
-          lockAdminWrites: state?.flags?.lockAdminWrites === true,
-          readOnlyMode: state?.flags?.readOnlyMode === true,
-          disableUploads: state?.flags?.disableUploads === true,
-          forceCaptcha: state?.flags?.forceCaptcha === true,
-          lockdown: state?.flags?.lockdown === true
-        }
-      }),
-      {
-        status: 200,
-        headers: {
-          "content-type": "application/json"
-        }
-      }
-    );
+    return jsonResponse(origin, {
+      success: true,
+      mode: safeString(state?.mode || "normal", 30).toLowerCase(),
+      updatedAt: safeTimestamp(state?.updatedAt, 0),
+      expiresAt: safeTimestamp(state?.expiresAt, 0),
+      flags: buildFlags(state?.flags || {})
+    });
   } catch (error) {
     console.error("Containment state API error:", error);
 
-    return new Response(
-      JSON.stringify({
+    return jsonResponse(
+      origin,
+      {
         success: false,
         message: "Internal server error."
-      }),
-      {
-        status: 500,
-        headers: {
-          "content-type": "application/json"
-        }
-      }
+      },
+      500
     );
   }
 }
 
-export async function onRequestOptions() {
+export async function onRequestOptions(context) {
+  const origin = context.request.headers.get("origin") || "";
+
   return new Response(null, {
     status: 204,
-    headers: {
-      "access-control-allow-origin": "*",
-      "access-control-allow-methods": "GET, OPTIONS",
-      "access-control-allow-headers": "Content-Type"
-    }
+    headers: buildCorsHeaders(origin)
   });
 }
 
 export async function onRequest(context) {
-  if (context.request.method === "GET") {
+  const method = context.request.method;
+  const origin = context.request.headers.get("origin") || "";
+
+  if (method === "GET") {
     return onRequestGet(context);
   }
 
-  if (context.request.method === "OPTIONS") {
-    return onRequestOptions();
+  if (method === "OPTIONS") {
+    return onRequestOptions(context);
   }
 
-  return new Response(
-    JSON.stringify(buildMethodNotAllowedResponse()),
-    {
-      status: 405,
-      headers: {
-        "content-type": "application/json"
-      }
-    }
+  return jsonResponse(
+    origin,
+    buildMethodNotAllowedResponse(),
+    405
   );
 }
