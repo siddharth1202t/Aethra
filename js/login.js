@@ -43,7 +43,8 @@ const RESET_COOLDOWN_MS = 3000;
 
 const ALLOWED_GOOGLE_AUTH_HOSTS = new Set([
   "aethra-hb2h.vercel.app",
-  "aethra-gules.vercel.app"
+  "http://localhost:8080",
+  "http://127.0.0.1:8080"
 ]);
 
 const form = document.getElementById("loginForm");
