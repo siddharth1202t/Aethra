@@ -1,8 +1,8 @@
-import { buildSecurityStatus } from "../_security-status.js";
-import { writeSecurityLog } from "../_security-log-writer.js";
-import { safeString, buildMethodNotAllowedResponse } from "../_api-security.js";
-import { getAdaptiveThreatMode } from "../_adaptive-threat-mode.js";
-import { getContainmentState } from "../_security-containment.js";
+import { buildSecurityStatus } from "./_security-status.js";
+import { writeSecurityLog } from "./_security-log-writer.js";
+import { safeString, buildMethodNotAllowedResponse } from "./_api-security.js";
+import { getAdaptiveThreatMode } from "./_adaptive-threat-mode.js";
+import { getContainmentState } from "./_security-containment.js";
 
 const ROUTE = "/api/security-status";
 
