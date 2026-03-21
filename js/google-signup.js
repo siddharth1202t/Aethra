@@ -26,7 +26,8 @@ const HOME_PAGE = "home.html";
 
 const ALLOWED_GOOGLE_AUTH_HOSTS = new Set([
   "aethra-hb2h.vercel.app",
-  "aethra-gules.vercel.app"
+  "127.0.0.1",
+  "localhost"
 ]);
 
 let googleInProgress = false;
