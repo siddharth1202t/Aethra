@@ -1,17 +1,33 @@
-function safeInt(value, fallback = 0, min = 0, max = 1_000_000) {
+const MAX_COUNTER_VALUE = 1_000_000;
+const MAX_EVENT_WINDOW_SIZE = 1000;
+
+const ALLOWED_MODES = new Set([
+  "normal",
+  "elevated",
+  "defense",
+  "lockdown"
+]);
+
+function safeInt(value, fallback = 0, min = 0, max = MAX_COUNTER_VALUE) {
   const num = Math.floor(Number(value));
   if (!Number.isFinite(num)) return fallback;
   return Math.min(max, Math.max(min, num));
 }
 
 function safeString(value, maxLength = 100) {
-  return String(value || "").trim().slice(0, maxLength);
+  return String(value ?? "")
+    .replace(/[\u0000-\u001F\u007F]/g, "")
+    .trim()
+    .slice(0, maxLength);
+}
+
+function isPlainObject(value) {
+  return Object.prototype.toString.call(value) === "[object Object]";
 }
 
 function normalizeMode(mode = "normal") {
-  const allowed = new Set(["normal", "elevated", "defense", "lockdown"]);
   const normalized = safeString(mode || "normal", 30).toLowerCase();
-  return allowed.has(normalized) ? normalized : "normal";
+  return ALLOWED_MODES.has(normalized) ? normalized : "normal";
 }
 
 function calculateThreatPressureFromCounters(counters = {}, mode = "normal") {
@@ -42,7 +58,7 @@ function calculateThreatPressureFromCounters(counters = {}, mode = "normal") {
   return Math.min(100, Math.max(0, pressure));
 }
 
-function createEmptyCounts() {
+function createEmptySeverityCounts() {
   return {
     info: 0,
     warning: 0,
@@ -62,26 +78,56 @@ function createEmptyActionCounts() {
   };
 }
 
+function normalizeCounters(input = {}) {
+  const counters = isPlainObject(input) ? input : {};
+
+  return {
+    totalSignals: safeInt(counters.totalSignals, 0),
+    criticalSignals: safeInt(counters.criticalSignals, 0),
+    blockSignals: safeInt(counters.blockSignals, 0),
+    challengeSignals: safeInt(counters.challengeSignals, 0),
+    repeatedOffenderSignals: safeInt(counters.repeatedOffenderSignals, 0),
+    lockdownTriggers: safeInt(counters.lockdownTriggers, 0),
+    highRiskStateSignals: safeInt(counters.highRiskStateSignals, 0),
+    routePressureSignals: safeInt(counters.routePressureSignals, 0)
+  };
+}
+
+function normalizeEventList(events) {
+  return Array.isArray(events) ? events : [];
+}
+
+function normalizeTimestamp(timestamp = Date.now()) {
+  const parsed = Number(timestamp);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : Date.now();
+}
+
 export function buildSecurityMetrics({
   adaptiveState = {},
   containmentState = {},
   events = [],
   timestamp = Date.now()
 } = {}) {
-  const mode = normalizeMode(adaptiveState?.mode || "normal");
-  const counters =
-    adaptiveState && typeof adaptiveState.counters === "object"
-      ? adaptiveState.counters
-      : {};
+  const safeAdaptiveState = isPlainObject(adaptiveState) ? adaptiveState : {};
+  const safeContainmentState = isPlainObject(containmentState)
+    ? containmentState
+    : {};
+  const safeEvents = normalizeEventList(events);
 
-  const severityCounts = createEmptyCounts();
+  const mode = normalizeMode(safeAdaptiveState.mode || "normal");
+  const containmentMode = normalizeMode(safeContainmentState.mode || "normal");
+  const counters = normalizeCounters(
+    isPlainObject(safeAdaptiveState.counters) ? safeAdaptiveState.counters : {}
+  );
+
+  const severityCounts = createEmptySeverityCounts();
   const actionCounts = createEmptyActionCounts();
 
   let recentHighSeverityCount = 0;
   let containmentEventCount = 0;
   let unauthorizedAdminAttempts = 0;
 
-  for (const event of Array.isArray(events) ? events : []) {
+  for (const event of safeEvents) {
     const severity = safeString(event?.severity || "", 20).toLowerCase();
     const action = safeString(event?.action || "", 20).toLowerCase();
     const type = safeString(event?.type || "", 80).toLowerCase();
@@ -94,7 +140,11 @@ export function buildSecurityMetrics({
       actionCounts[action] += 1;
     }
 
-    if (severity === "warning" || severity === "error" || severity === "critical") {
+    if (
+      severity === "warning" ||
+      severity === "error" ||
+      severity === "critical"
+    ) {
       recentHighSeverityCount += 1;
     }
 
@@ -108,24 +158,16 @@ export function buildSecurityMetrics({
   }
 
   const threatPressure = calculateThreatPressureFromCounters(counters, mode);
+  const normalizedTimestamp = normalizeTimestamp(timestamp);
 
   return {
     ok: true,
-    timestamp: new Date(timestamp).toISOString(),
+    timestamp: new Date(normalizedTimestamp).toISOString(),
     mode,
-    containmentMode: safeString(containmentState?.mode || "normal", 30).toLowerCase(),
+    containmentMode,
     threatPressure,
-    eventWindowSize: safeInt(Array.isArray(events) ? events.length : 0, 0, 0, 1000),
-    counters: {
-      totalSignals: safeInt(counters.totalSignals, 0),
-      criticalSignals: safeInt(counters.criticalSignals, 0),
-      blockSignals: safeInt(counters.blockSignals, 0),
-      challengeSignals: safeInt(counters.challengeSignals, 0),
-      repeatedOffenderSignals: safeInt(counters.repeatedOffenderSignals, 0),
-      lockdownTriggers: safeInt(counters.lockdownTriggers, 0),
-      highRiskStateSignals: safeInt(counters.highRiskStateSignals, 0),
-      routePressureSignals: safeInt(counters.routePressureSignals, 0)
-    },
+    eventWindowSize: safeInt(safeEvents.length, 0, 0, MAX_EVENT_WINDOW_SIZE),
+    counters,
     eventCounts: {
       bySeverity: severityCounts,
       byAction: actionCounts
@@ -134,9 +176,9 @@ export function buildSecurityMetrics({
       recentHighSeverityCount,
       containmentEventCount,
       unauthorizedAdminAttempts,
-      forceCaptchaEnabled: containmentState?.flags?.forceCaptcha === true,
-      lockdownActive: containmentState?.flags?.lockdown === true,
-      readOnlyMode: containmentState?.flags?.readOnlyMode === true
+      forceCaptchaEnabled: safeContainmentState?.flags?.forceCaptcha === true,
+      lockdownActive: safeContainmentState?.flags?.lockdown === true,
+      readOnlyMode: safeContainmentState?.flags?.readOnlyMode === true
     }
   };
 }
