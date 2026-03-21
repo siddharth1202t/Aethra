@@ -6,6 +6,7 @@ const MAX_USER_AGENT_LENGTH = 500;
 const MAX_ORIGIN_LENGTH = 200;
 const MAX_METHOD_LENGTH = 20;
 const MAX_EMAIL_LENGTH = 200;
+const MAX_HEADER_VALUE_LENGTH = 500;
 
 const ALLOWED_METHODS = new Set([
   "GET",
@@ -18,15 +19,63 @@ const ALLOWED_METHODS = new Set([
 ]);
 
 function stripControlChars(value = "") {
-  return String(value).replace(/[\u0000-\u001F\u007F]/g, "");
+  return String(value ?? "").replace(/[\u0000-\u001F\u007F]/g, "");
 }
 
 function safeString(value, maxLength = 300) {
-  return stripControlChars(value || "").trim().slice(0, maxLength);
+  return stripControlChars(value).trim().slice(0, maxLength);
 }
 
 function sanitizeKeyPart(value = "", maxLength = 120) {
   return safeString(value, maxLength).replace(/[^a-zA-Z0-9._:@/-]/g, "");
+}
+
+function isPlainObject(value) {
+  return Object.prototype.toString.call(value) === "[object Object]";
+}
+
+function getHeaderValue(req, name) {
+  const headers = req?.headers;
+  if (!headers || !name) return "";
+
+  if (typeof headers.get === "function") {
+    return safeString(headers.get(name) || "", MAX_HEADER_VALUE_LENGTH);
+  }
+
+  if (Array.isArray(headers)) {
+    for (const entry of headers) {
+      if (
+        Array.isArray(entry) &&
+        entry.length >= 2 &&
+        String(entry[0]).toLowerCase() === String(name).toLowerCase()
+      ) {
+        return safeString(entry[1] || "", MAX_HEADER_VALUE_LENGTH);
+      }
+    }
+    return "";
+  }
+
+  if (isPlainObject(headers)) {
+    const directValue = headers[name];
+    if (Array.isArray(directValue)) {
+      return safeString(directValue[0] || "", MAX_HEADER_VALUE_LENGTH);
+    }
+    if (directValue !== undefined && directValue !== null) {
+      return safeString(directValue, MAX_HEADER_VALUE_LENGTH);
+    }
+
+    const lowerName = String(name).toLowerCase();
+    for (const [key, value] of Object.entries(headers)) {
+      if (String(key).toLowerCase() === lowerName) {
+        if (Array.isArray(value)) {
+          return safeString(value[0] || "", MAX_HEADER_VALUE_LENGTH);
+        }
+        return safeString(value || "", MAX_HEADER_VALUE_LENGTH);
+      }
+    }
+  }
+
+  return "";
 }
 
 function normalizeIp(value = "") {
@@ -91,9 +140,7 @@ function normalizeMethod(value = "") {
 function normalizeEmail(value = "") {
   const email = safeString(value || "", MAX_EMAIL_LENGTH).toLowerCase();
 
-  if (!email) {
-    return "";
-  }
+  if (!email) return "";
 
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     return "";
@@ -102,25 +149,15 @@ function normalizeEmail(value = "") {
   return email;
 }
 
-function getHeaderValue(req, name) {
-  const value = req?.headers?.[name];
-
-  if (Array.isArray(value)) {
-    return safeString(value[0] || "", 500);
-  }
-
-  return safeString(value || "", 500);
-}
-
 function extractClientIp(req = null, fallback = "") {
-  const forwarded = req?.headers?.["x-forwarded-for"];
-
-  if (typeof forwarded === "string" && forwarded.trim()) {
-    return normalizeIp(forwarded.split(",")[0].trim());
+  const forwarded = getHeaderValue(req, "x-forwarded-for");
+  if (forwarded) {
+    return normalizeIp(forwarded.split(",")[0]?.trim());
   }
 
-  if (Array.isArray(forwarded) && forwarded.length > 0) {
-    return normalizeIp(String(forwarded[0]).split(",")[0].trim());
+  const cfIp = getHeaderValue(req, "cf-connecting-ip");
+  if (cfIp) {
+    return normalizeIp(cfIp);
   }
 
   const realIp = getHeaderValue(req, "x-real-ip");
@@ -145,7 +182,8 @@ function extractUserAgent(req = null, fallback = "") {
 }
 
 function extractRoute(req = null, fallback = "") {
-  return normalizeRoute(req?.url || fallback);
+  const fromUrl = safeString(req?.url || "", MAX_ROUTE_LENGTH * 2);
+  return normalizeRoute(fromUrl || fallback);
 }
 
 function extractMethod(req = null, fallback = "GET") {
@@ -159,9 +197,9 @@ function extractSessionId({
   fallback = ""
 } = {}) {
   return normalizeSessionId(
-    context.sessionId ||
-      body.sessionId ||
-      behavior.sessionId ||
+    context?.sessionId ||
+      body?.sessionId ||
+      behavior?.sessionId ||
       fallback
   );
 }
@@ -173,8 +211,8 @@ function extractUserId({
   fallback = ""
 } = {}) {
   return normalizeUserId(
-    context.userId ||
-      body.userId ||
+    context?.userId ||
+      body?.userId ||
       req?.user?.uid ||
       req?.auth?.uid ||
       fallback
@@ -212,7 +250,7 @@ export function createActorContext({
   fallbackSessionId = "",
   fallbackUserId = ""
 } = {}) {
-  const ip = extractClientIp(req, context.ip || fallbackIp);
+  const ip = extractClientIp(req, context?.ip || fallbackIp);
   const sessionId = extractSessionId({
     body,
     behavior,
@@ -230,9 +268,9 @@ export function createActorContext({
   const origin = extractOrigin(req);
   const userAgent = extractUserAgent(
     req,
-    safeString(behavior.userAgent || "", MAX_USER_AGENT_LENGTH)
+    safeString(behavior?.userAgent || "", MAX_USER_AGENT_LENGTH)
   );
-  const email = normalizeEmail(body.email || context.email || "");
+  const email = normalizeEmail(body?.email || context?.email || "");
 
   return {
     ip,
