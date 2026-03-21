@@ -21,8 +21,9 @@ const STALE_RECORD_TTL_MS = 24 * 60 * 60 * 1000;
 const ROUTE = "/api/signup-attempt";
 
 const ALLOWED_ORIGINS = new Set([
-  "https://aethra-gules.vercel.app",
-  "https://aethra-hb2h.vercel.app"
+  "127.0.0.1",
+  "https://aethra-hb2h.vercel.app",
+  "localhost"
 ]);
 
 const ALLOWED_ACTIONS = new Set(["check", "fail"]);
