@@ -1,4 +1,4 @@
-import { redis } from "./_redis.js";
+import { getRedis } from "./_redis.js";
 
 const BOT_STATE_TTL_MS = 24 * 60 * 60 * 1000;
 const BOT_SIGNAL_WINDOW_MS = 30 * 60 * 1000;
@@ -25,7 +25,7 @@ function toSafeInt(value, fallback = 0, min = 0, max = 1_000_000_000) {
 }
 
 function stripControlChars(value = "") {
-  return String(value).replace(/[\u0000-\u001F\u007F]/g, "");
+  return String(value ?? "").replace(/[\u0000-\u001F\u007F]/g, "");
 }
 
 function safeString(value, maxLength = 300) {
@@ -45,6 +45,54 @@ function sanitizeKeyPart(value = "", maxLength = 120, fallback = "") {
   return cleaned || fallback;
 }
 
+function isPlainObject(value) {
+  return Object.prototype.toString.call(value) === "[object Object]";
+}
+
+function getHeaderValue(req, name) {
+  const headers = req?.headers;
+  if (!headers || !name) return "";
+
+  if (typeof headers.get === "function") {
+    return safeString(headers.get(name) || "", 1000);
+  }
+
+  if (Array.isArray(headers)) {
+    for (const entry of headers) {
+      if (
+        Array.isArray(entry) &&
+        entry.length >= 2 &&
+        String(entry[0]).toLowerCase() === String(name).toLowerCase()
+      ) {
+        return safeString(entry[1] || "", 1000);
+      }
+    }
+    return "";
+  }
+
+  if (isPlainObject(headers)) {
+    const directValue = headers[name];
+    if (Array.isArray(directValue)) {
+      return safeString(directValue[0] || "", 1000);
+    }
+    if (directValue !== undefined && directValue !== null) {
+      return safeString(directValue, 1000);
+    }
+
+    const lowerName = String(name).toLowerCase();
+    for (const [key, value] of Object.entries(headers)) {
+      if (String(key).toLowerCase() === lowerName) {
+        if (Array.isArray(value)) {
+          return safeString(value[0] || "", 1000);
+        }
+        return safeString(value || "", 1000);
+      }
+    }
+  }
+
+  return "";
+}
+
 function normalizeRoute(route) {
   const raw = safeString(route || "unknown-route", MAX_ROUTE_LENGTH * 2);
 
@@ -54,7 +102,7 @@ function normalizeRoute(route) {
 
   const cleaned = withoutQuery
     .replace(/\/{2,}/g, "/")
-    .replace(/[^a-zA-Z0-9/_-]/g, "")
+    .replace(/[^a-zA-Z0-9/_:-]/g, "")
     .trim()
     .toLowerCase()
     .slice(0, MAX_ROUTE_LENGTH);
@@ -196,7 +244,7 @@ function normalizeBotRecord(raw, now) {
   };
 }
 
-async function getStoredBotRecord(redisKey, now) {
+async function getStoredBotRecord(redis, redisKey, now) {
   try {
     const raw = await redis.get(redisKey);
 
@@ -223,7 +271,7 @@ async function getStoredBotRecord(redisKey, now) {
   }
 }
 
-async function storeBotRecord(redisKey, record) {
+async function storeBotRecord(redis, redisKey, record) {
   try {
     const ttlSeconds = Math.max(1, Math.ceil(BOT_STATE_TTL_MS / 1000));
     const normalized = normalizeBotRecord(record, Date.now());
@@ -303,6 +351,29 @@ function summarizeRecentSignals(record, route) {
   };
 }
 
+function extractRequestUserAgent(req = null) {
+  return normalizeUserAgent(getHeaderValue(req, "user-agent"));
+}
+
+function extractForwardedIp(req = null) {
+  const forwarded = getHeaderValue(req, "x-forwarded-for");
+  if (forwarded) {
+    return normalizeIp(forwarded.split(",")[0]?.trim());
+  }
+
+  const cfIp = getHeaderValue(req, "cf-connecting-ip");
+  if (cfIp) {
+    return normalizeIp(cfIp);
+  }
+
+  const realIp = getHeaderValue(req, "x-real-ip");
+  if (realIp) {
+    return normalizeIp(realIp);
+  }
+
+  return normalizeIp(req?.socket?.remoteAddress || "");
+}
+
 export function analyzeBotBehavior(behavior = {}, req = null) {
   const now = Date.now();
 
@@ -320,7 +391,7 @@ export function analyzeBotBehavior(behavior = {}, req = null) {
   const sessionId = normalizeSessionId(behavior.sessionId || "");
   const route = normalizeRoute(behavior.route || req?.url || "unknown-route");
 
-  const requestUserAgent = normalizeUserAgent(req?.headers?.["user-agent"] || "");
+  const requestUserAgent = extractRequestUserAgent(req);
   const behaviorUserAgent = normalizeUserAgent(behavior.userAgent || "");
   const userAgent = requestUserAgent || behaviorUserAgent;
 
@@ -508,26 +579,18 @@ export async function trackBotBehavior(behavior = {}, req = null, context = {}) 
   const analysis = analyzeBotBehavior(behavior, req);
 
   const route = normalizeRoute(behavior.route || req?.url || "unknown-route");
-  const requestUserAgent = normalizeUserAgent(req?.headers?.["user-agent"] || "");
+  const requestUserAgent = extractRequestUserAgent(req);
   const behaviorUserAgent = normalizeUserAgent(behavior.userAgent || "");
   const userAgent = requestUserAgent || behaviorUserAgent;
 
   const sessionId =
     normalizeSessionId(context.sessionId || behavior.sessionId || "");
-  const forwardedHeader = req?.headers?.["x-forwarded-for"];
-  const forwardedIp =
-    typeof forwardedHeader === "string"
-      ? forwardedHeader.split(",")[0]?.trim()
-      : Array.isArray(forwardedHeader) && forwardedHeader.length > 0
-        ? String(forwardedHeader[0]).split(",")[0]?.trim()
-        : "";
-
-  const ip = normalizeIp(context.ip || forwardedIp || req?.socket?.remoteAddress || "");
+  const ip = normalizeIp(context.ip || extractForwardedIp(req) || "");
   const userId = normalizeUserId(context.userId || "");
-
   const redisKey = buildBotKey({ ip, sessionId, userId });
+  const redis = getRedis(context.env || {});
 
-  let record = await getStoredBotRecord(redisKey, now);
+  let record = await getStoredBotRecord(redis, redisKey, now);
   if (!record) {
     record = createEmptyBotRecord(now);
   }
@@ -608,7 +671,7 @@ export async function trackBotBehavior(behavior = {}, req = null, context = {}) 
     recommendedAction: analysis.recommendedAction
   }, now);
 
-  await storeBotRecord(redisKey, record);
+  await storeBotRecord(redis, redisKey, record);
 
   let escalatedAction = analysis.recommendedAction;
 
@@ -648,8 +711,8 @@ export async function getBotBehaviorSnapshot(context = {}) {
     sessionId: context.sessionId || "",
     userId: context.userId || ""
   });
-
-  const record = await getStoredBotRecord(redisKey, now);
+  const redis = getRedis(context.env || {});
+  const record = await getStoredBotRecord(redis, redisKey, now);
 
   if (!record) {
     return {
@@ -678,6 +741,7 @@ export async function clearBotBehaviorSnapshot(context = {}) {
     sessionId: context.sessionId || "",
     userId: context.userId || ""
   });
+  const redis = getRedis(context.env || {});
 
   try {
     await redis.del(redisKey);
