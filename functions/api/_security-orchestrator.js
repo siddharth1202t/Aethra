@@ -1,6 +1,3 @@
-import crypto from "node:crypto";
-import { getFirestore } from "firebase-admin/firestore";
-
 import { createActorContext } from "./_actor-context.js";
 import { evaluateRisk } from "./_risk-engine.js";
 import { trackBotBehavior } from "./_bot-detection.js";
@@ -14,9 +11,21 @@ import { getRiskState, updateRiskState } from "./_security-risk-state.js";
 import { evaluateAnomalyDetection } from "./_security-anomaly-detection.js";
 import { evaluateSecurityAlerts } from "./_security-alerts.js";
 import { getRecentSecurityEvents } from "./_security-event-store.js";
+<<<<<<< HEAD
+=======
+
+const GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token";
+const FIRESTORE_BASE_URL = "https://firestore.googleapis.com/v1";
+const FIRESTORE_SCOPE = "https://www.googleapis.com/auth/datastore";
+
+let tokenCache = {
+  accessToken: "",
+  expiresAt: 0
+};
+>>>>>>> 462287806a8da117fc6781c19b96bf5570233eaa
 
 function safeString(value, maxLength = 200) {
-  return String(value || "")
+  return String(value ?? "")
     .replace(/[\u0000-\u001F\u007F]/g, "")
     .trim()
     .slice(0, maxLength);
@@ -69,30 +78,153 @@ function getRequestTimestamp(body = {}) {
   return 0;
 }
 
-function sha256Hex(input = "") {
-  try {
-    return crypto.createHash("sha256").update(String(input || "")).digest("hex");
-  } catch {
-    return "";
-  }
+function hasFirestoreEnv(env = {}) {
+  return Boolean(
+    safeString(env?.FIREBASE_PROJECT_ID || "", 200) &&
+    safeString(env?.FIREBASE_CLIENT_EMAIL || "", 500) &&
+    safeString(env?.FIREBASE_PRIVATE_KEY || "", 20000)
+  );
 }
 
-function deriveIpHash(ip = "") {
+function base64UrlEncodeBytes(bytes) {
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function base64UrlEncodeString(input = "") {
+  return base64UrlEncodeBytes(new TextEncoder().encode(input));
+}
+
+function pemToArrayBuffer(pem = "") {
+  const cleaned = String(pem || "")
+    .replace(/-----BEGIN PRIVATE KEY-----/g, "")
+    .replace(/-----END PRIVATE KEY-----/g, "")
+    .replace(/\s+/g, "");
+
+  const binary = atob(cleaned);
+  const bytes = new Uint8Array(binary.length);
+
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+
+  return bytes.buffer;
+}
+
+async function importPrivateKey(privateKeyPem) {
+  return crypto.subtle.importKey(
+    "pkcs8",
+    pemToArrayBuffer(privateKeyPem),
+    {
+      name: "RSASSA-PKCS1-v1_5",
+      hash: "SHA-256"
+    },
+    false,
+    ["sign"]
+  );
+}
+
+async function createServiceJwt(env) {
+  const clientEmail = safeString(env?.FIREBASE_CLIENT_EMAIL || "", 500);
+  const privateKey = safeString(env?.FIREBASE_PRIVATE_KEY || "", 20000).replace(/\\n/g, "\n");
+
+  const now = Math.floor(Date.now() / 1000);
+  const header = { alg: "RS256", typ: "JWT" };
+  const claimSet = {
+    iss: clientEmail,
+    scope: FIRESTORE_SCOPE,
+    aud: GOOGLE_OAUTH_TOKEN_URL,
+    exp: now + 3600,
+    iat: now
+  };
+
+  const encodedHeader = base64UrlEncodeString(JSON.stringify(header));
+  const encodedClaimSet = base64UrlEncodeString(JSON.stringify(claimSet));
+  const unsignedToken = `${encodedHeader}.${encodedClaimSet}`;
+
+  const cryptoKey = await importPrivateKey(privateKey);
+  const signature = await crypto.subtle.sign(
+    "RSASSA-PKCS1-v1_5",
+    cryptoKey,
+    new TextEncoder().encode(unsignedToken)
+  );
+
+  const encodedSignature = base64UrlEncodeBytes(new Uint8Array(signature));
+  return `${unsignedToken}.${encodedSignature}`;
+}
+
+async function getAccessToken(env) {
+  const now = Date.now();
+
+  if (tokenCache.accessToken && tokenCache.expiresAt > now + 60 * 1000) {
+    return tokenCache.accessToken;
+  }
+
+  const assertion = await createServiceJwt(env);
+
+  const response = await fetch(GOOGLE_OAUTH_TOKEN_URL, {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded"
+    },
+    body: new URLSearchParams({
+      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+      assertion
+    })
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => "");
+    throw new Error(
+      `OAuth token request failed: ${response.status} ${safeString(errorText, 300)}`
+    );
+  }
+
+  const data = await response.json();
+  const accessToken = safeString(data?.access_token || "", 5000);
+  const expiresInMs = safeInt(data?.expires_in, 3600, 60, 3600) * 1000;
+
+  if (!accessToken) {
+    throw new Error("OAuth token missing access_token.");
+  }
+
+  tokenCache = {
+    accessToken,
+    expiresAt: now + expiresInMs
+  };
+
+  return accessToken;
+}
+
+async function sha256Hex(input = "") {
+  const bytes = new TextEncoder().encode(String(input || ""));
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+async function deriveIpHash(ip = "") {
   const normalizedIp = safeString(ip || "", 100);
   if (!normalizedIp || normalizedIp === "unknown") {
     return "";
   }
 
-  return sha256Hex(normalizedIp).slice(0, 32);
+  return (await sha256Hex(normalizedIp)).slice(0, 32);
 }
 
-function deriveEmailHash(email = "") {
+async function deriveEmailHash(email = "") {
   const normalizedEmail = safeString(email || "", 200).toLowerCase();
   if (!normalizedEmail) {
     return "";
   }
 
-  return sha256Hex(normalizedEmail).slice(0, 64);
+  return (await sha256Hex(normalizedEmail)).slice(0, 64);
 }
 
 function buildSafeSignalBundle({
@@ -152,15 +284,76 @@ function inferRouteSensitivity(route = "", config = {}) {
   return "normal";
 }
 
-async function readSecurityStateDoc(docId) {
-  if (!docId) {
+function fromFirestoreValue(value) {
+  if (!value || typeof value !== "object") return null;
+
+  if ("stringValue" in value) return value.stringValue;
+  if ("integerValue" in value) return Number(value.integerValue);
+  if ("doubleValue" in value) return Number(value.doubleValue);
+  if ("booleanValue" in value) return Boolean(value.booleanValue);
+  if ("nullValue" in value) return null;
+
+  if ("arrayValue" in value) {
+    const values = value.arrayValue?.values || [];
+    return values.map(fromFirestoreValue);
+  }
+
+  if ("mapValue" in value) {
+    const fields = value.mapValue?.fields || {};
+    const output = {};
+    for (const [key, val] of Object.entries(fields)) {
+      output[key] = fromFirestoreValue(val);
+    }
+    return output;
+  }
+
+  return null;
+}
+
+function fromFirestoreDocument(doc) {
+  const fields = doc?.fields || {};
+  const output = {};
+
+  for (const [key, value] of Object.entries(fields)) {
+    output[key] = fromFirestoreValue(value);
+  }
+
+  return output;
+}
+
+async function readSecurityStateDoc(env, docId) {
+  if (!docId || !hasFirestoreEnv(env)) {
     return null;
   }
 
   try {
-    const db = getFirestore();
-    const snap = await db.doc(`securityState/${docId}`).get();
-    return snap.exists ? snap.data() || null : null;
+    const projectId = safeString(env?.FIREBASE_PROJECT_ID || "", 200);
+    const accessToken = await getAccessToken(env);
+
+    const url =
+      `${FIRESTORE_BASE_URL}/projects/${encodeURIComponent(projectId)}` +
+      `/databases/(default)/documents/securityState/${encodeURIComponent(docId)}`;
+
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        authorization: `Bearer ${accessToken}`
+      }
+    });
+
+    if (response.status === 404) {
+      return null;
+    }
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => "");
+      throw new Error(
+        `Security state read failed: ${response.status} ${safeString(errorText, 300)}`
+      );
+    }
+
+    const data = await response.json();
+    return fromFirestoreDocument(data);
   } catch (error) {
     console.error("Security state read failed:", error);
     return null;
@@ -168,6 +361,7 @@ async function readSecurityStateDoc(docId) {
 }
 
 async function getSecurityStateSummary({
+  env = {},
   userId = "",
   email = "",
   ip = "",
@@ -175,8 +369,8 @@ async function getSecurityStateSummary({
 } = {}) {
   const safeUserId = safeString(userId || "", 128).replace(/[^a-zA-Z0-9._:@/-]/g, "");
   const safeSessionId = safeString(sessionId || "", 128).replace(/[^a-zA-Z0-9._:@/-]/g, "");
-  const emailHash = deriveEmailHash(email || "");
-  const ipHash = deriveIpHash(ip || "");
+  const emailHash = await deriveEmailHash(email || "");
+  const ipHash = await deriveIpHash(ip || "");
 
   const targets = [
     safeUserId ? `user_${safeUserId}` : "",
@@ -189,7 +383,7 @@ async function getSecurityStateSummary({
     return null;
   }
 
-  const docs = await Promise.all(targets.map((docId) => readSecurityStateDoc(docId)));
+  const docs = await Promise.all(targets.map((docId) => readSecurityStateDoc(env, docId)));
 
   const merged = {
     currentRiskScore: 0,
@@ -713,6 +907,7 @@ async function persistActorRiskStates({
 }
 
 export async function runSecurityOrchestrator({
+  env = {},
   req = null,
   body = {},
   behavior = {},
@@ -736,6 +931,7 @@ export async function runSecurityOrchestrator({
   let botResult = null;
   try {
     botResult = await trackBotBehavior(behavior, req, {
+      env,
       ip: actor.ip,
       sessionId: actor.sessionId,
       userId: actor.userId
@@ -747,6 +943,7 @@ export async function runSecurityOrchestrator({
   let abuseResult = null;
   try {
     abuseResult = await trackApiAbuse({
+      env,
       ip: actor.ip,
       sessionId: actor.sessionId,
       userId: actor.userId,
@@ -761,6 +958,7 @@ export async function runSecurityOrchestrator({
   if (rateLimitConfig) {
     try {
       rateLimitResult = await checkApiRateLimit({
+        env,
         key: safeString(rateLimitConfig.key || actor.actorKey, 200),
         route: actor.route,
         limit: Number(rateLimitConfig.limit),
@@ -775,6 +973,7 @@ export async function runSecurityOrchestrator({
   if (freshnessConfig) {
     try {
       freshnessResult = await validateFreshRequest({
+        env,
         requestAt: getRequestTimestamp(body),
         nonce: safeString(body.nonce || "", 200),
         scope: safeString(freshnessConfig.scope || actor.route, 100),
@@ -791,6 +990,7 @@ export async function runSecurityOrchestrator({
   let securityState = null;
   try {
     const firestoreState = await getSecurityStateSummary({
+      env,
       userId: actor.userId,
       email: context?.email || body?.email || "",
       ip: actor.ip,
@@ -811,6 +1011,7 @@ export async function runSecurityOrchestrator({
   let threatResult = null;
   try {
     threatResult = await evaluateThreat({
+      env,
       ip: actor.ip,
       sessionId: actor.sessionId,
       userId: actor.userId,
@@ -867,6 +1068,7 @@ export async function runSecurityOrchestrator({
 
     anomalyResult = anomalyActorType
       ? await evaluateAnomalyDetection({
+          env,
           actorType: anomalyActorType,
           actorId: anomalyActorId,
           ip: actor.ip,
@@ -885,6 +1087,7 @@ export async function runSecurityOrchestrator({
   let containmentResult = null;
   try {
     containmentResult = await evaluateContainment({
+      env,
       route: actor.route,
       isAdminRoute: safeBoolean(containmentConfig.isAdminRoute),
       isWriteAction: safeBoolean(containmentConfig.isWriteAction),
@@ -897,6 +1100,7 @@ export async function runSecurityOrchestrator({
   let adaptiveModeResult = null;
   try {
     adaptiveModeResult = await evaluateAdaptiveThreatMode({
+      env,
       risk,
       threatResult,
       abuseResult,
@@ -938,17 +1142,23 @@ export async function runSecurityOrchestrator({
 
   let alertsResult = null;
   try {
-    const recentEvents = await getRecentSecurityEvents({ limit: 100 });
+    const recentEvents = await getRecentSecurityEvents({
+      env,
+      limit: 100
+    });
+
     const securityStatus = buildInlineSecurityStatus({
       adaptiveModeResult,
       containmentResult
     });
+
     const securityMetrics = buildInlineSecurityMetrics({
       securityStatus,
       recentEvents
     });
 
     alertsResult = await evaluateSecurityAlerts({
+      env,
       securityStatus,
       securityMetrics,
       events: recentEvents,

@@ -1,18 +1,39 @@
+<<<<<<< HEAD
 import { buildSecurityStatus } from "./_security-status.js";
 import { writeSecurityLog } from "./_security-log-writer.js";
 import { safeString, buildMethodNotAllowedResponse } from "./_api-security.js";
 import { getAdaptiveThreatMode } from "./_adaptive-threat-mode.js";
 import { getContainmentState } from "./_security-containment.js";
+=======
+import { buildSecurityStatus } from "./_security-status.js";
+import { writeSecurityLog } from "./_security-log-writer.js";
+import {
+  safeString,
+  buildMethodNotAllowedResponse
+} from "./_api-security.js";
+import { getAdaptiveThreatMode } from "./_adaptive-threat-mode.js";
+import { getContainmentState } from "./_security-containment.js";
+>>>>>>> 462287806a8da117fc6781c19b96bf5570233eaa
 
 const ROUTE = "/api/security-status";
 
-function getClientIp(req) {
-  const forwarded = req.headers["x-forwarded-for"];
+function jsonResponse(payload, status = 200) {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store"
+    }
+  });
+}
+
+function getClientIp(request) {
+  const forwarded = request.headers.get("x-forwarded-for");
   if (typeof forwarded === "string" && forwarded.trim()) {
     return forwarded.split(",")[0].trim().slice(0, 100);
   }
 
-  const realIp = req.headers["x-real-ip"];
+  const realIp = request.headers.get("x-real-ip");
   if (typeof realIp === "string" && realIp.trim()) {
     return realIp.trim().slice(0, 100);
   }
@@ -27,46 +48,46 @@ function buildUnauthorizedResponse() {
   };
 }
 
-export default async function handler(req, res) {
-  if (req.method !== "GET") {
+export async function onRequest(context) {
+  const { request, env } = context;
+
+  if (request.method !== "GET") {
     const response = buildMethodNotAllowedResponse(["GET"]);
-    return res.status(response.status).json(response.body);
+    return jsonResponse(response.body, response.status);
   }
 
-  const clientIp = getClientIp(req);
+  const clientIp = getClientIp(request);
 
   try {
     const adminKey = safeString(
-      req.headers["x-security-admin-key"] || "",
+      request.headers.get("x-security-admin-key") || "",
       200
     );
 
     if (
-      !process.env.SECURITY_ADMIN_API_KEY ||
-      adminKey !== process.env.SECURITY_ADMIN_API_KEY
+      !env.SECURITY_ADMIN_API_KEY ||
+      adminKey !== env.SECURITY_ADMIN_API_KEY
     ) {
       await writeSecurityLog({
+        env,
         type: "security_status_unauthorized",
         level: "warning",
         route: ROUTE,
         ip: clientIp,
         message: "Unauthorized attempt to access security status endpoint.",
         metadata: {
-          method: req.method
+          method: request.method
         }
       });
 
-      return res.status(404).json(buildUnauthorizedResponse());
+      return jsonResponse(buildUnauthorizedResponse(), 404);
     }
 
-    // ✅ FIXED: correct async calls
-    const adaptiveState = await getAdaptiveThreatMode();
-    const containmentState = await getContainmentState();
+    const adaptiveState = await getAdaptiveThreatMode(env);
+    const containmentState = await getContainmentState(env);
 
-    // (optional: future use)
     const threatSnapshot = {};
 
-    // ✅ FIXED: correct payload structure
     const payload = buildSecurityStatus({
       adaptiveState,
       threatSnapshot,
@@ -75,6 +96,7 @@ export default async function handler(req, res) {
     });
 
     await writeSecurityLog({
+      env,
       type: "security_status_accessed",
       level: "info",
       route: ROUTE,
@@ -86,9 +108,10 @@ export default async function handler(req, res) {
       }
     });
 
-    return res.status(200).json(payload);
+    return jsonResponse(payload, 200);
   } catch (error) {
     await writeSecurityLog({
+      env,
       type: "security_status_error",
       level: "error",
       route: ROUTE,
@@ -99,9 +122,12 @@ export default async function handler(req, res) {
       }
     });
 
-    return res.status(500).json({
-      ok: false,
-      error: "internal_error"
-    });
+    return jsonResponse(
+      {
+        ok: false,
+        error: "internal_error"
+      },
+      500
+    );
   }
 }

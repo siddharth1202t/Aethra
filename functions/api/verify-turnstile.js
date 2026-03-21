@@ -12,10 +12,12 @@ import {
 const ROUTE = "/api/verify-turnstile";
 const TURNSTILE_VERIFY_URL =
   "https://challenges.cloudflare.com/turnstile/v0/siteverify";
+
 const TURNSTILE_TIMEOUT_MS = 8000;
 const MAX_BODY_KEYS = 25;
 const MAX_CONTENT_LENGTH_BYTES = 12 * 1024;
 const MAX_TOKEN_LENGTH = 5000;
+const MAX_SESSION_ID_LENGTH = 120;
 
 const ALLOWED_ORIGINS = new Set([
   "http://127.0.0.1:8080",
@@ -30,7 +32,7 @@ const ALLOWED_HOSTNAMES = new Set([
 ]);
 
 function normalizeOrigin(origin = "") {
-  const raw = safeString(origin || "", 200).trim();
+  const raw = safeString(origin, 200).trim();
   if (!raw) return "";
 
   try {
@@ -41,11 +43,11 @@ function normalizeOrigin(origin = "") {
 }
 
 function normalizeHostname(hostname = "") {
-  return safeString(hostname || "", 200).trim().toLowerCase();
+  return safeString(hostname, 200).trim().toLowerCase();
 }
 
 function normalizeEmail(email = "") {
-  const normalized = safeString(email || "", 200).trim().toLowerCase();
+  const normalized = safeString(email, 200).trim().toLowerCase();
   if (!normalized) return "";
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized) ? normalized : "";
 }
@@ -104,7 +106,6 @@ function isRequestHostAllowed(request) {
 
 function getRefererOrigin(request) {
   const referer = safeString(request.headers.get("referer") || "", 500).trim();
-
   if (!referer) return "";
 
   try {
@@ -114,13 +115,25 @@ function getRefererOrigin(request) {
   }
 }
 
+function getClientIp(request) {
+  const cfIp = safeString(request.headers.get("cf-connecting-ip") || "", 100).trim();
+  if (cfIp) return cfIp;
+
+  const forwardedFor = safeString(request.headers.get("x-forwarded-for") || "", 300).trim();
+  if (forwardedFor) {
+    return safeString(forwardedFor.split(",")[0] || "", 100).trim();
+  }
+
+  return "0.0.0.0";
+}
+
 async function sha256Hex(input = "") {
   const bytes = new TextEncoder().encode(input);
   const digest = await crypto.subtle.digest("SHA-256", bytes);
-  const hex = Array.from(new Uint8Array(digest))
-    .map((b) => b.toString(16).padStart(2, "0"))
+
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
-  return hex;
 }
 
 async function createVerificationFingerprint({ ip, token, origin, host }) {
@@ -160,8 +173,8 @@ function getClientBehavior(body) {
 }
 
 function buildCorsHeaders(origin = "") {
-  const normalized = normalizeOrigin(origin);
-  const allowOrigin = isOriginAllowed(normalized) ? normalized : "null";
+  const normalizedOrigin = normalizeOrigin(origin);
+  const allowOrigin = isOriginAllowed(normalizedOrigin) ? normalizedOrigin : "null";
 
   return {
     "access-control-allow-origin": allowOrigin,
@@ -171,7 +184,7 @@ function buildCorsHeaders(origin = "") {
     pragma: "no-cache",
     expires: "0",
     vary: "Origin",
-    "content-type": "application/json"
+    "content-type": "application/json; charset=utf-8"
   };
 }
 
@@ -194,22 +207,37 @@ function buildJsonError(origin, status, message, extra = {}) {
   );
 }
 
-async function createCloudflareRequestLike(context, body) {
+function buildSecurityMetadata({
+  actor,
+  requestHost,
+  refererOrigin,
+  sessionId,
+  fingerprint,
+  security,
+  clientContext,
+  extra = {}
+}) {
+  return sanitizeMetadata({
+    source: "server_enforced",
+    origin: actor?.origin || "",
+    refererOrigin,
+    host: requestHost,
+    requestUserAgent: actor?.userAgent || "",
+    sessionId: actor?.sessionId || sessionId || "",
+    fingerprint: fingerprint || "",
+    risk: security?.risk,
+    botResult: security?.signals?.botResult,
+    abuseResult: security?.signals?.abuseResult,
+    threatResult: security?.signals?.threatResult,
+    clientContext,
+    ...extra
+  });
+}
+
+function createCloudflareRequestLike(context, body) {
   const request = context.request;
   const url = new URL(request.url);
-  const cf = request.cf || {};
-
-  let ip =
-    safeString(
-      request.headers.get("cf-connecting-ip") ||
-      request.headers.get("x-forwarded-for")?.split(",")[0] ||
-      "",
-      100
-    ).trim();
-
-  if (!ip) {
-    ip = "0.0.0.0";
-  }
+  const ip = getClientIp(request);
 
   return {
     method: request.method,
@@ -229,12 +257,12 @@ async function createCloudflareRequestLike(context, body) {
     socket: {
       remoteAddress: ip
     },
-    cf,
+    cf: request.cf || {},
     ip
   };
 }
 
-async function logAndBlockOrigin({
+async function writeBlockedOriginLog({
   actor,
   requestHost,
   refererOrigin,
@@ -246,19 +274,18 @@ async function logAndBlockOrigin({
     message: "Blocked request from forbidden origin on verify-turnstile API",
     ip: actor.ip,
     route: ROUTE,
-    metadata: {
-      source: "server_enforced",
-      origin: actor.origin,
+    metadata: buildSecurityMetadata({
+      actor,
+      requestHost,
       refererOrigin,
-      host: requestHost,
-      requestUserAgent: actor.userAgent,
       sessionId
-    }
+    })
   });
 }
 
 export async function onRequestOptions(context) {
   const origin = context.request.headers.get("origin") || "";
+
   return new Response(null, {
     status: 204,
     headers: buildCorsHeaders(origin)
@@ -266,20 +293,23 @@ export async function onRequestOptions(context) {
 }
 
 export async function onRequestPost(context) {
-  const origin = context.request.headers.get("origin") || "";
+  const request = context.request;
+  const origin = request.headers.get("origin") || "";
+  const requestHost = getRequestHost(request);
+  const refererOrigin = getRefererOrigin(request);
 
-  if (!isJsonContentType(context.request)) {
+  if (!isJsonContentType(request)) {
     return buildJsonError(origin, 415, "Unsupported content type.");
   }
 
-  if (getRequestContentLength(context.request) > MAX_CONTENT_LENGTH_BYTES) {
+  if (getRequestContentLength(request) > MAX_CONTENT_LENGTH_BYTES) {
     return buildJsonError(origin, 413, "Request body too large.");
   }
 
   try {
-    let rawBody = {};
+    let rawBody;
     try {
-      rawBody = await context.request.json();
+      rawBody = await request.json();
     } catch {
       return buildJsonError(origin, 400, "Invalid JSON body.");
     }
@@ -289,9 +319,9 @@ export async function onRequestPost(context) {
     const behavior = getClientBehavior(body);
     const clientContext = sanitizeClientContext(body?.context);
     const email = normalizeEmail(body?.email || "");
-    const sessionId = safeString(body?.sessionId || "", 120);
+    const sessionId = safeString(body?.sessionId || "", MAX_SESSION_ID_LENGTH).trim();
 
-    const reqLike = await createCloudflareRequestLike(context, body);
+    const reqLike = createCloudflareRequestLike(context, body);
 
     const actor = createActorContext({
       req: reqLike,
@@ -300,23 +330,19 @@ export async function onRequestPost(context) {
       route: ROUTE
     });
 
-    const requestHost = getRequestHost(context.request);
-    const refererOrigin = getRefererOrigin(context.request);
-
-    if (!isRequestHostAllowed(context.request)) {
+    if (!isRequestHostAllowed(request)) {
       await writeSecurityLog({
         type: "forbidden_turnstile_host",
         level: "critical",
         message: "Blocked request to verify-turnstile API on unexpected host",
         ip: actor.ip,
         route: ROUTE,
-        metadata: {
-          source: "server_enforced",
-          host: requestHost,
-          origin: actor.origin,
+        metadata: buildSecurityMetadata({
+          actor,
+          requestHost,
           refererOrigin,
           sessionId
-        }
+        })
       });
 
       return jsonResponse(
@@ -327,7 +353,7 @@ export async function onRequestPost(context) {
     }
 
     if (!isOriginAllowed(actor.origin)) {
-      await logAndBlockOrigin({
+      await writeBlockedOriginLog({
         actor,
         requestHost,
         refererOrigin,
@@ -360,7 +386,7 @@ export async function onRequestPost(context) {
       abuseSuccess: Boolean(token)
     });
 
-    const ip = security.actor.ip;
+    const ip = security?.actor?.ip || actor.ip;
     const securityAction = pickSecurityAction(security);
     const secret = getTurnstileSecret(context.env);
     const resolvedSessionId = actor.sessionId || sessionId;
@@ -373,7 +399,7 @@ export async function onRequestPost(context) {
     });
 
     if (
-      security.signals.rateLimitResult &&
+      security?.signals?.rateLimitResult &&
       !security.signals.rateLimitResult.allowed
     ) {
       await writeSecurityLog({
@@ -382,16 +408,22 @@ export async function onRequestPost(context) {
         message: "Rate limit exceeded on verify-turnstile API",
         ip,
         route: ROUTE,
-        metadata: {
-          source: "server_enforced",
-          action: security.signals.rateLimitResult.recommendedAction,
-          remainingMs: security.signals.rateLimitResult.remainingMs || 0,
-          violations: security.signals.rateLimitResult.violations || 0,
-          riskScore: security.risk.riskScore,
-          riskLevel: security.risk.level,
+        metadata: buildSecurityMetadata({
+          actor,
+          requestHost,
+          refererOrigin,
+          sessionId: resolvedSessionId,
           fingerprint: verificationFingerprint,
-          sessionId: resolvedSessionId
-        }
+          security,
+          clientContext,
+          extra: {
+            action: security.signals.rateLimitResult.recommendedAction,
+            remainingMs: security.signals.rateLimitResult.remainingMs || 0,
+            violations: security.signals.rateLimitResult.violations || 0,
+            riskScore: security?.risk?.riskScore,
+            riskLevel: security?.risk?.level
+          }
+        })
       });
 
       return buildJsonError(
@@ -412,15 +444,14 @@ export async function onRequestPost(context) {
         message: "Blocked suspicious verify-turnstile request",
         ip,
         route: ROUTE,
-        metadata: sanitizeMetadata({
-          source: "server_enforced",
-          risk: security.risk,
-          botResult: security.signals.botResult,
-          abuseResult: security.signals.abuseResult,
-          threatResult: security.signals.threatResult,
-          clientContext,
+        metadata: buildSecurityMetadata({
+          actor,
+          requestHost,
+          refererOrigin,
+          sessionId: resolvedSessionId,
           fingerprint: verificationFingerprint,
-          sessionId: resolvedSessionId
+          security,
+          clientContext
         })
       });
 
@@ -441,15 +472,14 @@ export async function onRequestPost(context) {
         message: "Suspicious behavior detected on verify-turnstile API",
         ip,
         route: ROUTE,
-        metadata: sanitizeMetadata({
-          source: "server_enforced",
-          risk: security.risk,
-          botResult: security.signals.botResult,
-          abuseResult: security.signals.abuseResult,
-          threatResult: security.signals.threatResult,
-          clientContext,
+        metadata: buildSecurityMetadata({
+          actor,
+          requestHost,
+          refererOrigin,
+          sessionId: resolvedSessionId,
           fingerprint: verificationFingerprint,
-          sessionId: resolvedSessionId
+          security,
+          clientContext
         })
       });
     }
@@ -461,30 +491,36 @@ export async function onRequestPost(context) {
         message: "Missing token or server secret in verify-turnstile API",
         ip,
         route: ROUTE,
-        metadata: {
-          source: "server_enforced",
-          hasToken: Boolean(token),
-          hasSecret: Boolean(secret),
-          riskScore: security.risk.riskScore,
+        metadata: buildSecurityMetadata({
+          actor,
+          requestHost,
+          refererOrigin,
+          sessionId: resolvedSessionId,
           fingerprint: verificationFingerprint,
-          sessionId: resolvedSessionId
-        }
+          security,
+          clientContext,
+          extra: {
+            hasToken: Boolean(token),
+            hasSecret: Boolean(secret),
+            riskScore: security?.risk?.riskScore
+          }
+        })
       });
 
       return buildJsonError(origin, 400, "Missing token or secret.");
     }
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), TURNSTILE_TIMEOUT_MS);
+    const timeoutId = setTimeout(() => controller.abort(), TURNSTILE_TIMEOUT_MS);
 
-    let response;
+    let upstreamResponse;
     let data = {};
 
     try {
-      response = await fetch(TURNSTILE_VERIFY_URL, {
+      upstreamResponse = await fetch(TURNSTILE_VERIFY_URL, {
         method: "POST",
         headers: {
-          "Content-Type": "application/x-www-form-urlencoded"
+          "content-type": "application/x-www-form-urlencoded"
         },
         body: new URLSearchParams({
           secret,
@@ -494,10 +530,8 @@ export async function onRequestPost(context) {
         signal: controller.signal
       });
 
-      data = await response.json().catch(() => ({}));
+      data = await upstreamResponse.json().catch(() => ({}));
     } catch (error) {
-      clearTimeout(timeout);
-
       const isAbort = error?.name === "AbortError";
 
       await writeSecurityLog({
@@ -508,34 +542,46 @@ export async function onRequestPost(context) {
           : "Turnstile verification request failed",
         ip,
         route: ROUTE,
-        metadata: {
-          source: "server_enforced",
-          error: safeString(error?.message || "Unknown upstream error", 300),
-          riskScore: security.risk.riskScore,
+        metadata: buildSecurityMetadata({
+          actor,
+          requestHost,
+          refererOrigin,
+          sessionId: resolvedSessionId,
           fingerprint: verificationFingerprint,
-          sessionId: resolvedSessionId
-        }
+          security,
+          clientContext,
+          extra: {
+            error: safeString(error?.message || "Unknown upstream error", 300),
+            riskScore: security?.risk?.riskScore
+          }
+        })
       });
 
       return buildJsonError(origin, 502, "Captcha verification service failed.");
     } finally {
-      clearTimeout(timeout);
+      clearTimeout(timeoutId);
     }
 
-    if (!response.ok) {
+    if (!upstreamResponse.ok) {
       await writeSecurityLog({
         type: "turnstile_upstream_bad_status",
         level: "error",
         message: "Turnstile upstream verification returned bad status",
         ip,
         route: ROUTE,
-        metadata: {
-          source: "server_enforced",
-          status: response.status,
-          riskScore: security.risk.riskScore,
+        metadata: buildSecurityMetadata({
+          actor,
+          requestHost,
+          refererOrigin,
+          sessionId: resolvedSessionId,
           fingerprint: verificationFingerprint,
-          sessionId: resolvedSessionId
-        }
+          security,
+          clientContext,
+          extra: {
+            status: upstreamResponse.status,
+            riskScore: security?.risk?.riskScore
+          }
+        })
       });
 
       return buildJsonError(origin, 502, "Captcha verification service failed.");
@@ -548,12 +594,18 @@ export async function onRequestPost(context) {
         message: "Turnstile returned invalid payload",
         ip,
         route: ROUTE,
-        metadata: {
-          source: "server_enforced",
-          riskScore: security.risk.riskScore,
+        metadata: buildSecurityMetadata({
+          actor,
+          requestHost,
+          refererOrigin,
+          sessionId: resolvedSessionId,
           fingerprint: verificationFingerprint,
-          sessionId: resolvedSessionId
-        }
+          security,
+          clientContext,
+          extra: {
+            riskScore: security?.risk?.riskScore
+          }
+        })
       });
 
       return buildJsonError(origin, 502, "Captcha verification service failed.");
@@ -566,18 +618,23 @@ export async function onRequestPost(context) {
         message: "Turnstile verification failed",
         ip,
         route: ROUTE,
-        metadata: {
-          source: "server_enforced",
-          errorCodes: safeErrorCodes(data["error-codes"]),
-          hostname: normalizeHostname(data.hostname || ""),
-          abuseLevel: security.signals.abuseResult?.level || "low",
-          botLevel: security.signals.botResult?.level || "low",
-          threatLevel: security.signals.threatResult?.level || "low",
-          riskLevel: security.risk.level,
-          clientContext,
+        metadata: buildSecurityMetadata({
+          actor,
+          requestHost,
+          refererOrigin,
+          sessionId: resolvedSessionId,
           fingerprint: verificationFingerprint,
-          sessionId: resolvedSessionId
-        }
+          security,
+          clientContext,
+          extra: {
+            errorCodes: safeErrorCodes(data["error-codes"]),
+            hostname: normalizeHostname(data.hostname || ""),
+            abuseLevel: security?.signals?.abuseResult?.level || "low",
+            botLevel: security?.signals?.botResult?.level || "low",
+            threatLevel: security?.signals?.threatResult?.level || "low",
+            riskLevel: security?.risk?.level
+          }
+        })
       });
 
       return buildJsonError(origin, 400, "Captcha verification failed.");
@@ -590,13 +647,19 @@ export async function onRequestPost(context) {
         message: "Turnstile token hostname did not match allowed hostnames",
         ip,
         route: ROUTE,
-        metadata: {
-          source: "server_enforced",
-          hostname: normalizeHostname(data.hostname),
-          riskScore: security.risk.riskScore,
+        metadata: buildSecurityMetadata({
+          actor,
+          requestHost,
+          refererOrigin,
+          sessionId: resolvedSessionId,
           fingerprint: verificationFingerprint,
-          sessionId: resolvedSessionId
-        }
+          security,
+          clientContext,
+          extra: {
+            hostname: normalizeHostname(data.hostname),
+            riskScore: security?.risk?.riskScore
+          }
+        })
       });
 
       return buildJsonError(origin, 400, "Captcha hostname validation failed.");
@@ -629,11 +692,13 @@ export async function onRequestPost(context) {
 }
 
 export async function onRequest(context) {
-  if (context.request.method === "OPTIONS") {
+  const method = context.request.method;
+
+  if (method === "OPTIONS") {
     return onRequestOptions(context);
   }
 
-  if (context.request.method === "POST") {
+  if (method === "POST") {
     return onRequestPost(context);
   }
 

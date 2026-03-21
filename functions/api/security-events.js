@@ -1,6 +1,7 @@
 import {
   getRecentSecurityEvents,
   appendSecurityEvent
+<<<<<<< HEAD
 } from "./_security-event-store.js";
 import { writeSecurityLog } from "./_security-log-writer.js";
 import {
@@ -9,19 +10,48 @@ import {
 } from "./_api-security.js";
 import { getAdaptiveThreatMode } from "./_adaptive-threat-mode.js";
 import { getContainmentState } from "./_security-containment.js";
+=======
+} from "./_security-event-store.js";
+
+import { writeSecurityLog } from "./_security-log-writer.js";
+
+import {
+  safeString,
+  buildMethodNotAllowedResponse
+} from "./_api-security.js";
+
+import { getAdaptiveThreatMode } from "./_adaptive-threat-mode.js";
+import { getContainmentState } from "./_security-containment.js";
+>>>>>>> 462287806a8da117fc6781c19b96bf5570233eaa
 
 const ROUTE = "/api/security-events";
+
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 100;
 
-function getClientIp(req) {
-  const forwarded = req.headers["x-forwarded-for"];
-  if (typeof forwarded === "string" && forwarded.trim()) {
+/* ---------------- helpers ---------------- */
+
+function json(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store"
+    }
+  });
+}
+
+function getClientIp(request) {
+
+  const forwarded = request.headers.get("x-forwarded-for");
+
+  if (forwarded) {
     return forwarded.split(",")[0].trim().slice(0, 100);
   }
 
-  const realIp = req.headers["x-real-ip"];
-  if (typeof realIp === "string" && realIp.trim()) {
+  const realIp = request.headers.get("x-real-ip");
+
+  if (realIp) {
     return realIp.trim().slice(0, 100);
   }
 
@@ -36,6 +66,7 @@ function buildUnauthorizedResponse() {
 }
 
 function parseLimit(value) {
+
   const num = Number(value);
 
   if (!Number.isFinite(num)) {
@@ -45,8 +76,12 @@ function parseLimit(value) {
   return Math.min(MAX_LIMIT, Math.max(1, Math.floor(num)));
 }
 
+/* ---------------- event logs ---------------- */
+
 async function recordUnauthorizedAccess({ ip, method }) {
+
   try {
+
     await appendSecurityEvent({
       type: "admin_endpoint_unauthorized",
       severity: "warning",
@@ -59,13 +94,24 @@ async function recordUnauthorizedAccess({ ip, method }) {
         method
       }
     });
+
   } catch (error) {
+
     console.error("Security events unauthorized event write failed:", error);
+
   }
 }
 
-async function recordAuthorizedAccess({ ip, eventCount, mode, containmentMode, filters }) {
+async function recordAuthorizedAccess({
+  ip,
+  eventCount,
+  mode,
+  containmentMode,
+  filters
+}) {
+
   try {
+
     await appendSecurityEvent({
       type: "security_events_accessed",
       severity: "info",
@@ -84,29 +130,40 @@ async function recordAuthorizedAccess({ ip, eventCount, mode, containmentMode, f
         limit: filters.limit
       }
     });
+
   } catch (error) {
+
     console.error("Security events access event write failed:", error);
+
   }
 }
 
-export default async function handler(req, res) {
-  if (req.method !== "GET") {
+/* ---------------- main handler ---------------- */
+
+export async function onRequest(context) {
+
+  const { request, env } = context;
+
+  if (request.method !== "GET") {
+
     const response = buildMethodNotAllowedResponse(["GET"]);
-    return res.status(response.status).json(response.body);
+    return json(response.body, response.status);
   }
 
-  const clientIp = getClientIp(req);
+  const clientIp = getClientIp(request);
 
   try {
+
     const adminKey = safeString(
-      req.headers["x-security-admin-key"] || "",
+      request.headers.get("x-security-admin-key") || "",
       200
     );
 
     if (
-      !process.env.SECURITY_ADMIN_API_KEY ||
-      adminKey !== process.env.SECURITY_ADMIN_API_KEY
+      !env.SECURITY_ADMIN_API_KEY ||
+      adminKey !== env.SECURITY_ADMIN_API_KEY
     ) {
+
       await writeSecurityLog({
         type: "security_events_unauthorized",
         level: "warning",
@@ -114,23 +171,38 @@ export default async function handler(req, res) {
         ip: clientIp,
         message: "Unauthorized attempt to access security events endpoint.",
         metadata: {
-          method: req.method
+          method: request.method
         }
       });
 
       await recordUnauthorizedAccess({
         ip: clientIp,
-        method: req.method
+        method: request.method
       });
 
-      return res.status(404).json(buildUnauthorizedResponse());
+      return json(buildUnauthorizedResponse(), 404);
     }
 
+    const url = new URL(request.url);
+
     const filters = {
-      limit: parseLimit(req.query?.limit),
-      severity: safeString(req.query?.severity || "", 20).toLowerCase(),
-      action: safeString(req.query?.action || "", 20).toLowerCase(),
-      type: safeString(req.query?.type || "", 80).toLowerCase()
+
+      limit: parseLimit(url.searchParams.get("limit")),
+
+      severity: safeString(
+        url.searchParams.get("severity") || "",
+        20
+      ).toLowerCase(),
+
+      action: safeString(
+        url.searchParams.get("action") || "",
+        20
+      ).toLowerCase(),
+
+      type: safeString(
+        url.searchParams.get("type") || "",
+        80
+      ).toLowerCase()
     };
 
     const [events, adaptiveState, containmentState] = await Promise.all([
@@ -162,21 +234,25 @@ export default async function handler(req, res) {
       filters
     });
 
-    return res.status(200).json({
+    return json({
       ok: true,
       timestamp: new Date().toISOString(),
       count: events.length,
+
       filters: {
         limit: filters.limit,
         severity: filters.severity || "",
         action: filters.action || "",
         type: filters.type || ""
       },
+
       mode: adaptiveState?.mode || "normal",
       containmentMode: containmentState?.mode || "normal",
       events
     });
+
   } catch (error) {
+
     await writeSecurityLog({
       type: "security_events_error",
       level: "error",
@@ -188,9 +264,9 @@ export default async function handler(req, res) {
       }
     });
 
-    return res.status(500).json({
+    return json({
       ok: false,
       error: "internal_error"
-    });
+    }, 500);
   }
 }

@@ -1,4 +1,4 @@
-import { redis } from "./_redis.js";
+import { getRedis } from "./_redis.js";
 
 const DEFAULT_LIMIT = 60;
 const DEFAULT_WINDOW_MS = 60 * 1000;
@@ -28,7 +28,7 @@ function safeTimestamp(value, fallback = 0) {
 }
 
 function safeString(value, maxLength = 300) {
-  return String(value || "")
+  return String(value ?? "")
     .replace(/[\u0000-\u001F\u007F]/g, "")
     .trim()
     .slice(0, maxLength);
@@ -56,7 +56,7 @@ function normalizeRoute(route) {
     .split("?")[0]
     .split("#")[0]
     .replace(/\/{2,}/g, "/")
-    .replace(/[^a-zA-Z0-9/_-]/g, "")
+    .replace(/[^a-zA-Z0-9/_:-]/g, "")
     .trim()
     .toLowerCase()
     .slice(0, 150);
@@ -235,7 +235,7 @@ function updateBurstMemory(record, now) {
   return record.recentHits.length;
 }
 
-async function getStoredRecord(redisKey, now) {
+async function getStoredRecord(redis, redisKey, now) {
   try {
     const raw = await redis.get(redisKey);
 
@@ -262,7 +262,7 @@ async function getStoredRecord(redisKey, now) {
   }
 }
 
-async function storeRecord(redisKey, record) {
+async function storeRecord(redis, redisKey, record) {
   try {
     const ttlSeconds = Math.max(1, Math.ceil(STALE_TTL_MS / 1000));
     const normalized = normalizeRecord(record, Date.now());
@@ -277,6 +277,7 @@ async function storeRecord(redisKey, record) {
 export async function checkApiRateLimit(options = {}) {
   const now = Date.now();
 
+  let env = {};
   let key = "unknown";
   let limit = DEFAULT_LIMIT;
   let windowMs = DEFAULT_WINDOW_MS;
@@ -285,17 +286,19 @@ export async function checkApiRateLimit(options = {}) {
   if (typeof options === "string") {
     key = normalizeKey(options);
   } else {
+    env = options.env || {};
     key = normalizeKey(options.key);
     limit = Math.max(1, normalizePositiveInteger(options.limit, DEFAULT_LIMIT));
     windowMs = Math.max(1_000, normalizePositiveInteger(options.windowMs, DEFAULT_WINDOW_MS));
     route = normalizeRoute(options.route);
   }
 
+  const redis = getRedis(env);
   const routeSensitivity = getRouteSensitivity(route);
   const routeWeight = getRouteWeight(route);
   const redisKey = buildRedisKey(key);
 
-  let record = await getStoredRecord(redisKey, now);
+  let record = await getStoredRecord(redis, redisKey, now);
 
   if (!record) {
     record = createEmptyRecord(now);
@@ -339,7 +342,7 @@ export async function checkApiRateLimit(options = {}) {
     }
   }
 
-  await storeRecord(redisKey, record);
+  await storeRecord(redis, redisKey, record);
 
   const penaltyActive = safeTimestamp(record.penaltyUntil, 0) > now;
   allowed = record.count <= limit && !penaltyActive;
