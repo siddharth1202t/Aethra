@@ -1,8 +1,4 @@
-<<<<<<< HEAD
-import { redis } from "./_redis.js";
-=======
 import { getRedis } from "./_redis.js";
->>>>>>> 462287806a8da117fc6781c19b96bf5570233eaa
 import { appendSecurityEvent } from "./_security-event-store.js";
 
 const RISK_STATE_PREFIX = "security:risk-state";

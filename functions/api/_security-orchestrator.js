@@ -11,9 +11,6 @@ import { getRiskState, updateRiskState } from "./_security-risk-state.js";
 import { evaluateAnomalyDetection } from "./_security-anomaly-detection.js";
 import { evaluateSecurityAlerts } from "./_security-alerts.js";
 import { getRecentSecurityEvents } from "./_security-event-store.js";
-<<<<<<< HEAD
-=======
-
 const GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const FIRESTORE_BASE_URL = "https://firestore.googleapis.com/v1";
 const FIRESTORE_SCOPE = "https://www.googleapis.com/auth/datastore";
@@ -22,7 +19,6 @@ let tokenCache = {
   accessToken: "",
   expiresAt: 0
 };
->>>>>>> 462287806a8da117fc6781c19b96bf5570233eaa
 
 function safeString(value, maxLength = 200) {
   return String(value ?? "")

@@ -1,10 +1,5 @@
-<<<<<<< HEAD
-import { redis } from "./_redis.js";
-import { appendSecurityEvent } from "./_security-event-store.js";
-=======
 import { getRedis } from "./_redis.js";
 import { appendSecurityEvent } from "./_security-event-store.js";
->>>>>>> 462287806a8da117fc6781c19b96bf5570233eaa
 
 const ALERT_STATE_PREFIX = "security:alert-state";
 const ALERT_STATE_TTL_MS = 24 * 60 * 60 * 1000;
