@@ -1,11 +1,13 @@
 export const SECURITY_CONFIG = Object.freeze({
   allowedOrigins: Object.freeze([
-    "https://aethra-gules.vercel.app",
-    "https://aethra-hb2h.vercel.app"
+    "127.0.0.1",
+    "https://aethra-hb2h.vercel.app",
+    "localhost"
   ]),
 
   allowedHostnames: Object.freeze([
-    "aethra-gules.vercel.app",
-    "aethra-hb2h.vercel.app"
+    "127.0.0.1",
+    "aethra-hb2h.vercel.app"'
+    "localhost"
   ])
 });
