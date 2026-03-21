@@ -1,5 +1,5 @@
 import { redis } from "./_redis.js";
-import { appendSecurityEvent } from "./_security-events-store.js";
+import { appendSecurityEvent } from "./_security-event-store.js";
 
 const RISK_STATE_PREFIX = "security:risk-state";
 const RISK_STATE_TTL_MS = 30 * 24 * 60 * 60 * 1000;

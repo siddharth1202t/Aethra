@@ -13,7 +13,7 @@ import { evaluateAdaptiveThreatMode } from "./_adaptive-threat-mode.js";
 import { getRiskState, updateRiskState } from "./_security-risk-state.js";
 import { evaluateAnomalyDetection } from "./_security-anomaly-detection.js";
 import { evaluateSecurityAlerts } from "./_security-alerts.js";
-import { getRecentSecurityEvents } from "./_security-events-store.js";
+import { getRecentSecurityEvents } from "./_security-event-store.js";
 
 function safeString(value, maxLength = 200) {
   return String(value || "")

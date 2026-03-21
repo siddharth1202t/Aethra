@@ -1,5 +1,5 @@
 import { redis } from "./_redis.js";
-import { appendSecurityEvent } from "./_security-events-store.js";
+import { appendSecurityEvent } from "./_security-event-store.js";
 
 const ANOMALY_STATE_PREFIX = "security:anomaly-state";
 const ANOMALY_STATE_TTL_MS = 14 * 24 * 60 * 60 * 1000;

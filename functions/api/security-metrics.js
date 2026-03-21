@@ -1,9 +1,9 @@
-import { buildSecurityMetrics } from "../_security-metrics.js";
-import { getRecentSecurityEvents, appendSecurityEvent } from "../_security-events-store.js";
-import { writeSecurityLog } from "../_security-log-writer.js";
-import { safeString, buildMethodNotAllowedResponse } from "../_api-security.js";
-import { getAdaptiveThreatMode } from "../_adaptive-threat-mode.js";
-import { getContainmentState } from "../_security-containment.js";
+import { buildSecurityMetrics } from "./_security-metrics.js";
+import { getRecentSecurityEvents, appendSecurityEvent } from "./_security-event-store.js";
+import { writeSecurityLog } from "./_security-log-writer.js";
+import { safeString, buildMethodNotAllowedResponse } from "./_api-security.js";
+import { getAdaptiveThreatMode } from "./_adaptive-threat-mode.js";
+import { getContainmentState } from "./_security-containment.js";
 
 const ROUTE = "/api/security-metrics";
 const DEFAULT_LIMIT = 100;

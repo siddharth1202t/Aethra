@@ -3,7 +3,7 @@ import {
   getContainmentState,
   setContainmentState
 } from "./_security-containment.js";
-import { appendSecurityEvent } from "./_security-events-store.js";
+import { appendSecurityEvent } from "./_security-event-store.js";
 
 const ADAPTIVE_MODE_KEY = "security:adaptive-mode";
 const ADAPTIVE_MODE_TTL_MS = 24 * 60 * 60 * 1000;
