@@ -1,9 +1,9 @@
-import { redis } from "./_redis.js";
+import { getRedis } from "./_redis.js";
 import {
   getContainmentState,
   setContainmentState
 } from "./_security-containment.js";
-import { appendSecurityEvent } from "./_security-events-store.js";
+import { appendSecurityEvent } from "./_security-event-store.js";
 
 const ADAPTIVE_MODE_KEY = "security:adaptive-mode";
 const ADAPTIVE_MODE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -37,7 +37,7 @@ const MAX_COUNTER_VALUE = 1_000_000;
 const MAX_TIMESTAMP_FUTURE_SKEW_MS = 60_000;
 
 function safeString(value, maxLength = 200) {
-  return String(value || "")
+  return String(value ?? "")
     .replace(/[\u0000-\u001F\u007F]/g, "")
     .trim()
     .slice(0, maxLength);
@@ -128,18 +128,20 @@ function normalizeAdaptiveState(raw) {
 
 function normalizeCounters(state) {
   return {
-    totalSignals: safeInt(state.totalSignals, 0),
-    criticalSignals: safeInt(state.criticalSignals, 0),
-    blockSignals: safeInt(state.blockSignals, 0),
-    challengeSignals: safeInt(state.challengeSignals, 0),
-    repeatedOffenderSignals: safeInt(state.repeatedOffenderSignals, 0),
-    lockdownTriggers: safeInt(state.lockdownTriggers, 0),
-    highRiskStateSignals: safeInt(state.highRiskStateSignals, 0),
-    routePressureSignals: safeInt(state.routePressureSignals, 0)
+    totalSignals: safeInt(state?.totalSignals, 0),
+    criticalSignals: safeInt(state?.criticalSignals, 0),
+    blockSignals: safeInt(state?.blockSignals, 0),
+    challengeSignals: safeInt(state?.challengeSignals, 0),
+    repeatedOffenderSignals: safeInt(state?.repeatedOffenderSignals, 0),
+    lockdownTriggers: safeInt(state?.lockdownTriggers, 0),
+    highRiskStateSignals: safeInt(state?.highRiskStateSignals, 0),
+    routePressureSignals: safeInt(state?.routePressureSignals, 0)
   };
 }
 
-async function getStoredAdaptiveState() {
+async function getStoredAdaptiveState(env = {}) {
+  const redis = getRedis(env);
+
   try {
     const raw = await redis.get(ADAPTIVE_MODE_KEY);
 
@@ -163,7 +165,9 @@ async function getStoredAdaptiveState() {
   }
 }
 
-async function storeAdaptiveState(state) {
+async function storeAdaptiveState(env = {}, state) {
+  const redis = getRedis(env);
+
   try {
     const normalized = normalizeAdaptiveState(state);
     await redis.set(ADAPTIVE_MODE_KEY, JSON.stringify(normalized), {
@@ -272,13 +276,13 @@ function shouldReturnToNormalContainment(currentContainment) {
   );
 }
 
-async function syncContainmentToMode(mode, reason) {
+async function syncContainmentToMode(env = {}, mode, reason) {
   const normalizedMode = normalizeMode(mode);
   const normalizedReason = normalizeReason(reason || "adaptive_sync");
-  const currentContainment = await getContainmentState();
+  const currentContainment = await getContainmentState(env);
 
   if (normalizedMode === "lockdown") {
-    return setContainmentState({
+    return setContainmentState(env, {
       mode: "lockdown",
       reason: normalizedReason,
       durationMs: 30 * 60 * 1000
@@ -286,7 +290,7 @@ async function syncContainmentToMode(mode, reason) {
   }
 
   if (normalizedMode === "defense") {
-    return setContainmentState({
+    return setContainmentState(env, {
       mode: "elevated",
       reason: normalizedReason,
       durationMs: 20 * 60 * 1000,
@@ -299,7 +303,7 @@ async function syncContainmentToMode(mode, reason) {
   }
 
   if (normalizedMode === "elevated") {
-    return setContainmentState({
+    return setContainmentState(env, {
       mode: "elevated",
       reason: normalizedReason,
       durationMs: 15 * 60 * 1000,
@@ -312,7 +316,7 @@ async function syncContainmentToMode(mode, reason) {
   }
 
   if (shouldReturnToNormalContainment(currentContainment)) {
-    return setContainmentState({
+    return setContainmentState(env, {
       mode: "normal",
       reason: normalizedReason,
       durationMs: 5 * 60 * 1000,
@@ -335,13 +339,14 @@ async function syncContainmentToMode(mode, reason) {
 }
 
 async function recordAdaptiveModeChange({
+  env = {},
   previousMode,
   nextMode,
   reason,
   counters
 }) {
   try {
-    await appendSecurityEvent({
+    await appendSecurityEvent(env, {
       type: "adaptive_mode_changed",
       severity: nextMode === "lockdown" ? "critical" : "warning",
       action: nextMode === "lockdown" ? "contain" : "observe",
@@ -367,6 +372,7 @@ async function recordAdaptiveModeChange({
 }
 
 export async function evaluateAdaptiveThreatMode({
+  env = {},
   risk = null,
   threatResult = null,
   abuseResult = null,
@@ -375,7 +381,7 @@ export async function evaluateAdaptiveThreatMode({
   routeSensitivity = "normal"
 } = {}) {
   const now = Date.now();
-  const state = await getStoredAdaptiveState();
+  const state = await getStoredAdaptiveState(env);
 
   if (hasWindowExpired(state.windowStartedAt, now)) {
     resetWindow(state, now);
@@ -471,13 +477,14 @@ export async function evaluateAdaptiveThreatMode({
   state.mode = decision.mode;
   state.lastReason = normalizeReason(decision.reason);
 
-  await storeAdaptiveState(state);
-  const containment = await syncContainmentToMode(state.mode, state.lastReason);
+  await storeAdaptiveState(env, state);
+  const containment = await syncContainmentToMode(env, state.mode, state.lastReason);
 
   const normalizedCounters = normalizeCounters(state);
 
   if (previousMode !== state.mode) {
     await recordAdaptiveModeChange({
+      env,
       previousMode,
       nextMode: state.mode,
       reason: state.lastReason,
@@ -497,8 +504,8 @@ export async function evaluateAdaptiveThreatMode({
   };
 }
 
-export async function getAdaptiveThreatMode() {
-  const state = await getStoredAdaptiveState();
+export async function getAdaptiveThreatMode(env = {}) {
+  const state = await getStoredAdaptiveState(env);
 
   return {
     mode: state.mode,
@@ -509,18 +516,18 @@ export async function getAdaptiveThreatMode() {
   };
 }
 
-export async function getAdaptiveThreatModeSnapshot() {
-  return getAdaptiveThreatMode();
+export async function getAdaptiveThreatModeSnapshot(env = {}) {
+  return getAdaptiveThreatMode(env);
 }
 
-export async function resetAdaptiveThreatMode() {
+export async function resetAdaptiveThreatMode(env = {}) {
   const state = createDefaultAdaptiveState();
-  const ok = await storeAdaptiveState(state);
+  const ok = await storeAdaptiveState(env, state);
 
-  await syncContainmentToMode("normal", "manual_reset");
+  await syncContainmentToMode(env, "normal", "manual_reset");
 
   try {
-    await appendSecurityEvent({
+    await appendSecurityEvent(env, {
       type: "adaptive_mode_reset",
       severity: "info",
       action: "observe",
