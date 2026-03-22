@@ -1,2 +1,20 @@
-﻿node_modules/
+# Dependencies
+node_modules/
 
+# Environment variables (VERY IMPORTANT)
+.env
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build / cache
+dist/
+.cache/
+
+# Vercel / Cloudflare (optional but good)
+.vercel
+.wrangler
