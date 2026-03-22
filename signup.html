@@ -1,190 +1,215 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta
-    name="viewport"
-    content="width=device-width, initial-scale=1.0, viewport-fit=cover"
-  />
-  <title>Aethra Signup</title>
-  <meta
-    name="description"
-    content="Create your Aethra account and enter a premium world of living AI characters, emotional memory, and evolving relationships."
-  />
-  <link rel="stylesheet" href="styles/signup.css" />
-  <link rel="icon" type="image/png" href="/images/favicon.png?v=5" />
-  <link rel="shortcut icon" href="/images/favicon.png?v=5" />
-  <link rel="apple-touch-icon" href="/images/favicon.png?v=5" />
-</head>
-<body>
-  <canvas
-    class="stars-canvas"
-    id="starsCanvas"
-    data-scene="auth"
-    aria-hidden="true"
-  ></canvas>
+import {
+  getAuth,
+  createUserWithEmailAndPassword,
+  updateProfile,
+  sendEmailVerification
+} from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
 
-  <div class="page">
-    <div class="side-character">
-      <img
-        src="images/character-left.png"
-        alt="Akira"
-        loading="lazy"
-        decoding="async"
-      />
-      <div class="side-label">
-        <h3>AKIRA</h3>
-        <p>Step into a world where every choice shapes your connection.</p>
-      </div>
-    </div>
+import { app } from "./firestore-config.js";
+import { ensureUserProfile } from "./user-profile.js";
+import { writeSecurityLog } from "./security-logger.js";
+import { detectBotBehavior } from "./bot-detection.js";
 
-    <main class="center-wrap">
-      <section class="signup-card" aria-labelledby="signupTitle">
-        <a href="index.html" class="back-link">← Back to Aethra</a>
-        <div class="badge">Create your account</div>
-        <h1 id="signupTitle">Join Aethra</h1>
-        <p class="subtext">
-          Create your profile and begin exploring a world of living AI
-          characters with evolving emotion, memory, and presence.
-        </p>
+const auth = getAuth(app);
+const VERIFY_EMAIL_PAGE = "verify-email.html";
+const SUBMIT_COOLDOWN_MS = 2500;
 
-        <form id="signupForm" novalidate>
-          <div id="formError" class="form-error" aria-live="polite"></div>
+const USERNAME_MIN = 3;
+const USERNAME_MAX = 30;
+const EMAIL_MAX = 120;
+const PASSWORD_MIN = 10;
+const PASSWORD_MAX = 128;
 
-          <div class="field">
-            <label for="name">Username</label>
-            <input
-              id="name"
-              name="name"
-              type="text"
-              placeholder="Choose a username"
-              required
-              minlength="3"
-              maxlength="30"
-              autocomplete="username"
-              autocapitalize="off"
-              spellcheck="false"
-              aria-describedby="nameError"
-            />
-            <small id="nameError" class="error-text" aria-live="polite"></small>
-          </div>
+/* ---------------- DOM ---------------- */
+const signupForm = document.getElementById("signupForm");
+const signupBtn = document.querySelector(".signup-btn");
 
-          <div class="field">
-            <label for="email">Email</label>
-            <input
-              id="email"
-              name="email"
-              type="email"
-              placeholder="Enter your email"
-              required
-              maxlength="120"
-              autocomplete="email"
-              inputmode="email"
-              autocapitalize="off"
-              spellcheck="false"
-              aria-describedby="emailError"
-            />
-            <small id="emailError" class="error-text" aria-live="polite"></small>
-          </div>
+const nameInput = document.getElementById("name");
+const emailInput = document.getElementById("email");
+const passwordInput = document.getElementById("password");
+const confirmPasswordInput = document.getElementById("confirmPassword");
 
-          <div class="field">
-            <label for="password">Password</label>
-            <input
-              id="password"
-              name="password"
-              type="password"
-              placeholder="Create a password"
-              required
-              minlength="8"
-              maxlength="128"
-              autocomplete="new-password"
-              spellcheck="false"
-              aria-describedby="passwordError passwordHint"
-            />
-            <small id="passwordError" class="error-text" aria-live="polite"></small>
-            <small id="passwordHint" class="field-hint">
-              Use at least 10 characters, including 1 uppercase letter, 1 lowercase letter, 1 number, and 1 special character.
-            </small>
-          </div>
+const nameError = document.getElementById("nameError");
+const emailError = document.getElementById("emailError");
+const passwordError = document.getElementById("passwordError");
+const confirmPasswordError = document.getElementById("confirmPasswordError");
+const captchaError = document.getElementById("captchaError");
+const formError = document.getElementById("formError");
 
-          <div class="field">
-            <label for="confirmPassword">Confirm Password</label>
-            <input
-              id="confirmPassword"
-              name="confirmPassword"
-              type="password"
-              placeholder="Confirm your password"
-              required
-              minlength="10"
-              maxlength="128"
-              autocomplete="off"
-              spellcheck="false"
-              aria-describedby="confirmPasswordError"
-            />
-            <small id="confirmPasswordError" class="error-text" aria-live="polite"></small>
-          </div>
+let isSubmitting = false;
+let lastSubmitAt = 0;
 
-          <div class="captcha-wrap">
-            <div id="turnstile-container"></div>
-          </div>
+const touchedFields = {
+  name: false,
+  email: false,
+  password: false,
+  confirmPassword: false
+};
 
-          <input
-            type="hidden"
-            id="turnstileToken"
-            name="turnstileToken"
-            value=""
-          />
-          <small id="captchaError" class="error-text" aria-live="polite"></small>
+/* ---------------- HELPERS ---------------- */
+function now() { return Date.now(); }
+function shouldThrottle() { return now() - lastSubmitAt < SUBMIT_COOLDOWN_MS; }
+function recordSubmission() { lastSubmitAt = now(); }
 
-          <button class="signup-btn" id="createAccountBtn" type="submit">
-            Create Account
-          </button>
-        </form>
+function setFormMessage(msg = "", type = "error") {
+  if (!formError) return;
+  formError.textContent = msg.trim().slice(0, 300);
+  formError.className = `form-error ${msg ? "show" : ""} ${type === "success" ? "form-error--success" : "form-error--danger"}`;
+}
 
-        <div class="auth-divider">
-          <span>or</span>
-        </div>
+function setFieldError(el, msg = "") {
+  if (!el) return;
+  el.textContent = msg.trim().slice(0, 200);
+  if (el.previousElementSibling) el.previousElementSibling.classList.toggle("input-invalid", !!msg);
+}
 
-        <button type="button" id="googleSignInBtn" class="google-btn">
-          <img
-            src="images/google-icon.svg"
-            alt="Google"
-            width="20"
-            height="20"
-            loading="lazy"
-            decoding="async"
-          />
-          <span>Continue with Google</span>
-        </button>
+function markFieldValid(input) {
+  if (!input) return;
+  input.classList.remove("input-invalid");
+  input.classList.add("input-valid");
+}
 
-        <div class="bottom-text">
-          Already have an account? <a href="login.html">Login</a>
-        </div>
-      </section>
-    </main>
+function markFieldInvalid(input) {
+  if (!input) return;
+  input.classList.remove("input-valid");
+  input.classList.add("input-invalid");
+}
 
-    <div class="side-character">
-      <img
-        src="images/character-right.png"
-        alt="Luna"
-        loading="lazy"
-        decoding="async"
-      />
-      <div class="side-label">
-        <h3>LUNA</h3>
-        <p>Warm, elegant, and ready to welcome you into Aethra.</p>
-      </div>
-    </div>
-  </div>
+function clearAllErrors() {
+  setFieldError(nameError);
+  setFieldError(emailError);
+  setFieldError(passwordError);
+  setFieldError(confirmPasswordError);
+  setFieldError(captchaError);
+  setFormMessage("");
+  [nameInput, emailInput, passwordInput, confirmPasswordInput].forEach(i => i?.classList.remove("input-valid", "input-invalid"));
+}
 
-  <script
-    src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit"
-    async
-    defer
-  ></script>
-  <script src="js/stars-canvas.js?v=3" defer></script>
-  <script type="module" src="js/signup-turnstile.js?v=3"></script>
-  <script type="module" src="js/signup.js?v=3"></script>
-  <script type="module" src="js/google-signup.js?v=4"></script>
-</body>
-</html>
+function clearSensitiveInputs({ keepName = true, keepEmail = true } = {}) {
+  if (!keepName && nameInput) nameInput.value = "";
+  if (!keepEmail && emailInput) emailInput.value = "";
+  if (passwordInput) passwordInput.value = "";
+  if (confirmPasswordInput) confirmPasswordInput.value = "";
+}
+
+/* ---------------- VALIDATION ---------------- */
+function sanitizeUsername(v) { return String(v || "").trim().replace(/[^\w. ]/g,"").replace(/\s+/g," ").slice(0, USERNAME_MAX); }
+function normalizeEmail(v) { return String(v || "").trim().toLowerCase().slice(0, EMAIL_MAX); }
+function sanitizePassword(v) { return String(v || "").slice(0, PASSWORD_MAX); }
+
+function isValidEmail(email) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length <= EMAIL_MAX; }
+function hasUppercase(s) { return /[A-Z]/.test(s); }
+function hasLowercase(s) { return /[a-z]/.test(s); }
+function hasNumber(s) { return /\d/.test(s); }
+function hasSpecialChar(s) { return /[^A-Za-z0-9]/.test(s); }
+
+function validateName() {
+  const val = sanitizeUsername(nameInput.value);
+  nameInput.value = val;
+  if (!val) { setFieldError(nameError,"Please enter a username."); markFieldInvalid(nameInput); return false; }
+  if (val.length < USERNAME_MIN || val.length > USERNAME_MAX) { setFieldError(nameError,`Username must be ${USERNAME_MIN}-${USERNAME_MAX} chars.`); markFieldInvalid(nameInput); return false; }
+  setFieldError(nameError); markFieldValid(nameInput); return true;
+}
+
+function validateEmail() {
+  const val = normalizeEmail(emailInput.value);
+  emailInput.value = val;
+  if (!val) { setFieldError(emailError,"Please enter your email."); markFieldInvalid(emailInput); return false; }
+  if (!isValidEmail(val)) { setFieldError(emailError,"Enter a valid email."); markFieldInvalid(emailInput); return false; }
+  setFieldError(emailError); markFieldValid(emailInput); return true;
+}
+
+function validatePassword() {
+  const val = sanitizePassword(passwordInput.value);
+  passwordInput.value = val;
+  if (!val) { setFieldError(passwordError,"Please enter a password."); markFieldInvalid(passwordInput); return false; }
+  if (val.length < PASSWORD_MIN) { setFieldError(passwordError,`Password must be at least ${PASSWORD_MIN} chars.`); markFieldInvalid(passwordInput); return false; }
+  if (!hasUppercase(val)||!hasLowercase(val)||!hasNumber(val)||!hasSpecialChar(val)) { setFieldError(passwordError,"Password must include uppercase, lowercase, number & special char."); markFieldInvalid(passwordInput); return false; }
+  setFieldError(passwordError); markFieldValid(passwordInput); return true;
+}
+
+function validateConfirmPassword() {
+  const pwd = passwordInput.value;
+  const confirm = confirmPasswordInput.value;
+  if (!confirm) { setFieldError(confirmPasswordError,"Please confirm password."); markFieldInvalid(confirmPasswordInput); return false; }
+  if (pwd !== confirm) { setFieldError(confirmPasswordError,"Passwords do not match."); markFieldInvalid(confirmPasswordInput); return false; }
+  setFieldError(confirmPasswordError); markFieldValid(confirmPasswordInput); return true;
+}
+
+/* ---------------- LIVE VALIDATION ---------------- */
+[nameInput,emailInput,passwordInput,confirmPasswordInput].forEach(input=>{
+  if(!input) return;
+  const name=input.id;
+  input.addEventListener("focus",()=>touchedFields[name]=true);
+  input.addEventListener("blur",()=>{touchedFields[name]=true; validateField(name);});
+  input.addEventListener("input",()=>{if(touchedFields[name]) validateField(name);});
+});
+
+function validateField(field){
+  switch(field){
+    case "name": return validateName();
+    case "email": return validateEmail();
+    case "password": validatePassword(); validateConfirmPassword(); return;
+    case "confirmPassword": return validateConfirmPassword();
+  }
+}
+
+/* ---------------- SIGNUP FLOW ---------------- */
+function mapError(e){
+  const code=e?.code||"";
+  switch(code){
+    case "auth/email-already-in-use": setFieldError(emailError,"Email already in use."); markFieldInvalid(emailInput); return "Email already in use.";
+    case "auth/invalid-email": setFieldError(emailError,"Enter a valid email."); markFieldInvalid(emailInput); return "Invalid email.";
+    case "auth/weak-password": setFieldError(passwordError,"Password does not meet requirements."); markFieldInvalid(passwordInput); return "Weak password.";
+    case "auth/network-request-failed": return "Network error. Check connection.";
+    case "auth/too-many-requests": return "Too many attempts. Try later.";
+    case "auth/operation-not-allowed": return "Signup temporarily unavailable.";
+    default: return "Signup failed. Try again.";
+  }
+}
+
+async function getTurnstileToken() {
+  const tokenInput=document.getElementById("turnstileToken");
+  return tokenInput?.value||"";
+}
+
+async function handleSignup(){
+  if(isSubmitting) return;
+  if(shouldThrottle()){ setFormMessage("Please wait a moment before retrying.","error"); return; }
+  recordSubmission();
+  isSubmitting=true;
+  clearAllErrors();
+  signupBtn.disabled=true;
+  signupBtn.textContent="Creating account...";
+
+  try{
+    const valid=validateName() && validateEmail() && validatePassword() && validateConfirmPassword();
+    if(!valid){ await writeSecurityLog({type:"signup_validation_failed",message:"Client-side validation failed",email:normalizeEmail(emailInput.value)}); return; }
+
+    const email=normalizeEmail(emailInput.value);
+    const password=sanitizePassword(passwordInput.value);
+    const name=sanitizeUsername(nameInput.value);
+
+    const credential=await createUserWithEmailAndPassword(auth,email,password);
+    const user=credential.user;
+    await updateProfile(user,{displayName:name});
+    await ensureUserProfile(user);
+    await sendEmailVerification(user);
+    await writeSecurityLog({type:"signup_success",message:"User account created",email,userId:user.uid});
+
+    clearSensitiveInputs({keepEmail:true,keepName:true});
+    setFormMessage("Account created! Redirecting...","success");
+    window.location.replace(VERIFY_EMAIL_PAGE);
+  }catch(e){
+    console.error("Signup failed:",e);
+    setFormMessage(mapError(e),"error");
+    clearSensitiveInputs({keepEmail:true,keepName:true});
+  }finally{
+    signupBtn.disabled=false;
+    signupBtn.textContent="Create Account";
+    isSubmitting=false;
+  }
+}
+
+/* ---------------- EVENTS ---------------- */
+signupForm?.addEventListener("submit",e=>{ e.preventDefault(); handleSignup(); });
