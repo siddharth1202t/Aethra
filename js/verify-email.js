@@ -2,78 +2,69 @@ import {
   getAuth,
   onAuthStateChanged,
   reload,
-  sendEmailVerification,
-  signOut
+  sendEmailVerification
 } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
 import { app } from "./firestore-config.js";
 
 const RESEND_COOLDOWN_SECONDS = 60;
-const AUTO_CHECK_INTERVAL_MS = 5000;
-
 const auth = getAuth(app);
 
+// Elements
 const verifyCard = document.getElementById("verifyCard");
 const resendBtn = document.getElementById("resendBtn");
-const logoutBtn = document.getElementById("logoutBtn");
 const messageBox = document.getElementById("messageBox");
 
 let resendCountdown = null;
 let resendRemaining = 0;
 let authHandled = false;
 let resendInProgress = false;
-let logoutInProgress = false;
-let autoCheckInterval = null;
 
-/* ---------------- NAVIGATION ---------------- */
-const goTo = (page) => window.location.replace(page);
+// Continue URL after verification
+const CONTINUE_URL =
+  window.location.hostname.includes("localhost")
+    ? "http://localhost:5173/login.html"
+    : "https://YOUR_PRODUCTION_DOMAIN/login.html"; // Replace with your domain
 
-/* ---------------- UI HELPERS ---------------- */
-const setPageVisible = () => {
+/* ---------------- HELPERS ---------------- */
+function goTo(page) {
+  window.location.replace(page);
+}
+
+function showMessage(text, type = "error") {
+  if (!messageBox) return;
+  messageBox.textContent = String(text || "").trim();
+  messageBox.className = `msg show ${type === "success" ? "success" : "error"}`;
+}
+
+function clearMessage() {
+  if (!messageBox) return;
+  messageBox.textContent = "";
+  messageBox.className = "msg";
+}
+
+function setPageVisible() {
   if (!verifyCard) return;
   verifyCard.style.visibility = "visible";
   window.requestAnimationFrame(() => {
     verifyCard.style.opacity = "1";
     verifyCard.style.transform = "translateY(0)";
   });
-};
+}
 
-const showMessage = (text, type = "error") => {
-  if (!messageBox) return;
-  messageBox.textContent = String(text || "").trim();
-  messageBox.className = `msg show ${type === "success" ? "success" : "error"}`;
-};
-
-const clearMessage = () => {
-  if (!messageBox) return;
-  messageBox.textContent = "";
-  messageBox.className = "msg";
-};
-
-const setLoading = (button, text) => {
-  if (!button) return;
-  if (!button.dataset.originalText) button.dataset.originalText = button.textContent;
-  button.disabled = true;
-  button.textContent = text;
-};
-
-const clearLoading = (button) => {
-  if (!button) return;
-  button.disabled = false;
-  button.textContent = button.dataset.originalText || button.textContent;
-};
-
-const clearResendCountdown = () => {
+function clearResendCountdown() {
   if (resendCountdown) {
     clearInterval(resendCountdown);
     resendCountdown = null;
   }
-};
+}
 
-const setResendCooldown = (seconds = RESEND_COOLDOWN_SECONDS) => {
+function setResendCooldown(seconds = RESEND_COOLDOWN_SECONDS) {
   if (!resendBtn) return;
-  resendRemaining = Math.max(0, Number(seconds));
+
+  resendRemaining = Math.max(0, Number(seconds) || 0);
   resendBtn.disabled = true;
   resendBtn.textContent = `Resend in ${resendRemaining}s`;
+
   clearResendCountdown();
   resendCountdown = setInterval(() => {
     resendRemaining -= 1;
@@ -85,46 +76,36 @@ const setResendCooldown = (seconds = RESEND_COOLDOWN_SECONDS) => {
     }
     resendBtn.textContent = `Resend in ${resendRemaining}s`;
   }, 1000);
-};
+}
 
-const refreshCurrentUser = async (user) => {
+async function refreshCurrentUser(user) {
   if (!user) return null;
   await reload(user);
   return auth.currentUser;
-};
+}
 
-/* ---------------- AUTO-CHECK VERIFICATION ---------------- */
-const startAutoCheck = (user) => {
-  autoCheckInterval = setInterval(async () => {
-    try {
-      const refreshedUser = await refreshCurrentUser(user);
-      if (refreshedUser?.emailVerified) {
-        clearInterval(autoCheckInterval);
-        goTo("login.html");
-      }
-    } catch (error) {
-      console.error("Auto verification check failed:", error);
-    }
-  }, AUTO_CHECK_INTERVAL_MS);
-};
-
-/* ---------------- AUTH GATE ---------------- */
+/* ---------------- AUTH STATE ---------------- */
 onAuthStateChanged(auth, async (user) => {
   if (authHandled) return;
-  if (!user) { authHandled = true; goTo("login.html"); return; }
+
+  if (!user) {
+    authHandled = true;
+    goTo("login.html");
+    return;
+  }
 
   try {
     const refreshedUser = await refreshCurrentUser(user);
     if (refreshedUser?.emailVerified) {
       authHandled = true;
-      goTo("login.html");
+      goTo(CONTINUE_URL);
       return;
     }
+
     authHandled = true;
     setPageVisible();
-    startAutoCheck(user);
   } catch (error) {
-    console.error("Verification page auth refresh failed:", error);
+    console.error("Verification auth refresh failed:", error);
     authHandled = true;
     setPageVisible();
     showMessage("Could not refresh your account status. Please try again.", "error");
@@ -134,41 +115,52 @@ onAuthStateChanged(auth, async (user) => {
 /* ---------------- ACTIONS ---------------- */
 resendBtn?.addEventListener("click", async () => {
   if (resendInProgress || resendRemaining > 0) return;
+
   const user = auth.currentUser;
-  if (!user) { goTo("login.html"); return; }
+  if (!user) {
+    goTo("login.html");
+    return;
+  }
 
   resendInProgress = true;
   try {
     clearMessage();
-    setLoading(resendBtn, "Sending...");
-    await sendEmailVerification(user);
-    showMessage("Verification email sent again. Check your inbox.", "success");
+    resendBtn.disabled = true;
+    resendBtn.textContent = "Sending...";
+
+    await sendEmailVerification(user, { url: CONTINUE_URL });
+    showMessage("Verification email sent. Check your inbox!", "success");
     setResendCooldown();
   } catch (error) {
     console.error("Resend verification failed:", error);
     showMessage("Could not resend verification email. Try again.", "error");
   } finally {
-    clearLoading(resendBtn);
     resendInProgress = false;
+    resendBtn.disabled = false;
+    resendBtn.textContent = resendBtn.dataset.originalText || "Resend Verification Email";
   }
 });
 
-logoutBtn?.addEventListener("click", async () => {
-  if (logoutInProgress) return;
-  logoutInProgress = true;
+/* ---------------- AUTO-REDIRECT ---------------- */
+async function checkVerifiedPeriodically() {
+  const user = auth.currentUser;
+  if (!user) return;
+
   try {
-    setLoading(logoutBtn, "Logging out...");
-    if (resendBtn) resendBtn.disabled = true;
-    await signOut(auth);
-  } catch (error) {
-    console.error("Logout failed:", error);
-  } finally {
-    goTo("login.html");
+    const refreshedUser = await refreshCurrentUser(user);
+    if (refreshedUser?.emailVerified) {
+      goTo(CONTINUE_URL);
+      return;
+    }
+  } catch (err) {
+    console.error("Periodic verification check failed:", err);
   }
-});
 
-/* ---------------- CLEANUP ---------------- */
-window.addEventListener("beforeunload", () => {
-  clearResendCountdown();
-  if (autoCheckInterval) clearInterval(autoCheckInterval);
+  setTimeout(checkVerifiedPeriodically, 3000); // check every 3s
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  if (verifyCard) verifyCard.style.visibility = "hidden";
+  if (resendBtn) resendBtn.dataset.originalText = resendBtn.textContent || "Resend Verification Email";
+  checkVerifiedPeriodically();
 });
