@@ -49,7 +49,7 @@ function showMessage(text, type = "error") {
   }
 
   messageBox.textContent = String(text || "").trim();
-  messageBox.className = `msg show ${type === "success" ? "success" : "error"}`;
+  messageBox.className = msg show ${type === "success" ? "success" : "error"};
 }
 
 function clearMessage() {
@@ -97,7 +97,7 @@ function setResendCooldown(seconds = RESEND_COOLDOWN_SECONDS) {
 
   resendRemaining = Math.max(0, Number(seconds) || 0);
   resendBtn.disabled = true;
-  resendBtn.textContent = `Resend available in ${resendRemaining}s`;
+  resendBtn.textContent = Resend available in ${resendRemaining}s;
 
   clearResendCountdown();
 
@@ -112,7 +112,7 @@ function setResendCooldown(seconds = RESEND_COOLDOWN_SECONDS) {
       return;
     }
 
-    resendBtn.textContent = `Resend available in ${resendRemaining}s`;
+    resendBtn.textContent = Resend available in ${resendRemaining}s;
   }, 1000);
 }
 
@@ -276,3 +276,4 @@ logoutBtn?.addEventListener("click", async () => {
 window.addEventListener("beforeunload", () => {
   clearResendCountdown();
 });
+ = 5000;
