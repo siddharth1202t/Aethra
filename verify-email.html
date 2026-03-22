@@ -9,10 +9,17 @@
     content="Verify your email to continue into Aethra and unlock your premium AI character experience."
   />
   <link rel="icon" type="image/png" href="/images/favicon.png?v=5" />
-  <link rel="stylesheet" href="styles/verify-email.css?v=2" />
+  <link rel="shortcut icon" href="/images/favicon.png?v=5" />
+  <link rel="apple-touch-icon" href="/images/favicon.png?v=5" />
+  <link rel="stylesheet" href="styles/verify-email.css?v=1" />
 </head>
 <body>
-  <canvas class="stars-canvas" id="starsCanvas" data-scene="auth" aria-hidden="true"></canvas>
+  <canvas
+    class="stars-canvas"
+    id="starsCanvas"
+    data-scene="auth"
+    aria-hidden="true"
+  ></canvas>
 
   <div class="aurora" aria-hidden="true">
     <div class="blob one"></div>
@@ -26,10 +33,9 @@
 
       <h1 id="verifyTitle">Verify your email</h1>
 
-      <div id="statusIcon" class="status-icon" aria-hidden="true">✔️</div>
-
-      <p class="subtext" id="subtext">
-        We sent a verification email to your inbox. Please verify your email address before entering Aethra.
+      <p class="subtext">
+        We sent a verification email to your inbox. Please verify your email
+        address before entering Aethra.
       </p>
 
       <div id="messageBox" class="msg" aria-live="polite"></div>
@@ -38,11 +44,21 @@
         <button id="resendBtn" class="btn btn-primary" type="button">
           Resend Verification Email
         </button>
+
+        <button id="refreshBtn" class="btn btn-secondary" type="button">
+          I Have Verified My Email
+        </button>
+
+        <button id="logoutBtn" class="btn btn-secondary" type="button">
+          Logout
+        </button>
       </div>
     </section>
   </main>
 
   <script src="js/stars-canvas.js?v=3" defer></script>
+  <script type="module" src="js/app-check.js"></script>
   <script type="module" src="js/verify-email.js"></script>
 </body>
 </html>
+ail is verified, automatically redirect the user
