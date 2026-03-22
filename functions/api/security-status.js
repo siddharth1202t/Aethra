@@ -9,6 +9,8 @@ import { getContainmentState } from "./_security-containment.js";
 
 const ROUTE = "/api/security-status";
 
+/* -------------------- RESPONSE -------------------- */
+
 function jsonResponse(payload, status = 200) {
   return new Response(JSON.stringify(payload), {
     status,
@@ -19,30 +21,32 @@ function jsonResponse(payload, status = 200) {
   });
 }
 
+/* -------------------- UTIL -------------------- */
+
 function getClientIp(request) {
   const forwarded = request.headers.get("x-forwarded-for");
-  if (typeof forwarded === "string" && forwarded.trim()) {
+  if (forwarded) {
     return forwarded.split(",")[0].trim().slice(0, 100);
   }
 
   const realIp = request.headers.get("x-real-ip");
-  if (typeof realIp === "string" && realIp.trim()) {
+  if (realIp) {
     return realIp.trim().slice(0, 100);
   }
 
   return "unknown";
 }
 
-function buildUnauthorizedResponse() {
-  return {
-    ok: false,
-    error: "not_found"
-  };
+function unauthorizedResponse() {
+  return jsonResponse({ ok: false, error: "not_found" }, 404);
 }
+
+/* -------------------- HANDLER -------------------- */
 
 export async function onRequest(context) {
   const { request, env } = context;
 
+  /* ---- METHOD CHECK ---- */
   if (request.method !== "GET") {
     const response = buildMethodNotAllowedResponse(["GET"]);
     return jsonResponse(response.body, response.status);
@@ -51,43 +55,42 @@ export async function onRequest(context) {
   const clientIp = getClientIp(request);
 
   try {
+    /* ---- ADMIN KEY VALIDATION ---- */
     const adminKey = safeString(
-      request.headers.get("x-security-admin-key") || "",
+      request.headers.get("x-security-admin-key"),
       200
     );
 
-    if (
-      !env.SECURITY_ADMIN_API_KEY ||
-      adminKey !== env.SECURITY_ADMIN_API_KEY
-    ) {
-      await writeSecurityLog({
+    if (!env.SECURITY_ADMIN_API_KEY || adminKey !== env.SECURITY_ADMIN_API_KEY) {
+      // fire and forget (don’t block response on logging)
+      writeSecurityLog({
         env,
         type: "security_status_unauthorized",
         level: "warning",
         route: ROUTE,
         ip: clientIp,
         message: "Unauthorized attempt to access security status endpoint.",
-        metadata: {
-          method: request.method
-        }
-      });
+        metadata: { method: request.method }
+      }).catch(() => {});
 
-      return jsonResponse(buildUnauthorizedResponse(), 404);
+      return unauthorizedResponse();
     }
 
-    const adaptiveState = await getAdaptiveThreatMode(env);
-    const containmentState = await getContainmentState(env);
-
-    const threatSnapshot = {};
+    /* ---- PARALLEL FETCH (FASTER) ---- */
+    const [adaptiveState, containmentState] = await Promise.all([
+      getAdaptiveThreatMode(env),
+      getContainmentState(env)
+    ]);
 
     const payload = buildSecurityStatus({
       adaptiveState,
-      threatSnapshot,
+      threatSnapshot: {},
       containment: containmentState,
       timestamp: Date.now()
     });
 
-    await writeSecurityLog({
+    // fire and forget logging
+    writeSecurityLog({
       env,
       type: "security_status_accessed",
       level: "info",
@@ -98,11 +101,12 @@ export async function onRequest(context) {
         mode: payload.mode,
         systemHealth: payload.systemHealth
       }
-    });
+    }).catch(() => {});
 
     return jsonResponse(payload, 200);
   } catch (error) {
-    await writeSecurityLog({
+    // fire and forget logging
+    writeSecurityLog({
       env,
       type: "security_status_error",
       level: "error",
@@ -112,14 +116,8 @@ export async function onRequest(context) {
       metadata: {
         error: error instanceof Error ? error.message : "unknown_error"
       }
-    });
+    }).catch(() => {});
 
-    return jsonResponse(
-      {
-        ok: false,
-        error: "internal_error"
-      },
-      500
-    );
+    return jsonResponse({ ok: false, error: "internal_error" }, 500);
   }
 }
