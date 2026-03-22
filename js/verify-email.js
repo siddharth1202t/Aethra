@@ -1,59 +1,71 @@
-import { getAuth, onAuthStateChanged, reload, sendEmailVerification } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+import {
+  getAuth,
+  onAuthStateChanged,
+  reload,
+  sendEmailVerification,
+  signOut
+} from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
 import { app } from "./firestore-config.js";
 
 const RESEND_COOLDOWN_SECONDS = 60;
 const auth = getAuth(app);
 
+/* ---------------- DOM ---------------- */
 const verifyCard = document.getElementById("verifyCard");
 const resendBtn = document.getElementById("resendBtn");
+const refreshBtn = document.getElementById("refreshBtn");
+const logoutBtn = document.getElementById("logoutBtn");
 const messageBox = document.getElementById("messageBox");
-const statusIcon = document.getElementById("statusIcon");
-const subtext = document.getElementById("subtext");
 
 let resendCountdown = null;
 let resendRemaining = 0;
-let resendInProgress = false;
 let authHandled = false;
+let actionInProgress = false;
 
 /* ---------------- HELPERS ---------------- */
-function goTo(page) {
-  window.location.replace(page);
-}
+function goTo(page) { window.location.replace(page); }
 
 function showMessage(text, type = "error") {
-  messageBox.textContent = text;
+  if (!messageBox) return;
+  messageBox.textContent = String(text || "").trim();
   messageBox.className = `msg show ${type === "success" ? "success" : "error"}`;
 }
 
 function clearMessage() {
+  if (!messageBox) return;
   messageBox.textContent = "";
   messageBox.className = "msg";
 }
 
 function setLoading(button, text) {
+  if (!button) return;
   if (!button.dataset.originalText) button.dataset.originalText = button.textContent;
   button.disabled = true;
   button.textContent = text;
 }
 
 function clearLoading(button) {
+  if (!button) return;
   button.disabled = false;
   button.textContent = button.dataset.originalText || button.textContent;
 }
 
 function clearResendCountdown() {
-  if (resendCountdown) clearInterval(resendCountdown);
-  resendCountdown = null;
+  if (resendCountdown) {
+    clearInterval(resendCountdown);
+    resendCountdown = null;
+  }
 }
 
 function setResendCooldown(seconds = RESEND_COOLDOWN_SECONDS) {
-  resendRemaining = seconds;
+  if (!resendBtn) return;
+  resendRemaining = Math.max(0, Number(seconds) || 0);
   resendBtn.disabled = true;
   resendBtn.textContent = `Resend in ${resendRemaining}s`;
 
   clearResendCountdown();
   resendCountdown = setInterval(() => {
-    resendRemaining -= 1;
+    resendRemaining--;
     if (resendRemaining <= 0) {
       clearResendCountdown();
       resendBtn.disabled = false;
@@ -65,60 +77,36 @@ function setResendCooldown(seconds = RESEND_COOLDOWN_SECONDS) {
 }
 
 async function refreshCurrentUser(user) {
+  if (!user) return null;
   await reload(user);
   return auth.currentUser;
 }
 
-function setPageVisible() {
-  verifyCard.style.visibility = "visible";
-  window.requestAnimationFrame(() => {
-    verifyCard.style.opacity = "1";
-    verifyCard.style.transform = "translateY(0)";
-  });
-}
-
-function showVerifiedState() {
-  if (statusIcon) statusIcon.style.opacity = 1;
-  if (subtext) subtext.textContent = "Your email is verified! Redirecting...";
-  if (resendBtn) resendBtn.style.display = "none";
-}
-
 /* ---------------- AUTH CHECK ---------------- */
-async function checkEmailVerification(user) {
-  const refreshedUser = await refreshCurrentUser(user);
-  if (refreshedUser?.emailVerified) {
-    showVerifiedState();
-    setTimeout(() => goTo("login.html"), 1500);
-  }
-}
-
 onAuthStateChanged(auth, async (user) => {
   if (authHandled) return;
 
-  if (!user) {
+  if (!user) { authHandled = true; goTo("login.html"); return; }
+
+  try {
+    const refreshedUser = await refreshCurrentUser(user);
+    if (refreshedUser?.emailVerified) { authHandled = true; goTo("home.html"); return; }
     authHandled = true;
-    goTo("login.html");
-    return;
+    if (verifyCard) verifyCard.style.visibility = "visible";
+  } catch {
+    authHandled = true;
+    if (verifyCard) verifyCard.style.visibility = "visible";
+    showMessage("Could not refresh account status. Try again.", "error");
   }
-
-  authHandled = true;
-  setPageVisible();
-
-  // Poll email verification every 5 seconds
-  const pollInterval = setInterval(async () => {
-    const currentUser = auth.currentUser;
-    if (!currentUser) return clearInterval(pollInterval);
-    await checkEmailVerification(currentUser);
-  }, 5000);
 });
 
-/* ---------------- RESEND EMAIL ---------------- */
-resendBtn.addEventListener("click", async () => {
-  if (resendInProgress || resendRemaining > 0) return;
+/* ---------------- ACTIONS ---------------- */
+resendBtn?.addEventListener("click", async () => {
+  if (actionInProgress || resendRemaining > 0) return;
   const user = auth.currentUser;
-  if (!user) return goTo("login.html");
+  if (!user) { goTo("login.html"); return; }
 
-  resendInProgress = true;
+  actionInProgress = true;
   clearMessage();
   setLoading(resendBtn, "Sending...");
 
@@ -126,16 +114,45 @@ resendBtn.addEventListener("click", async () => {
     await sendEmailVerification(user);
     showMessage("Verification email sent. Check your inbox.", "success");
     setResendCooldown();
-  } catch (error) {
-    console.error("Resend failed:", error);
-    showMessage("Could not resend verification email. Try again.", "error");
+  } catch {
+    showMessage("Failed to resend email. Try again.", "error");
   } finally {
     clearLoading(resendBtn);
-    resendInProgress = false;
+    actionInProgress = false;
   }
 });
 
-/* ---------------- CLEANUP ---------------- */
-window.addEventListener("beforeunload", () => {
-  clearResendCountdown();
+refreshBtn?.addEventListener("click", async () => {
+  if (actionInProgress) return;
+  const user = auth.currentUser;
+  if (!user) { goTo("login.html"); return; }
+
+  actionInProgress = true;
+  clearMessage();
+  setLoading(refreshBtn, "Checking...");
+
+  try {
+    const refreshedUser = await refreshCurrentUser(user);
+    if (refreshedUser?.emailVerified) { goTo("home.html"); return; }
+    showMessage("Email not verified yet. Please check your inbox.", "error");
+  } catch {
+    showMessage("Failed to refresh status. Try again.", "error");
+  } finally {
+    clearLoading(refreshBtn);
+    actionInProgress = false;
+  }
 });
+
+logoutBtn?.addEventListener("click", async () => {
+  if (actionInProgress) return;
+  actionInProgress = true;
+
+  try {
+    [logoutBtn, resendBtn, refreshBtn].forEach(b => b && (b.disabled = true));
+    await signOut(auth);
+  } catch {}
+  finally { goTo("login.html"); }
+});
+
+/* ---------------- CLEANUP ---------------- */
+window.addEventListener("beforeunload", clearResendCountdown);
