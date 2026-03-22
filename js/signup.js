@@ -1,44 +1,24 @@
-import {
-  getAuth,
-  createUserWithEmailAndPassword,
-  updateProfile,
-  sendEmailVerification
-} from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-
+import { getAuth, createUserWithEmailAndPassword, updateProfile, sendEmailVerification } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
 import { app } from "./firestore-config.js";
 import { ensureUserProfile } from "./user-profile.js";
 import { writeSecurityLog } from "./security-logger.js";
-import { detectBotBehavior } from "./bot-detection.js";
 
 const auth = getAuth(app);
-
 const VERIFY_EMAIL_PAGE = "verify-email.html";
-const TURNSTILE_MANAGER_TIMEOUT_MS = 10000;
-const REQUEST_TIMEOUT_MS = 10000;
 const SUBMIT_COOLDOWN_MS = 2500;
-
-const USERNAME_MIN_LENGTH = 3;
-const USERNAME_MAX_LENGTH = 20;
-const EMAIL_MAX_LENGTH = 120;
-const PASSWORD_MIN_LENGTH = 10;
-const PASSWORD_MAX_LENGTH = 128;
-
-// Continue URL for verification email
-const CONTINUE_URL =
-  window.location.hostname.includes("localhost")
-    ? "http://localhost:5173/login.html"
-    : "https://YOUR_PRODUCTION_DOMAIN/login.html"; // replace with live domain
+const USERNAME_MIN = 3;
+const USERNAME_MAX = 30;
+const EMAIL_MAX = 120;
+const PASSWORD_MIN = 10;
+const PASSWORD_MAX = 128;
 
 /* ---------------- DOM ---------------- */
-
 const signupForm = document.getElementById("signupForm");
 const signupBtn = document.querySelector(".signup-btn");
-
 const nameInput = document.getElementById("name");
 const emailInput = document.getElementById("email");
 const passwordInput = document.getElementById("password");
 const confirmPasswordInput = document.getElementById("confirmPassword");
-
 const nameError = document.getElementById("nameError");
 const emailError = document.getElementById("emailError");
 const passwordError = document.getElementById("passwordError");
@@ -47,63 +27,28 @@ const captchaError = document.getElementById("captchaError");
 const formError = document.getElementById("formError");
 
 let isSubmitting = false;
-let containmentState = null;
 let lastSubmitAt = 0;
+const touchedFields = { name: false, email: false, password: false, confirmPassword: false };
 
-const touchedFields = {
-  name: false,
-  email: false,
-  password: false,
-  confirmPassword: false
-};
+/* ---------------- HELPERS ---------------- */
+const now = () => Date.now();
+const shouldThrottle = () => now() - lastSubmitAt < SUBMIT_COOLDOWN_MS;
+const recordSubmission = () => { lastSubmitAt = now(); };
 
-/* ---------------- NAVIGATION ---------------- */
-function goTo(page) {
-  window.location.replace(page);
-}
-
-/* ---------------- FORM HELPERS ---------------- */
-function setFormMessage(message = "", type = "error") {
+function setFormMessage(msg = "", type = "error") {
   if (!formError) return;
-
-  const safeMessage = String(message || "").trim().slice(0, 300);
-  formError.textContent = safeMessage;
-  formError.className = `form-error ${safeMessage ? "show" : ""} ${
-    type === "success" ? "form-error--success" : "form-error--danger"
-  }`;
+  formError.textContent = msg.trim().slice(0, 300);
+  formError.className = `form-error ${msg ? "show" : ""} ${type === "success" ? "form-error--success" : "form-error--danger"}`;
 }
 
-function setFieldError(element, message = "") {
-  if (!element) return;
-  element.textContent = String(message || "").trim().slice(0, 200);
+function setFieldError(el, msg = "") {
+  if (!el) return;
+  el.textContent = msg.trim().slice(0, 200);
+  if (el.previousElementSibling) el.previousElementSibling.classList.toggle("input-invalid", !!msg);
 }
 
-function clearFieldState(input) {
-  if (!input) return;
-  input.classList.remove("input-invalid", "input-valid");
-  input.removeAttribute("aria-invalid");
-}
-
-function markFieldValid(input) {
-  if (!input) return;
-  input.classList.add("input-valid");
-  input.classList.remove("input-invalid");
-  input.setAttribute("aria-invalid", "false");
-}
-
-function markFieldInvalid(input) {
-  if (!input) return;
-  input.classList.add("input-invalid");
-  input.classList.remove("input-valid");
-  input.setAttribute("aria-invalid", "true");
-}
-
-function setBusyState(isBusy) {
-  if (!signupBtn) return;
-  if (!signupBtn.dataset.originalText) signupBtn.dataset.originalText = signupBtn.textContent || "Create Account";
-  signupBtn.disabled = isBusy;
-  signupBtn.textContent = isBusy ? "Creating account..." : signupBtn.dataset.originalText;
-}
+function markFieldValid(input) { if (!input) return; input.classList.remove("input-invalid"); input.classList.add("input-valid"); }
+function markFieldInvalid(input) { if (!input) return; input.classList.remove("input-valid"); input.classList.add("input-invalid"); }
 
 function clearAllErrors() {
   setFieldError(nameError);
@@ -111,133 +56,128 @@ function clearAllErrors() {
   setFieldError(passwordError);
   setFieldError(confirmPasswordError);
   setFieldError(captchaError);
-  setFormMessage();
-  clearFieldState(nameInput);
-  clearFieldState(emailInput);
-  clearFieldState(passwordInput);
-  clearFieldState(confirmPasswordInput);
+  setFormMessage("");
+  [nameInput, emailInput, passwordInput, confirmPasswordInput].forEach(i => i?.classList.remove("input-valid", "input-invalid"));
 }
 
-function clearSensitiveInputs({ keepEmail = true, keepName = true } = {}) {
+function clearSensitiveInputs({ keepName = true, keepEmail = true } = {}) {
   if (!keepName && nameInput) nameInput.value = "";
   if (!keepEmail && emailInput) emailInput.value = "";
   if (passwordInput) passwordInput.value = "";
   if (confirmPasswordInput) confirmPasswordInput.value = "";
 }
 
-function now() { return Date.now(); }
-function shouldThrottleSubmission() { return now() - lastSubmitAt < SUBMIT_COOLDOWN_MS; }
-function recordSubmissionAttempt() { lastSubmitAt = now(); }
-
-/* ---------------- SECURITY LOGGING ---------------- */
-async function safeSecurityLog(payload) {
-  try { await writeSecurityLog(payload); } 
-  catch (error) { console.warn("Security log failed:", error); }
-}
-
-function fireAndForgetSecurityLog(payload) {
-  safeSecurityLog(payload).catch((error) => console.warn("Async security log failed:", error));
-}
-
 /* ---------------- VALIDATION ---------------- */
-function normalizeEmail(email) { return String(email || "").trim().toLowerCase().slice(0, EMAIL_MAX_LENGTH); }
-function sanitizeUsername(value) { return String(value || "").normalize("NFKC").trim().replace(/[^\w. ]/g, "").replace(/\s+/g, " ").replace(/\.+/g, ".").trim().slice(0, USERNAME_MAX_LENGTH); }
-function sanitizePassword(value) { return String(value || "").slice(0, PASSWORD_MAX_LENGTH); }
+const sanitizeUsername = v => String(v || "").trim().replace(/[^\w. ]/g,"").replace(/\s+/g," ").slice(0, USERNAME_MAX);
+const normalizeEmail = v => String(v || "").trim().toLowerCase().slice(0, EMAIL_MAX);
+const sanitizePassword = v => String(v || "").slice(0, PASSWORD_MAX);
 
-function isValidEmail(email) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length <= EMAIL_MAX_LENGTH; }
+const isValidEmail = email => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length <= EMAIL_MAX;
+const hasUppercase = s => /[A-Z]/.test(s);
+const hasLowercase = s => /[a-z]/.test(s);
+const hasNumber = s => /\d/.test(s);
+const hasSpecialChar = s => /[^A-Za-z0-9]/.test(s);
 
 function validateName() {
-  const name = sanitizeUsername(nameInput?.value || "");
-  if (nameInput) nameInput.value = name;
-  if (!name) { setFieldError(nameError, "Please enter a username."); markFieldInvalid(nameInput); return false; }
-  if (name.length < USERNAME_MIN_LENGTH || name.length > USERNAME_MAX_LENGTH) { setFieldError(nameError, `Username must be ${USERNAME_MIN_LENGTH}-${USERNAME_MAX_LENGTH} characters.`); markFieldInvalid(nameInput); return false; }
+  const val = sanitizeUsername(nameInput.value); nameInput.value = val;
+  if (!val) { setFieldError(nameError,"Please enter a username."); markFieldInvalid(nameInput); return false; }
+  if (val.length < USERNAME_MIN || val.length > USERNAME_MAX) { setFieldError(nameError,`Username must be ${USERNAME_MIN}-${USERNAME_MAX} chars.`); markFieldInvalid(nameInput); return false; }
   setFieldError(nameError); markFieldValid(nameInput); return true;
 }
 
 function validateEmail() {
-  const email = normalizeEmail(emailInput?.value || "");
-  if (emailInput) emailInput.value = email;
-  if (!email) { setFieldError(emailError, "Please enter your email."); markFieldInvalid(emailInput); return false; }
-  if (!isValidEmail(email)) { setFieldError(emailError, "Please enter a valid email."); markFieldInvalid(emailInput); return false; }
+  const val = normalizeEmail(emailInput.value); emailInput.value = val;
+  if (!val) { setFieldError(emailError,"Please enter your email."); markFieldInvalid(emailInput); return false; }
+  if (!isValidEmail(val)) { setFieldError(emailError,"Enter a valid email."); markFieldInvalid(emailInput); return false; }
   setFieldError(emailError); markFieldValid(emailInput); return true;
 }
 
 function validatePassword() {
-  const password = sanitizePassword(passwordInput?.value || "");
-  if (passwordInput && passwordInput.value !== password) passwordInput.value = password;
-  if (!password) { setFieldError(passwordError, "Please enter a password."); markFieldInvalid(passwordInput); return false; }
-  if (password.length < PASSWORD_MIN_LENGTH) { setFieldError(passwordError, `Password must be at least ${PASSWORD_MIN_LENGTH} characters.`); markFieldInvalid(passwordInput); return false; }
-  if (!/[A-Z]/.test(password) || !/[a-z]/.test(password) || !/\d/.test(password) || /[^A-Za-z0-9]/.test(password)) {
-    setFieldError(passwordError, "Password must include uppercase, lowercase, number, and special character."); markFieldInvalid(passwordInput); return false;
-  }
+  const val = sanitizePassword(passwordInput.value); passwordInput.value = val;
+  if (!val) { setFieldError(passwordError,"Please enter a password."); markFieldInvalid(passwordInput); return false; }
+  if (val.length < PASSWORD_MIN) { setFieldError(passwordError,`Password must be at least ${PASSWORD_MIN} chars.`); markFieldInvalid(passwordInput); return false; }
+  if (!hasUppercase(val)||!hasLowercase(val)||!hasNumber(val)||!hasSpecialChar(val)) { setFieldError(passwordError,"Password must include uppercase, lowercase, number & special char."); markFieldInvalid(passwordInput); return false; }
   setFieldError(passwordError); markFieldValid(passwordInput); return true;
 }
 
 function validateConfirmPassword() {
-  const password = passwordInput?.value || "";
-  const confirmPassword = confirmPasswordInput?.value || "";
-  if (!confirmPassword) { setFieldError(confirmPasswordError, "Please confirm your password."); markFieldInvalid(confirmPasswordInput); return false; }
-  if (password !== confirmPassword) { setFieldError(confirmPasswordError, "Passwords do not match."); markFieldInvalid(confirmPasswordInput); return false; }
+  const pwd = passwordInput.value;
+  const confirm = confirmPasswordInput.value;
+  if (!confirm) { setFieldError(confirmPasswordError,"Please confirm password."); markFieldInvalid(confirmPasswordInput); return false; }
+  if (pwd !== confirm) { setFieldError(confirmPasswordError,"Passwords do not match."); markFieldInvalid(confirmPasswordInput); return false; }
   setFieldError(confirmPasswordError); markFieldValid(confirmPasswordInput); return true;
 }
 
-function validateInputLengths() {
-  if ((nameInput?.value || "").length > 100) { setFieldError(nameError, "Username is too long."); markFieldInvalid(nameInput); return false; }
-  if ((emailInput?.value || "").length > 200) { setFieldError(emailError, "Email is too long."); markFieldInvalid(emailInput); return false; }
-  if ((passwordInput?.value || "").length > PASSWORD_MAX_LENGTH) { setFieldError(passwordError, "Password is too long."); markFieldInvalid(passwordInput); return false; }
-  if ((confirmPasswordInput?.value || "").length > PASSWORD_MAX_LENGTH) { setFieldError(confirmPasswordError, "Password is too long."); markFieldInvalid(confirmPasswordInput); return false; }
-  return true;
-}
+/* ---------------- LIVE VALIDATION ---------------- */
+[nameInput,emailInput,passwordInput,confirmPasswordInput].forEach(input => {
+  if (!input) return;
+  const name = input.id;
+  input.addEventListener("focus", () => touchedFields[name]=true);
+  input.addEventListener("blur", () => { touchedFields[name]=true; validateField(name); });
+  input.addEventListener("input", () => { if(touchedFields[name]) validateField(name); });
+});
 
-/* ---------------- SIGNUP FLOW ---------------- */
-
-async function handleEmailSignup() {
-  if (isSubmitting) return;
-  if (shouldThrottleSubmission()) { setFormMessage("Please wait a moment before trying again.", "error"); return; }
-  recordSubmissionAttempt(); isSubmitting = true;
-  clearAllErrors(); setBusyState(true);
-
-  try {
-    touchedFields.name = touchedFields.email = touchedFields.password = touchedFields.confirmPassword = true;
-    const isValid = validateInputLengths() && validateName() && validateEmail() && validatePassword() && validateConfirmPassword();
-    if (!isValid) { fireAndForgetSecurityLog({ type: "signup_validation_failed", message: "Client-side signup validation failed" }); return; }
-
-    const email = normalizeEmail(emailInput?.value || "");
-    const password = sanitizePassword(passwordInput?.value || "");
-    const name = sanitizeUsername(nameInput?.value || "");
-
-    const credential = await createUserWithEmailAndPassword(auth, email, password);
-    const user = credential.user;
-    await updateProfile(user, { displayName: name });
-    await ensureUserProfile(user);
-
-    await sendEmailVerification(user, { url: CONTINUE_URL });
-
-    fireAndForgetSecurityLog({ type: "signup_success", message: "User account created", email, userId: user.uid });
-
-    clearSensitiveInputs({ keepEmail: true, keepName: true });
-    setFormMessage("Account created. Redirecting to verification page...", "success");
-    goTo(VERIFY_EMAIL_PAGE);
-
-  } catch (error) {
-    console.error("Signup failed:", error);
-    setFormMessage(error?.message || "Signup failed. Please try again.", "error");
-    clearSensitiveInputs({ keepEmail: true, keepName: true });
-  } finally {
-    setBusyState(false);
-    isSubmitting = false;
+function validateField(field){
+  switch(field){
+    case "name": return validateName();
+    case "email": return validateEmail();
+    case "password": validatePassword(); validateConfirmPassword(); return;
+    case "confirmPassword": return validateConfirmPassword();
   }
 }
 
-/* ---------------- EVENTS ---------------- */
-if (signupForm) {
-  signupForm.addEventListener("submit", async (e) => {
-    e.preventDefault(); e.stopPropagation();
-    await handleEmailSignup();
-  });
+/* ---------------- SIGNUP FLOW ---------------- */
+function mapError(e){
+  const code = e?.code || "";
+  switch(code){
+    case "auth/email-already-in-use": setFieldError(emailError,"Email already in use."); markFieldInvalid(emailInput); return "Email already in use.";
+    case "auth/invalid-email": setFieldError(emailError,"Enter a valid email."); markFieldInvalid(emailInput); return "Invalid email.";
+    case "auth/weak-password": setFieldError(passwordError,"Password does not meet requirements."); markFieldInvalid(passwordInput); return "Weak password.";
+    case "auth/network-request-failed": return "Network error. Check connection.";
+    case "auth/too-many-requests": return "Too many attempts. Try later.";
+    case "auth/operation-not-allowed": return "Signup temporarily unavailable.";
+    default: return "Signup failed. Try again.";
+  }
 }
 
-/* ---------------- PAGE INIT ---------------- */
-document.addEventListener("DOMContentLoaded", () => {
-  console.log("signup.js loaded");
-});
+async function handleSignup(){
+  if(isSubmitting) return;
+  if(shouldThrottle()){ setFormMessage("Please wait a moment before retrying.","error"); return; }
+  recordSubmission();
+  isSubmitting = true;
+  clearAllErrors();
+  signupBtn.disabled = true; signupBtn.textContent="Creating account...";
+  try{
+    const valid = validateName() && validateEmail() && validatePassword() && validateConfirmPassword();
+    if(!valid){
+      await writeSecurityLog({type:"signup_validation_failed",message:"Client-side validation failed",email:normalizeEmail(emailInput.value)});
+      return;
+    }
+
+    const email = normalizeEmail(emailInput.value);
+    const password = sanitizePassword(passwordInput.value);
+    const name = sanitizeUsername(nameInput.value);
+
+    const credential = await createUserWithEmailAndPassword(auth,email,password);
+    const user = credential.user;
+
+    await updateProfile(user,{displayName:name});
+    await ensureUserProfile(user);
+    await sendEmailVerification(user);
+    await writeSecurityLog({type:"signup_success",message:"User account created",email,userId:user.uid});
+
+    clearSensitiveInputs({keepEmail:true,keepName:true});
+    setFormMessage("Account created! Redirecting...","success");
+    window.location.replace(VERIFY_EMAIL_PAGE);
+
+  }catch(e){
+    console.error("Signup failed:",e);
+    setFormMessage(mapError(e),"error");
+    clearSensitiveInputs({keepEmail:true,keepName:true});
+  }finally{
+    signupBtn.disabled=false; signupBtn.textContent="Create Account";
+    isSubmitting=false;
+  }
+}
+
+signupForm?.addEventListener("submit", e=>{ e.preventDefault(); handleSignup(); });
