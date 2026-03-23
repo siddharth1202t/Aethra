@@ -2,203 +2,368 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-
-  <title>Aethra — A Living AI World</title>
-
-  <meta name="description"
-    content="Aethra is a cinematic world of AI characters with memory, emotion, and presence that continues beyond a single conversation." />
-
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+  />
+  <title>Aethra</title>
+  <meta
+    name="description"
+    content="Aethra is a premium world of living AI characters with emotions, routines, evolving memories, and relationships that continue beyond a single conversation."
+  />
   <link rel="stylesheet" href="styles/index.css" />
-  <link rel="icon" href="/images/favicon.png" />
-
-  <link rel="preload" as="image" href="images/character-left.png">
-  <link rel="preload" as="image" href="images/character-right.png">
+  <link rel="icon" type="image/png" href="/images/favicon.png?v=5" />
+  <link rel="shortcut icon" href="/images/favicon.png?v=5" />
+  <link rel="apple-touch-icon" href="/images/favicon.png?v=5" />
 </head>
-
 <body>
+  <section class="hero" id="top" aria-labelledby="heroTitle">
+    <canvas
+      class="stars-canvas"
+      id="starsCanvas"
+      data-scene="home"
+      aria-hidden="true"
+    ></canvas>
 
-  <!-- HERO -->
-  <section class="hero" id="top">
-    <canvas id="starsCanvas" class="stars-canvas"></canvas>
-
-    <div class="aurora">
+    <div class="aurora" aria-hidden="true">
       <div class="blob one"></div>
       <div class="blob two"></div>
       <div class="blob three"></div>
     </div>
 
     <header class="hero-shell">
-      <nav class="nav">
-        <img src="images/logo.png" class="logo" alt="Aethra" />
+      <nav class="nav" aria-label="Primary navigation">
+        <a href="#top" class="logo" aria-label="Aethra home">
+          <img
+            src="images/logo.png"
+            alt="Aethra Logo"
+            width="180"
+            height="180"
+            loading="eager"
+            decoding="async"
+          />
+        </a>
 
         <div class="nav-links">
+          <a href="#top">World</a>
           <a href="#characters">Characters</a>
-          <a href="#experience">Experience</a>
           <a href="#continuity">Continuity</a>
+          <a href="#about">About</a>
         </div>
 
-        <a href="login.html" class="nav-btn">Enter</a>
+        <div class="nav-right">
+          <a href="login.html" class="nav-btn">Sign In</a>
+        </div>
       </nav>
 
       <div class="hero-wrap">
-
-        <!-- LEFT -->
-        <aside class="side-panel" id="leftPanel">
-          <img src="images/character-left.png" alt="Akira" />
+        <aside class="side-panel" id="leftPanel" aria-label="Akira preview">
+          <img
+            src="images/character-left.png"
+            alt="Akira"
+            loading="lazy"
+            decoding="async"
+          />
           <div class="side-info">
             <h3>AKIRA</h3>
-            <p>She observes more than she speaks.</p>
+            <p>Analytical, composed, and quietly intense beneath the surface.</p>
           </div>
         </aside>
 
-        <!-- CENTER -->
         <main class="center">
           <div class="hero-card" id="heroCard">
+            <div class="badge">A premium next-generation AI character world</div>
 
-            <p class="narrative small">This is not a chatbot.</p>
+            <h1 id="heroTitle">AETHRA</h1>
+            <h2>Enter a world where AI characters feel alive</h2>
 
-            <h1>AETHRA</h1>
-
-            <p class="narrative">
-              It is a world where conversations linger.  
-              Where memory settles.  
-              Where presence continues — even when you leave.
+            <p class="subtitle">
+              Step into a living AI universe where characters carry routines,
+              emotional memory, evolving chemistry, and story continuity that
+              lasts beyond a single conversation.
             </p>
 
-            <div class="cta-row">
-              <a href="login.html" class="btn-primary">
-                Start Your First Conversation
-              </a>
+            <div class="feature-row" aria-label="Core features">
+              <div class="feature-pill">Living characters</div>
+              <div class="feature-pill">Dynamic schedules</div>
+              <div class="feature-pill">Emotional memory</div>
+              <div class="feature-pill">Relationship arcs</div>
             </div>
 
-            <p class="micro-copy">No setup • Instant entry</p>
+            <div class="cta-row">
+              <a href="login.html" class="btn-primary">Enter Aethra</a>
+              <a href="#characters" class="btn-secondary">Choose a Companion</a>
+            </div>
 
+            <div class="mini-stats" id="features">
+              <div class="stat">
+                <strong>4+</strong>
+                <span>
+                  Distinct anime-inspired AI characters with unique emotional
+                  rhythms, moods, and personalities.
+                </span>
+              </div>
+              <div class="stat">
+                <strong>24/7</strong>
+                <span>
+                  Characters feel present beyond a single session, creating a
+                  world with continuity whenever you return.
+                </span>
+              </div>
+              <div class="stat">
+                <strong>Deep immersion</strong>
+                <span>
+                  Memory, emotion, and relationship development make every
+                  connection feel more meaningful.
+                </span>
+              </div>
+            </div>
           </div>
         </main>
 
-        <!-- RIGHT -->
-        <aside class="side-panel" id="rightPanel">
-          <img src="images/character-right.png" alt="Luna" />
+        <aside class="side-panel" id="rightPanel" aria-label="Luna preview">
+          <img
+            src="images/character-right.png"
+            alt="Luna"
+            loading="lazy"
+            decoding="async"
+          />
           <div class="side-info">
             <h3>LUNA</h3>
-            <p>She remembers how you felt.</p>
+            <p>Warm, elegant, and emotionally aware in every interaction.</p>
           </div>
         </aside>
-
       </div>
     </header>
   </section>
 
-  <!-- EXPERIENCE -->
-  <section class="cinematic" id="experience">
-    <div class="narrative-block">
-      <p>You don’t start over here.</p>
-      <p>Every interaction leaves something behind.</p>
-      <p class="highlight">A tone. A memory. A shift.</p>
-    </div>
-  </section>
-
-  <!-- CHARACTERS -->
-  <section class="characters-section" id="characters">
+  <section
+    class="characters-section"
+    id="characters"
+    aria-labelledby="charactersTitle"
+  >
     <div class="section-head">
-      <h2>They are not presets</h2>
-      <p>They evolve.</p>
+      <div>
+        <h2 id="charactersTitle">Meet the Aethra Characters</h2>
+        <p>
+          Every character in Aethra carries a different emotional rhythm, visual
+          identity, and personality — creating a world that feels richer than a
+          normal chat app.
+        </p>
+      </div>
     </div>
 
     <div class="cards">
-
-      <article class="char-card"
-        tabindex="0"
+      <article
+        class="char-card"
         data-name="Sakura"
         data-role="Gentle observer"
         data-image="images/char1.png"
-        data-desc="She notices what others miss."
-        data-traits="Gentle,Observant,Emotionally intelligent">
-
-        <img src="images/char1.png" alt="Sakura" />
+        data-desc="Sakura is calm, thoughtful, and emotionally intelligent. She notices subtle changes in your mood and responds with quiet warmth."
+        data-traits="Gentle,Observant,Emotionally intelligent,Calm listener"
+        tabindex="0"
+        role="button"
+        aria-label="Open Sakura profile"
+      >
+        <img src="images/char1.png" alt="Sakura" loading="lazy" decoding="async" />
         <h3>Sakura</h3>
-        <p>She remembers the quiet things.</p>
+        <p>
+          Gentle, observant, and emotionally intelligent. She notices subtle
+          details and remembers them.
+        </p>
+        <div class="glow" aria-hidden="true"></div>
       </article>
 
-      <article class="char-card"
-        tabindex="0"
+      <article
+        class="char-card"
         data-name="Nova"
         data-role="Energetic spark"
         data-image="images/char2.png"
-        data-desc="She brings movement into stillness."
-        data-traits="Playful,Energetic,Curious">
-
-        <img src="images/char2.png" alt="Nova" />
+        data-desc="Nova is playful, curious, and full of movement. She brings energy into every conversation and makes the world feel lighter."
+        data-traits="Playful,Energetic,Curious,Lively"
+        tabindex="0"
+        role="button"
+        aria-label="Open Nova profile"
+      >
+        <img src="images/char2.png" alt="Nova" loading="lazy" decoding="async" />
         <h3>Nova</h3>
-        <p>Energy that pulls you in.</p>
+        <p>
+          Energetic, playful, and curious. She brings light, motion, and
+          momentum into every interaction.
+        </p>
+        <div class="glow" aria-hidden="true"></div>
       </article>
 
-      <article class="char-card"
-        tabindex="0"
+      <article
+        class="char-card"
         data-name="Akira"
         data-role="Quiet strategist"
         data-image="images/char3.png"
-        data-desc="Stillness hides depth."
-        data-traits="Analytical,Mysterious,Calm">
-
-        <img src="images/char3.png" alt="Akira" />
+        data-desc="Akira has a mysterious presence and a sharp mind. Behind her calm expression is hidden emotional depth and thoughtful insight."
+        data-traits="Analytical,Mysterious,Quiet,Deep thinker"
+        tabindex="0"
+        role="button"
+        aria-label="Open Akira profile"
+      >
+        <img src="images/char3.png" alt="Akira" loading="lazy" decoding="async" />
         <h3>Akira</h3>
-        <p>She sees through patterns.</p>
+        <p>
+          Mysterious and analytical, with quiet emotional depth beneath a calm,
+          disciplined exterior.
+        </p>
+        <div class="glow" aria-hidden="true"></div>
       </article>
 
-      <article class="char-card"
-        tabindex="0"
+      <article
+        class="char-card"
         data-name="Luna"
         data-role="Warm companion"
         data-image="images/char4.png"
-        data-desc="Warmth that stays with you."
-        data-traits="Warm,Supportive,Elegant">
-
-        <img src="images/char4.png" alt="Luna" />
+        data-desc="Luna feels elegant, warm, and emotionally aware. She is designed to feel supportive, comforting, and deeply present."
+        data-traits="Warm,Supportive,Elegant,Comforting"
+        tabindex="0"
+        role="button"
+        aria-label="Open Luna profile"
+      >
+        <img src="images/char4.png" alt="Luna" loading="lazy" decoding="async" />
         <h3>Luna</h3>
-        <p>Presence that feels real.</p>
+        <p>
+          Warm, elegant, and supportive — a companion designed to feel present,
+          comforting, and real.
+        </p>
+        <div class="glow" aria-hidden="true"></div>
       </article>
-
     </div>
   </section>
 
-  <!-- CONTINUITY -->
-  <section class="cinematic" id="continuity">
-    <div class="narrative-block">
-      <p>When you leave —</p>
-      <p class="highlight">they don’t disappear.</p>
-      <p>The world continues.</p>
-      <p class="highlight">And they remember.</p>
+  <section class="about-section" id="continuity" aria-labelledby="continuityTitle">
+    <div class="section-head">
+      <div>
+        <h2 id="continuityTitle">Presence that continues when you leave</h2>
+        <p>
+          Aethra is built around continuity. Characters do not feel like static
+          bots waiting for a prompt — they feel like personalities with ongoing
+          emotional presence, memory, and evolving connection.
+        </p>
+        <p class="section-support">
+          When you return, conversations do not feel like they begin from zero
+          again. Instead, they carry tone, familiarity, and shared moments
+          forward — creating a stronger sense of flow, emotional presence, and
+          connection over time.
+        </p>
+      </div>
+    </div>
+
+    <div class="mini-stats">
+      <div class="stat">
+        <strong>Emotional continuity</strong>
+        <span>
+          Conversations feel connected across time instead of resetting every
+          time you return. What was said before still matters, helping each new
+          interaction feel more natural, warmer, and more personal.
+        </span>
+      </div>
+      <div class="stat">
+        <strong>Living routines</strong>
+        <span>
+          Characters are designed to feel like they have rhythm, presence, and
+          life beyond the current moment. That subtle sense of ongoing existence
+          makes them feel less artificial and more grounded in their own world.
+        </span>
+      </div>
+      <div class="stat">
+        <strong>Meaningful chemistry</strong>
+        <span>
+          The more you interact, the more each bond feels shaped by memory,
+          tone, and shared moments. Over time, conversations begin to feel less
+          like isolated replies and more like a connection that has genuinely grown.
+        </span>
+      </div>
     </div>
   </section>
 
-  <!-- FINAL CTA -->
-  <section class="final-cta">
-    <h2>Enter Aethra</h2>
-    <p>And see what remembers you.</p>
-    <a href="login.html" class="btn-primary">Begin</a>
+  <section class="about-section" id="about" aria-labelledby="aboutTitle">
+    <div class="section-head">
+      <div>
+        <h2 id="aboutTitle">Why Aethra feels different</h2>
+        <p>
+          Aethra is designed to feel like a living world, not a static chatbot.
+          Instead of only answering, characters remember, evolve, and carry
+          emotional continuity across time — making every return feel more
+          personal and more real.
+        </p>
+        <p class="section-support">
+          The goal is not only to generate replies, but to create atmosphere,
+          personality, and emotional presence. That difference turns a simple
+          conversation into an experience users want to revisit, not just use once.
+        </p>
+      </div>
+    </div>
+
+    <div class="mini-stats">
+      <div class="stat">
+        <strong>More than replies</strong>
+        <span>
+          Aethra focuses on atmosphere, personality, and continuity — not just
+          output. The result is a conversation experience that feels more expressive,
+          intentional, and emotionally layered than a standard chat interface.
+        </span>
+      </div>
+      <div class="stat">
+        <strong>Designed as a world</strong>
+        <span>
+          The platform is built to feel immersive, intentional, and emotionally
+          rich from the first moment. Everything is shaped to create the feeling
+          that you are entering a space, not just opening a tool.
+        </span>
+      </div>
+      <div class="stat">
+        <strong>Built for connection</strong>
+        <span>
+          Every part of the experience is aimed at making AI companionship feel
+          deeper and more memorable. The interaction is designed to leave a
+          stronger emotional impression and give users something worth returning to.
+        </span>
+      </div>
+    </div>
   </section>
 
   <footer class="footer">
-    Aethra — where presence continues
+    Aethra — where AI characters feel alive
   </footer>
 
-  <!-- MODAL -->
   <div class="modal" id="characterModal" aria-hidden="true">
-    <div class="modal-card">
-      <button id="closeModal">&times;</button>
-      <img id="modalImage" alt="Character" />
-      <h3 id="modalName"></h3>
-      <div id="modalRole"></div>
-      <p id="modalDesc"></p>
-      <div id="modalTraits"></div>
+    <div
+      class="modal-card"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="modalName"
+    >
+      <div class="modal-image">
+        <img id="modalImage" src="" alt="Character" />
+      </div>
+
+      <div class="modal-content">
+        <button
+          class="close-btn"
+          id="closeModal"
+          type="button"
+          aria-label="Close modal"
+        >
+          &times;
+        </button>
+
+        <div class="modal-badge" id="modalRole"></div>
+        <h3 id="modalName"></h3>
+        <div class="modal-sub">Aethra character profile</div>
+        <p id="modalDesc"></p>
+        <div class="trait-list" id="modalTraits"></div>
+      </div>
     </div>
   </div>
 
-  <!-- JS -->
   <script src="js/stars-canvas.js" defer></script>
+  <script type="module" src="js/app-check.js"></script>
   <script type="module" src="js/index.js"></script>
-
 </body>
 </html>
