@@ -1,8 +1,3 @@
-// ================================
-// AETHRA FINAL ENGINE (CINEMATIC + EMOTIONAL)
-// ================================
-
-// ---------- ELEMENTS ----------
 const body = document.body;
 const nav = document.querySelector(".nav");
 const heroCard = document.getElementById("heroCard");
@@ -13,207 +8,379 @@ const aurora = document.querySelector(".aurora");
 const modal = document.getElementById("characterModal");
 const modalCard = modal?.querySelector(".modal-card");
 const closeModalBtn = document.getElementById("closeModal");
-
 const modalImage = document.getElementById("modalImage");
 const modalName = document.getElementById("modalName");
 const modalRole = document.getElementById("modalRole");
 const modalDesc = document.getElementById("modalDesc");
 const modalTraits = document.getElementById("modalTraits");
 
-const characterCards = [...document.querySelectorAll(".char-card")];
-
-const revealTargets = [
-  ...document.querySelectorAll(
-    ".hero-card, .side-panel, .section-head, .char-card, .about-section"
+const characterCards = Array.from(document.querySelectorAll(".char-card"));
+const revealTargets = Array.from(
+  document.querySelectorAll(
+    ".hero-card, .side-panel, .section-head, .char-card, .about-section, .mini-stats .stat"
   )
-];
+);
 
-// ---------- HELPERS ----------
-const clamp = (v, min, max) => Math.min(Math.max(v, min), max);
-const reducedMotion = () =>
-  window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+let activeModalTrigger = null;
+let parallaxRafId = 0;
+let scrollBound = false;
+let modalBound = false;
+let cardBound = false;
+let parallaxBound = false;
 
-// ---------- REVEAL ----------
-function initReveal() {
-  if (reducedMotion()) return;
+/* ---------------- BASIC HELPERS ---------------- */
 
-  const obs = new IntersectionObserver((entries) => {
-    entries.forEach((e) => {
-      if (!e.isIntersecting) return;
-      e.target.style.opacity = "1";
-      e.target.style.transform = "translateY(0)";
-      obs.unobserve(e.target);
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function prefersReducedMotion() {
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+function setStyles(element, styles = {}) {
+  if (!element) return;
+  Object.assign(element.style, styles);
+}
+
+/* ---------------- PAGE REVEAL ---------------- */
+
+function prepareRevealTargets() {
+  if (prefersReducedMotion()) {
+    revealTargets.forEach((element) => {
+      if (!element) return;
+      element.style.opacity = "1";
+      element.style.transform = "none";
+      element.style.transition = "none";
     });
-  });
+    return;
+  }
 
-  revealTargets.forEach((el, i) => {
-    el.style.opacity = "0";
-    el.style.transform = "translateY(30px)";
-    el.style.transition =
-      "all 0.9s cubic-bezier(0.22, 1, 0.36, 1)";
-    el.style.transitionDelay = `${i * 40}ms`;
-    obs.observe(el);
+  revealTargets.forEach((element, index) => {
+    if (!element) return;
+
+    element.style.opacity = "0";
+    element.style.transform = "translateY(24px)";
+    element.style.transition =
+      "opacity 0.72s ease, transform 0.72s cubic-bezier(0.22, 1, 0.36, 1)";
+    element.style.transitionDelay = `${Math.min(index * 35, 180)}ms`;
   });
 }
 
-// ---------- NAV ----------
-function initNav() {
-  const onScroll = () => {
-    const scrolled = window.scrollY > 20;
-    nav.classList.toggle("nav-scrolled", scrolled);
-  };
-  window.addEventListener("scroll", onScroll, { passive: true });
+function initScrollReveal() {
+  if (prefersReducedMotion()) {
+    return;
+  }
+
+  const observer = new IntersectionObserver(
+    (entries) => {
+      entries.forEach((entry) => {
+        const el = entry.target;
+
+        if (!entry.isIntersecting) {
+          return;
+        }
+
+        el.style.opacity = "1";
+        el.style.transform = "translateY(0)";
+        observer.unobserve(el);
+      });
+    },
+    {
+      threshold: 0.12,
+      rootMargin: "0px 0px -36px 0px"
+    }
+  );
+
+  revealTargets.forEach((el) => {
+    if (!el) return;
+    observer.observe(el);
+  });
 }
 
-// ---------- TILT ----------
-function attachTilt(el) {
-  if (!el || reducedMotion()) return;
+/* ---------------- NAV SCROLL POLISH ---------------- */
 
-  el.addEventListener("pointermove", (e) => {
-    const r = el.getBoundingClientRect();
-    const x = (e.clientX - r.left) / r.width - 0.5;
-    const y = (e.clientY - r.top) / r.height - 0.5;
+function updateNavOnScroll() {
+  if (!nav) return;
 
-    el.style.transform = `
-      perspective(900px)
-      rotateX(${(-y * 8).toFixed(2)}deg)
-      rotateY(${(x * 8).toFixed(2)}deg)
-      scale(1.02)
+  const scrolled = window.scrollY > 24;
+  nav.classList.toggle("nav-scrolled", scrolled);
+
+  if (scrolled) {
+    setStyles(nav, {
+      background:
+        "linear-gradient(180deg, rgba(18, 8, 40, 0.82), rgba(18, 8, 40, 0.6))",
+      boxShadow:
+        "0 18px 48px rgba(0, 0, 0, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.05)",
+      borderColor: "rgba(255, 255, 255, 0.14)"
+    });
+  } else {
+    setStyles(nav, {
+      background:
+        "linear-gradient(180deg, rgba(18, 8, 40, 0.68), rgba(18, 8, 40, 0.46))",
+      boxShadow:
+        "0 16px 44px rgba(0, 0, 0, 0.24), inset 0 1px 0 rgba(255, 255, 255, 0.05)",
+      borderColor: "rgba(255, 255, 255, 0.12)"
+    });
+  }
+}
+
+/* ---------------- PREMIUM POINTER TILT ---------------- */
+
+function attachTilt(element, options = {}) {
+  if (!element || prefersReducedMotion()) return;
+
+  const {
+    maxRotate = 8,
+    scale = 1.01,
+    perspective = 900
+  } = options;
+
+  let rect = null;
+
+  function onEnter() {
+    rect = element.getBoundingClientRect();
+    element.style.willChange = "transform";
+    element.style.transition =
+      "transform 0.18s ease, box-shadow 0.28s ease, border-color 0.28s ease";
+  }
+
+  function onMove(event) {
+    rect = rect || element.getBoundingClientRect();
+
+    const x = event.clientX - rect.left;
+    const y = event.clientY - rect.top;
+
+    const px = x / rect.width;
+    const py = y / rect.height;
+
+    const rotateY = (px - 0.5) * maxRotate * 2;
+    const rotateX = (0.5 - py) * maxRotate * 2;
+
+    element.style.transform = `
+      perspective(${perspective}px)
+      rotateX(${rotateX.toFixed(2)}deg)
+      rotateY(${rotateY.toFixed(2)}deg)
+      scale(${scale})
     `;
-  });
+  }
 
-  el.addEventListener("pointerleave", () => {
-    el.style.transform = "";
+  function onLeave() {
+    rect = null;
+    element.style.transition =
+      "transform 0.35s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.28s ease, border-color 0.28s ease";
+    element.style.transform = "";
+
+    window.setTimeout(() => {
+      element.style.willChange = "auto";
+    }, 350);
+  }
+
+  element.addEventListener("pointerenter", onEnter);
+  element.addEventListener("pointermove", onMove);
+  element.addEventListener("pointerleave", onLeave);
+}
+
+function initPremiumMotion() {
+  attachTilt(heroCard, { maxRotate: 5, scale: 1.008, perspective: 1100 });
+  attachTilt(leftPanel, { maxRotate: 4, scale: 1.01, perspective: 950 });
+  attachTilt(rightPanel, { maxRotate: 4, scale: 1.01, perspective: 950 });
+
+  characterCards.forEach((card) => {
+    attachTilt(card, { maxRotate: 6, scale: 1.012, perspective: 950 });
   });
 }
 
-// ---------- MODAL ----------
+/* ---------------- CHARACTER MODAL ---------------- */
+
+function buildTraitChip(text) {
+  const chip = document.createElement("span");
+  chip.className = "trait";
+  chip.textContent = text;
+  return chip;
+}
+
+function fillModalFromCard(card) {
+  if (!card || !modalImage || !modalName || !modalRole || !modalDesc || !modalTraits) {
+    return;
+  }
+
+  const name = card.dataset.name || "";
+  const role = card.dataset.role || "";
+  const image = card.dataset.image || "";
+  const desc = card.dataset.desc || "";
+  const traits = String(card.dataset.traits || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+  modalImage.src = image;
+  modalImage.alt = name ? `${name} character artwork` : "Character artwork";
+  modalName.textContent = name;
+  modalRole.textContent = role;
+  modalDesc.textContent = desc;
+
+  modalTraits.replaceChildren(...traits.map(buildTraitChip));
+}
+
 function openModal(card) {
+  if (!modal || !modalCard || !card) return;
+
+  activeModalTrigger = card;
+  fillModalFromCard(card);
+
   modal.classList.add("active");
   modal.setAttribute("aria-hidden", "false");
+  body.classList.add("modal-open");
 
-  modalImage.src = card.dataset.image;
-  modalName.textContent = card.dataset.name;
-  modalRole.textContent = card.dataset.role;
-  modalDesc.textContent = card.dataset.desc;
+  if (prefersReducedMotion()) {
+    closeModalBtn?.focus();
+    return;
+  }
 
-  modalTraits.innerHTML = "";
-  card.dataset.traits.split(",").forEach((t) => {
-    const span = document.createElement("span");
-    span.className = "trait";
-    span.textContent = t.trim();
-    modalTraits.appendChild(span);
+  modal.style.opacity = "0";
+  modalCard.style.transform = "translateY(20px) scale(0.98)";
+  modalCard.style.opacity = "0";
+
+  window.requestAnimationFrame(() => {
+    modal.style.transition = "opacity 0.25s ease";
+    modalCard.style.transition =
+      "transform 0.3s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.25s ease";
+    modal.style.opacity = "1";
+    modalCard.style.transform = "translateY(0) scale(1)";
+    modalCard.style.opacity = "1";
   });
+
+  window.setTimeout(() => {
+    closeModalBtn?.focus();
+  }, 30);
 }
 
 function closeModal() {
-  modal.classList.remove("active");
-  modal.setAttribute("aria-hidden", "true");
-}
+  if (!modal || !modal.classList.contains("active")) return;
 
-// ---------- PARALLAX ----------
-function initParallax() {
-  if (reducedMotion()) return;
+  const finishClose = () => {
+    modal.classList.remove("active");
+    modal.setAttribute("aria-hidden", "true");
+    body.classList.remove("modal-open");
 
-  window.addEventListener("pointermove", (e) => {
-    const x = (e.clientX / window.innerWidth - 0.5) * 10;
-    const y = (e.clientY / window.innerHeight - 0.5) * 10;
+    modal.style.opacity = "";
+    modal.style.transition = "";
 
-    aurora.style.transform = `translate(${x}px, ${y}px)`;
-  });
-}
-
-// ---------- CURSOR GLOW ----------
-function initCursorGlow() {
-  if (reducedMotion()) return;
-
-  const glow = document.createElement("div");
-  glow.className = "cursor-glow";
-  document.body.appendChild(glow);
-
-  window.addEventListener("pointermove", (e) => {
-    glow.style.transform = `translate(${e.clientX}px, ${e.clientY}px)`;
-  });
-}
-
-// ---------- PRESENCE PULSE ----------
-function initPresence() {
-  if (reducedMotion()) return;
-
-  document.querySelectorAll(".side-panel img").forEach((img) => {
-    let t = 0;
-    function loop() {
-      t += 0.01;
-      img.style.transform = `scale(${1 + Math.sin(t) * 0.01})`;
-      requestAnimationFrame(loop);
+    if (modalCard) {
+      modalCard.style.transform = "";
+      modalCard.style.opacity = "";
+      modalCard.style.transition = "";
     }
-    loop();
-  });
+
+    activeModalTrigger?.focus?.();
+    activeModalTrigger = null;
+  };
+
+  if (prefersReducedMotion()) {
+    finishClose();
+    return;
+  }
+
+  modal.style.opacity = "0";
+
+  if (modalCard) {
+    modalCard.style.transform = "translateY(16px) scale(0.985)";
+    modalCard.style.opacity = "0";
+  }
+
+  window.setTimeout(finishClose, 220);
 }
 
-// ---------- EMOTIONAL AI ILLUSION ----------
-function initEmotionalLayer() {
-  const messages = [
-    "You came back.",
-    "They remember you.",
-    "Something feels familiar.",
-    "You’ve been here before.",
-    "They noticed you were gone."
-  ];
+function bindCharacterCards() {
+  if (cardBound) return;
 
-  const box = document.createElement("div");
-  box.className = "presence-text";
-  document.body.appendChild(box);
+  characterCards.forEach((card) => {
+    card.addEventListener("click", () => openModal(card));
 
-  function showMessage(text) {
-    box.textContent = text;
-    box.classList.add("visible");
+    card.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        openModal(card);
+      }
+    });
+  });
 
-    setTimeout(() => {
-      box.classList.remove("visible");
-    }, 3000);
-  }
-
-  // return illusion
-  if (localStorage.getItem("aethra_return")) {
-    setTimeout(() => showMessage("You came back."), 1500);
-  }
-  localStorage.setItem("aethra_return", "1");
-
-  // idle detection
-  let idleTimer;
-  function resetIdle() {
-    clearTimeout(idleTimer);
-    idleTimer = setTimeout(() => {
-      const msg = messages[Math.floor(Math.random() * messages.length)];
-      showMessage(msg);
-    }, 15000);
-  }
-
-  ["mousemove", "keydown", "scroll"].forEach((e) =>
-    window.addEventListener(e, resetIdle)
-  );
-
-  resetIdle();
+  cardBound = true;
 }
 
-// ---------- INIT ----------
-function init() {
-  initReveal();
-  initNav();
-  initParallax();
-  initCursorGlow();
-  initPresence();
-  initEmotionalLayer();
-
-  characterCards.forEach((c) => {
-    attachTilt(c);
-    c.addEventListener("click", () => openModal(c));
-  });
+function bindModalEvents() {
+  if (modalBound) return;
 
   closeModalBtn?.addEventListener("click", closeModal);
+
+  modal?.addEventListener("click", (event) => {
+    if (event.target === modal) {
+      closeModal();
+    }
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && modal?.classList.contains("active")) {
+      closeModal();
+    }
+  });
+
+  modalBound = true;
 }
 
-document.readyState === "loading"
-  ? document.addEventListener("DOMContentLoaded", init)
-  : init();
+/* ---------------- PARALLAX POLISH ---------------- */
+
+function initHeroParallax() {
+  if (prefersReducedMotion() || !aurora || parallaxBound) return;
+
+  function onMove(event) {
+    if (parallaxRafId) {
+      cancelAnimationFrame(parallaxRafId);
+    }
+
+    parallaxRafId = window.requestAnimationFrame(() => {
+      const x = clamp((event.clientX / window.innerWidth - 0.5) * 12, -12, 12);
+      const y = clamp((event.clientY / window.innerHeight - 0.5) * 12, -12, 12);
+
+      aurora.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+    });
+  }
+
+  function onLeave() {
+    if (parallaxRafId) {
+      cancelAnimationFrame(parallaxRafId);
+    }
+
+    parallaxRafId = window.requestAnimationFrame(() => {
+      aurora.style.transform = "translate3d(0, 0, 0)";
+    });
+  }
+
+  window.addEventListener("pointermove", onMove, { passive: true });
+  window.addEventListener("pointerleave", onLeave, { passive: true });
+  parallaxBound = true;
+}
+
+/* ---------------- INIT ---------------- */
+
+function init() {
+  prepareRevealTargets();
+  initScrollReveal();
+  updateNavOnScroll();
+  initPremiumMotion();
+  bindCharacterCards();
+  bindModalEvents();
+  initHeroParallax();
+
+  if (!scrollBound) {
+    window.addEventListener("scroll", updateNavOnScroll, { passive: true });
+    scrollBound = true;
+  }
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", init, { once: true });
+} else {
+  init();
+}
