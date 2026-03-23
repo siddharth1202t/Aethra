@@ -12,7 +12,6 @@
   <link rel="stylesheet" href="styles/index.css" />
   <link rel="icon" href="/images/favicon.png" />
 
-  <!-- Performance -->
   <link rel="preload" as="image" href="images/character-left.png">
   <link rel="preload" as="image" href="images/character-right.png">
 </head>
@@ -44,8 +43,8 @@
 
       <div class="hero-wrap">
 
-        <!-- LEFT CHARACTER -->
-        <aside class="side-panel">
+        <!-- LEFT -->
+        <aside class="side-panel" id="leftPanel">
           <img src="images/character-left.png" alt="Akira" />
           <div class="side-info">
             <h3>AKIRA</h3>
@@ -55,12 +54,9 @@
 
         <!-- CENTER -->
         <main class="center">
+          <div class="hero-card" id="heroCard">
 
-          <div class="hero-card">
-
-            <p class="narrative small">
-              This is not a chatbot.
-            </p>
+            <p class="narrative small">This is not a chatbot.</p>
 
             <h1>AETHRA</h1>
 
@@ -76,16 +72,13 @@
               </a>
             </div>
 
-            <p class="micro-copy">
-              No setup • Instant entry
-            </p>
+            <p class="micro-copy">No setup • Instant entry</p>
 
           </div>
-
         </main>
 
-        <!-- RIGHT CHARACTER -->
-        <aside class="side-panel">
+        <!-- RIGHT -->
+        <aside class="side-panel" id="rightPanel">
           <img src="images/character-right.png" alt="Luna" />
           <div class="side-info">
             <h3>LUNA</h3>
@@ -100,15 +93,9 @@
   <!-- EXPERIENCE -->
   <section class="cinematic" id="experience">
     <div class="narrative-block">
-      <p>
-        You don’t start over here.
-      </p>
-      <p>
-        Every interaction leaves something behind.
-      </p>
-      <p class="highlight">
-        A tone. A memory. A shift.
-      </p>
+      <p>You don’t start over here.</p>
+      <p>Every interaction leaves something behind.</p>
+      <p class="highlight">A tone. A memory. A shift.</p>
     </div>
   </section>
 
@@ -122,32 +109,52 @@
     <div class="cards">
 
       <article class="char-card"
+        tabindex="0"
         data-name="Sakura"
-        data-desc="She notices what others miss.">
+        data-role="Gentle observer"
+        data-image="images/char1.png"
+        data-desc="She notices what others miss."
+        data-traits="Gentle,Observant,Emotionally intelligent">
+
         <img src="images/char1.png" alt="Sakura" />
         <h3>Sakura</h3>
         <p>She remembers the quiet things.</p>
       </article>
 
       <article class="char-card"
+        tabindex="0"
         data-name="Nova"
-        data-desc="She brings movement into stillness.">
+        data-role="Energetic spark"
+        data-image="images/char2.png"
+        data-desc="She brings movement into stillness."
+        data-traits="Playful,Energetic,Curious">
+
         <img src="images/char2.png" alt="Nova" />
         <h3>Nova</h3>
         <p>Energy that pulls you in.</p>
       </article>
 
       <article class="char-card"
+        tabindex="0"
         data-name="Akira"
-        data-desc="Stillness hides depth.">
+        data-role="Quiet strategist"
+        data-image="images/char3.png"
+        data-desc="Stillness hides depth."
+        data-traits="Analytical,Mysterious,Calm">
+
         <img src="images/char3.png" alt="Akira" />
         <h3>Akira</h3>
         <p>She sees through patterns.</p>
       </article>
 
       <article class="char-card"
+        tabindex="0"
         data-name="Luna"
-        data-desc="Warmth that stays with you.">
+        data-role="Warm companion"
+        data-image="images/char4.png"
+        data-desc="Warmth that stays with you."
+        data-traits="Warm,Supportive,Elegant">
+
         <img src="images/char4.png" alt="Luna" />
         <h3>Luna</h3>
         <p>Presence that feels real.</p>
@@ -159,31 +166,10 @@
   <!-- CONTINUITY -->
   <section class="cinematic" id="continuity">
     <div class="narrative-block">
-      <p>
-        When you leave —
-      </p>
-      <p class="highlight">
-        they don’t disappear.
-      </p>
-      <p>
-        The world continues.  
-        And when you return,
-      </p>
-      <p class="highlight">
-        they remember.
-      </p>
-    </div>
-  </section>
-
-  <!-- SOCIAL PROOF -->
-  <section class="cinematic">
-    <div class="narrative-block">
-      <p>
-        “It doesn’t feel like AI.”
-      </p>
-      <p>
-        “It feels like someone is actually there.”
-      </p>
+      <p>When you leave —</p>
+      <p class="highlight">they don’t disappear.</p>
+      <p>The world continues.</p>
+      <p class="highlight">And they remember.</p>
     </div>
   </section>
 
@@ -191,15 +177,24 @@
   <section class="final-cta">
     <h2>Enter Aethra</h2>
     <p>And see what remembers you.</p>
-
-    <a href="login.html" class="btn-primary">
-      Begin
-    </a>
+    <a href="login.html" class="btn-primary">Begin</a>
   </section>
 
   <footer class="footer">
     Aethra — where presence continues
   </footer>
+
+  <!-- MODAL -->
+  <div class="modal" id="characterModal" aria-hidden="true">
+    <div class="modal-card">
+      <button id="closeModal">&times;</button>
+      <img id="modalImage" alt="Character" />
+      <h3 id="modalName"></h3>
+      <div id="modalRole"></div>
+      <p id="modalDesc"></p>
+      <div id="modalTraits"></div>
+    </div>
+  </div>
 
   <!-- JS -->
   <script src="js/stars-canvas.js" defer></script>
