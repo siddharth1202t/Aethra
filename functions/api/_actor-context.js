@@ -1,12 +1,15 @@
 const MAX_IP_LENGTH = 100;
 const MAX_SESSION_ID_LENGTH = 120;
 const MAX_USER_ID_LENGTH = 128;
-const MAX_ROUTE_LENGTH = 150;
+const MAX_ROUTE_LENGTH = 180;
 const MAX_USER_AGENT_LENGTH = 500;
 const MAX_ORIGIN_LENGTH = 200;
 const MAX_METHOD_LENGTH = 20;
 const MAX_EMAIL_LENGTH = 200;
 const MAX_HEADER_VALUE_LENGTH = 500;
+const MAX_REQUEST_ID_LENGTH = 120;
+const MAX_HOST_LENGTH = 200;
+const MAX_REFERER_LENGTH = 300;
 
 const ALLOWED_METHODS = new Set([
   "GET",
@@ -38,8 +41,10 @@ function getHeaderValue(req, name) {
   const headers = req?.headers;
   if (!headers || !name) return "";
 
+  const target = String(name).toLowerCase();
+
   if (typeof headers.get === "function") {
-    return safeString(headers.get(name) || "", MAX_HEADER_VALUE_LENGTH);
+    return safeString(headers.get(name) || headers.get(target) || "", MAX_HEADER_VALUE_LENGTH);
   }
 
   if (Array.isArray(headers)) {
@@ -47,7 +52,7 @@ function getHeaderValue(req, name) {
       if (
         Array.isArray(entry) &&
         entry.length >= 2 &&
-        String(entry[0]).toLowerCase() === String(name).toLowerCase()
+        String(entry[0]).toLowerCase() === target
       ) {
         return safeString(entry[1] || "", MAX_HEADER_VALUE_LENGTH);
       }
@@ -56,17 +61,8 @@ function getHeaderValue(req, name) {
   }
 
   if (isPlainObject(headers)) {
-    const directValue = headers[name];
-    if (Array.isArray(directValue)) {
-      return safeString(directValue[0] || "", MAX_HEADER_VALUE_LENGTH);
-    }
-    if (directValue !== undefined && directValue !== null) {
-      return safeString(directValue, MAX_HEADER_VALUE_LENGTH);
-    }
-
-    const lowerName = String(name).toLowerCase();
     for (const [key, value] of Object.entries(headers)) {
-      if (String(key).toLowerCase() === lowerName) {
+      if (String(key).toLowerCase() === target) {
         if (Array.isArray(value)) {
           return safeString(value[0] || "", MAX_HEADER_VALUE_LENGTH);
         }
@@ -80,7 +76,6 @@ function getHeaderValue(req, name) {
 
 function normalizeIp(value = "") {
   let ip = safeString(value || "unknown", MAX_IP_LENGTH);
-
   if (!ip) return "unknown";
 
   if (ip.startsWith("::ffff:")) {
@@ -99,9 +94,12 @@ function normalizeUserId(value = "") {
   return sanitizeKeyPart(value || "", MAX_USER_ID_LENGTH);
 }
 
+function normalizeRequestId(value = "") {
+  return sanitizeKeyPart(value || "", MAX_REQUEST_ID_LENGTH);
+}
+
 function normalizeRoute(value = "") {
   const raw = safeString(value || "unknown-route", MAX_ROUTE_LENGTH * 2);
-
   if (!raw) return "unknown-route";
 
   const withoutQuery = raw.split("?")[0].split("#")[0];
@@ -121,7 +119,6 @@ function normalizeUserAgent(value = "") {
 
 function normalizeOrigin(value = "") {
   const raw = safeString(value || "", MAX_ORIGIN_LENGTH);
-
   if (!raw) return "";
 
   try {
@@ -132,29 +129,39 @@ function normalizeOrigin(value = "") {
   }
 }
 
+function normalizeHost(value = "") {
+  return safeString(value || "", MAX_HOST_LENGTH).toLowerCase();
+}
+
+function normalizeReferer(value = "") {
+  const raw = safeString(value || "", MAX_REFERER_LENGTH);
+  if (!raw) return "";
+
+  try {
+    const parsed = new URL(raw);
+    return safeString(parsed.toString(), MAX_REFERER_LENGTH);
+  } catch {
+    return "";
+  }
+}
+
 function normalizeMethod(value = "") {
-  const method = safeString(value || "GET", MAX_METHOD_LENGTH).toUpperCase();
-  return ALLOWED_METHODS.has(method) ? method : "GET";
+  const method = safeString(value || "", MAX_METHOD_LENGTH).toUpperCase();
+  if (!method) return "INVALID";
+  return ALLOWED_METHODS.has(method) ? method : "INVALID";
 }
 
 function normalizeEmail(value = "") {
   const email = safeString(value || "", MAX_EMAIL_LENGTH).toLowerCase();
-
   if (!email) return "";
-
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    return "";
-  }
-
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return "";
   return email;
 }
 
-function extractClientIp(req = null, fallback = "") {
-  const forwarded = getHeaderValue(req, "x-forwarded-for");
-  if (forwarded) {
-    return normalizeIp(forwarded.split(",")[0]?.trim());
-  }
+function extractClientIp(req = null, fallback = "", options = {}) {
+  const { trustForwardedFor = false } = options;
 
+  // Prefer Cloudflare-provided client IP first
   const cfIp = getHeaderValue(req, "cf-connecting-ip");
   if (cfIp) {
     return normalizeIp(cfIp);
@@ -163,6 +170,13 @@ function extractClientIp(req = null, fallback = "") {
   const realIp = getHeaderValue(req, "x-real-ip");
   if (realIp) {
     return normalizeIp(realIp);
+  }
+
+  if (trustForwardedFor) {
+    const forwarded = getHeaderValue(req, "x-forwarded-for");
+    if (forwarded) {
+      return normalizeIp(forwarded.split(",")[0]?.trim());
+    }
   }
 
   const socketIp = safeString(req?.socket?.remoteAddress || "", MAX_IP_LENGTH);
@@ -177,13 +191,32 @@ function extractOrigin(req = null) {
   return normalizeOrigin(getHeaderValue(req, "origin"));
 }
 
+function extractReferer(req = null) {
+  return normalizeReferer(getHeaderValue(req, "referer"));
+}
+
+function extractHost(req = null) {
+  return normalizeHost(getHeaderValue(req, "host"));
+}
+
 function extractUserAgent(req = null, fallback = "") {
   return normalizeUserAgent(getHeaderValue(req, "user-agent") || fallback);
 }
 
 function extractRoute(req = null, fallback = "") {
-  const fromUrl = safeString(req?.url || "", MAX_ROUTE_LENGTH * 2);
-  return normalizeRoute(fromUrl || fallback);
+  const rawUrl = safeString(req?.url || "", MAX_ROUTE_LENGTH * 3);
+
+  if (!rawUrl && fallback) {
+    return normalizeRoute(fallback);
+  }
+
+  try {
+    // supports relative URLs too
+    const parsed = new URL(rawUrl, "https://local.aethra.internal");
+    return normalizeRoute(parsed.pathname || fallback);
+  } catch {
+    return normalizeRoute(rawUrl || fallback);
+  }
 }
 
 function extractMethod(req = null, fallback = "GET") {
@@ -219,6 +252,15 @@ function extractUserId({
   );
 }
 
+function extractRequestId(req = null, context = {}) {
+  return normalizeRequestId(
+    context?.requestId ||
+      getHeaderValue(req, "cf-ray") ||
+      getHeaderValue(req, "x-request-id") ||
+      getHeaderValue(req, "x-correlation-id")
+  );
+}
+
 function buildActorKey({
   ip = "",
   sessionId = "",
@@ -240,6 +282,17 @@ function buildRouteScopedKey({
   return `${buildActorKey({ ip, sessionId, userId })}::${normalizeRoute(route)}`;
 }
 
+function buildDeviceKey({
+  userAgent = "",
+  origin = "",
+  host = ""
+} = {}) {
+  const ua = normalizeUserAgent(userAgent || "") || "no-ua";
+  const normalizedOrigin = normalizeOrigin(origin || "") || "no-origin";
+  const normalizedHost = normalizeHost(host || "") || "no-host";
+  return `${ua}::${normalizedOrigin}::${normalizedHost}`;
+}
+
 export function createActorContext({
   req = null,
   body = {},
@@ -248,9 +301,10 @@ export function createActorContext({
   route = "",
   fallbackIp = "",
   fallbackSessionId = "",
-  fallbackUserId = ""
+  fallbackUserId = "",
+  trustForwardedFor = false
 } = {}) {
-  const ip = extractClientIp(req, context?.ip || fallbackIp);
+  const ip = extractClientIp(req, context?.ip || fallbackIp, { trustForwardedFor });
   const sessionId = extractSessionId({
     body,
     behavior,
@@ -266,29 +320,39 @@ export function createActorContext({
   const resolvedRoute = extractRoute(req, route);
   const method = extractMethod(req, "GET");
   const origin = extractOrigin(req);
+  const referer = extractReferer(req);
+  const host = extractHost(req);
   const userAgent = extractUserAgent(
     req,
     safeString(behavior?.userAgent || "", MAX_USER_AGENT_LENGTH)
   );
   const email = normalizeEmail(body?.email || context?.email || "");
+  const requestId = extractRequestId(req, context);
+  const actorKey = buildActorKey({ ip, sessionId, userId });
+  const routeActorKey = buildRouteScopedKey({
+    ip,
+    sessionId,
+    userId,
+    route: resolvedRoute
+  });
+  const deviceKey = buildDeviceKey({ userAgent, origin, host });
 
-  return {
+  return Object.freeze({
     ip,
     sessionId,
     userId,
     route: resolvedRoute,
     method,
     origin,
+    referer,
+    host,
     userAgent,
     email,
-    actorKey: buildActorKey({ ip, sessionId, userId }),
-    routeActorKey: buildRouteScopedKey({
-      ip,
-      sessionId,
-      userId,
-      route: resolvedRoute
-    })
-  };
+    requestId,
+    actorKey,
+    routeActorKey,
+    deviceKey
+  });
 }
 
 export {
@@ -296,18 +360,25 @@ export {
   normalizeIp,
   normalizeSessionId,
   normalizeUserId,
+  normalizeRequestId,
   normalizeRoute,
   normalizeUserAgent,
   normalizeOrigin,
+  normalizeHost,
+  normalizeReferer,
   normalizeMethod,
   normalizeEmail,
   extractClientIp,
   extractOrigin,
+  extractReferer,
+  extractHost,
   extractUserAgent,
   extractRoute,
   extractMethod,
   extractSessionId,
   extractUserId,
+  extractRequestId,
   buildActorKey,
-  buildRouteScopedKey
+  buildRouteScopedKey,
+  buildDeviceKey
 };
