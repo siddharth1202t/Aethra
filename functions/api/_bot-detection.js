@@ -53,8 +53,10 @@ function getHeaderValue(req, name) {
   const headers = req?.headers;
   if (!headers || !name) return "";
 
+  const target = String(name).toLowerCase();
+
   if (typeof headers.get === "function") {
-    return safeString(headers.get(name) || "", 1000);
+    return safeString(headers.get(name) || headers.get(target) || "", 1000);
   }
 
   if (Array.isArray(headers)) {
@@ -62,7 +64,7 @@ function getHeaderValue(req, name) {
       if (
         Array.isArray(entry) &&
         entry.length >= 2 &&
-        String(entry[0]).toLowerCase() === String(name).toLowerCase()
+        String(entry[0]).toLowerCase() === target
       ) {
         return safeString(entry[1] || "", 1000);
       }
@@ -71,17 +73,8 @@ function getHeaderValue(req, name) {
   }
 
   if (isPlainObject(headers)) {
-    const directValue = headers[name];
-    if (Array.isArray(directValue)) {
-      return safeString(directValue[0] || "", 1000);
-    }
-    if (directValue !== undefined && directValue !== null) {
-      return safeString(directValue, 1000);
-    }
-
-    const lowerName = String(name).toLowerCase();
     for (const [key, value] of Object.entries(headers)) {
-      if (String(key).toLowerCase() === lowerName) {
+      if (String(key).toLowerCase() === target) {
         if (Array.isArray(value)) {
           return safeString(value[0] || "", 1000);
         }
@@ -95,11 +88,9 @@ function getHeaderValue(req, name) {
 
 function normalizeRoute(route) {
   const raw = safeString(route || "unknown-route", MAX_ROUTE_LENGTH * 2);
-
   if (!raw) return "unknown-route";
 
   const withoutQuery = raw.split("?")[0].split("#")[0];
-
   const cleaned = withoutQuery
     .replace(/\/{2,}/g, "/")
     .replace(/[^a-zA-Z0-9/_:-]/g, "")
@@ -116,7 +107,6 @@ function normalizeSessionId(value = "") {
 
 function normalizeIp(value = "") {
   let ip = safeString(value || "unknown", MAX_IP_LENGTH);
-
   if (!ip) return "unknown";
 
   if (ip.startsWith("::ffff:")) {
@@ -124,7 +114,6 @@ function normalizeIp(value = "") {
   }
 
   ip = ip.replace(/[^a-fA-F0-9:.,]/g, "").slice(0, MAX_IP_LENGTH);
-
   return ip || "unknown";
 }
 
@@ -144,6 +133,28 @@ function normalizeAction(value = "") {
   return "allow";
 }
 
+function normalizeOrigin(value = "") {
+  const raw = safeString(value || "", 200);
+  if (!raw) return "";
+
+  try {
+    return new URL(raw).origin.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+function normalizeReferer(value = "") {
+  const raw = safeString(value || "", 300);
+  if (!raw) return "";
+
+  try {
+    return new URL(raw).toString();
+  } catch {
+    return "";
+  }
+}
+
 function buildBotKey({ ip = "", sessionId = "", userId = "" } = {}) {
   const safeIp = normalizeIp(ip);
   const safeSessionId = normalizeSessionId(sessionId);
@@ -152,7 +163,7 @@ function buildBotKey({ ip = "", sessionId = "", userId = "" } = {}) {
 }
 
 function isSuspiciousUserAgent(userAgent) {
-  return /headless|phantom|selenium|playwright|puppeteer|crawler|spider|bot|curl|wget|python|axios|node-fetch/i.test(
+  return /headless|phantom|selenium|playwright|puppeteer|crawler|spider|curl|wget|python-requests|httpclient|node-fetch/i.test(
     userAgent
   );
 }
@@ -161,11 +172,11 @@ function getRouteSensitivity(route) {
   const normalized = normalizeRoute(route);
 
   if (
+    normalized.includes("admin") ||
+    normalized.includes("developer") ||
     normalized.includes("login") ||
     normalized.includes("signup") ||
-    normalized.includes("verify") ||
-    normalized.includes("developer") ||
-    normalized.includes("admin")
+    normalized.includes("verify")
   ) {
     return 2;
   }
@@ -203,6 +214,7 @@ function createEmptyBotRecord(now) {
     lastReason: "",
     reasonHistory: [],
     recentSignals: [],
+    recentRoutes: [],
     lastDecayAt: now
   };
 }
@@ -240,6 +252,9 @@ function normalizeBotRecord(raw, now) {
           .filter((item) => item.at > 0 && now - item.at <= BOT_SIGNAL_WINDOW_MS)
           .slice(-MAX_SIGNAL_HISTORY)
       : [],
+    recentRoutes: Array.isArray(record.recentRoutes)
+      ? record.recentRoutes.map((item) => normalizeRoute(item)).slice(-20)
+      : [],
     lastDecayAt: toSafeInt(record.lastDecayAt, now, 0, now + 60_000)
   };
 }
@@ -247,16 +262,11 @@ function normalizeBotRecord(raw, now) {
 async function getStoredBotRecord(redis, redisKey, now) {
   try {
     const raw = await redis.get(redisKey);
-
-    if (!raw) {
-      return null;
-    }
+    if (!raw) return null;
 
     if (typeof raw === "string") {
       const parsed = safeJsonParse(raw, null);
-      if (!parsed || typeof parsed !== "object") {
-        return null;
-      }
+      if (!parsed || typeof parsed !== "object") return null;
       return normalizeBotRecord(parsed, now);
     }
 
@@ -287,14 +297,10 @@ function decayBotScore(record, now) {
   const lastDecayAt = toSafeInt(record.lastDecayAt, now, 0, now);
   const elapsed = now - lastDecayAt;
 
-  if (elapsed < BOT_DECAY_MS) {
-    return;
-  }
+  if (elapsed < BOT_DECAY_MS) return;
 
   const decaySteps = Math.floor(elapsed / BOT_DECAY_MS);
-  if (decaySteps <= 0) {
-    return;
-  }
+  if (decaySteps <= 0) return;
 
   record.suspicionScore = Math.max(0, toSafeInt(record.suspicionScore, 0) - decaySteps * 8);
   record.lastDecayAt = now;
@@ -333,6 +339,15 @@ function pushRecentSignal(record, signal, now) {
     .slice(-MAX_SIGNAL_HISTORY);
 }
 
+function pushRecentRoute(record, route) {
+  if (!Array.isArray(record.recentRoutes)) {
+    record.recentRoutes = [];
+  }
+
+  record.recentRoutes.push(normalizeRoute(route));
+  record.recentRoutes = record.recentRoutes.slice(-20);
+}
+
 function summarizeRecentSignals(record, route) {
   const recentSignals = Array.isArray(record.recentSignals) ? record.recentSignals : [];
   const sameRouteRecent = recentSignals.filter((item) => item.route === route).length;
@@ -344,10 +359,15 @@ function summarizeRecentSignals(record, route) {
     0
   );
 
+  const uniqueRecentRoutes = new Set(
+    (Array.isArray(record.recentRoutes) ? record.recentRoutes : []).map((item) => normalizeRoute(item))
+  ).size;
+
   return {
     sameRouteRecent,
     recentChallenges,
-    recentHardBlocks
+    recentHardBlocks,
+    uniqueRecentRoutes
   };
 }
 
@@ -356,20 +376,14 @@ function extractRequestUserAgent(req = null) {
 }
 
 function extractForwardedIp(req = null) {
-  const forwarded = getHeaderValue(req, "x-forwarded-for");
-  if (forwarded) {
-    return normalizeIp(forwarded.split(",")[0]?.trim());
-  }
-
   const cfIp = getHeaderValue(req, "cf-connecting-ip");
-  if (cfIp) {
-    return normalizeIp(cfIp);
-  }
+  if (cfIp) return normalizeIp(cfIp);
 
   const realIp = getHeaderValue(req, "x-real-ip");
-  if (realIp) {
-    return normalizeIp(realIp);
-  }
+  if (realIp) return normalizeIp(realIp);
+
+  const forwarded = getHeaderValue(req, "x-forwarded-for");
+  if (forwarded) return normalizeIp(forwarded.split(",")[0]?.trim());
 
   return normalizeIp(req?.socket?.remoteAddress || "");
 }
@@ -395,15 +409,14 @@ export function analyzeBotBehavior(behavior = {}, req = null) {
   const behaviorUserAgent = normalizeUserAgent(behavior.userAgent || "");
   const userAgent = requestUserAgent || behaviorUserAgent;
 
-  const totalInteractions =
-    mouseMoves + keyPresses + clicks + touches + scrolls;
+  const origin = normalizeOrigin(getHeaderValue(req, "origin"));
+  const referer = normalizeReferer(getHeaderValue(req, "referer"));
 
+  const totalInteractions = mouseMoves + keyPresses + clicks + touches + scrolls;
   const directInputs = mouseMoves + keyPresses + clicks + touches;
 
   const timeOnPageMs =
-    pageLoadedAt > 0 && submitAt >= pageLoadedAt
-      ? submitAt - pageLoadedAt
-      : 0;
+    pageLoadedAt > 0 && submitAt >= pageLoadedAt ? submitAt - pageLoadedAt : 0;
 
   const timeToFirstInteractionMs =
     firstInteractionAt > 0 &&
@@ -417,7 +430,6 @@ export function analyzeBotBehavior(behavior = {}, req = null) {
   let hardBlockSignals = 0;
   const reasons = [];
   const telemetryWarnings = [];
-
   const routeSensitivity = getRouteSensitivity(route);
 
   if (!sessionId || sessionId === "no-session") {
@@ -488,7 +500,7 @@ export function analyzeBotBehavior(behavior = {}, req = null) {
   }
 
   if (isSuspiciousUserAgent(userAgent)) {
-    riskScore += 50;
+    riskScore += 45;
     hardBlockSignals += 1;
     reasons.push("suspicious_user_agent");
   }
@@ -530,6 +542,16 @@ export function analyzeBotBehavior(behavior = {}, req = null) {
     telemetryWarnings.push("missing_first_interaction_at");
   }
 
+  if (!origin) {
+    telemetryQualityScore -= 5;
+    telemetryWarnings.push("missing_origin");
+  }
+
+  if (!referer) {
+    telemetryQualityScore -= 5;
+    telemetryWarnings.push("missing_referer");
+  }
+
   telemetryQualityScore = Math.max(0, Math.min(100, telemetryQualityScore));
   riskScore = Math.min(100, riskScore);
 
@@ -554,6 +576,10 @@ export function analyzeBotBehavior(behavior = {}, req = null) {
     hardBlockSignals,
     reasons,
     telemetryWarnings,
+    events: {
+      botSignals: reasons.length > 0 ? 1 : 0,
+      hardBlockSignals
+    },
     signals: {
       route,
       routeSensitivity,
@@ -569,7 +595,9 @@ export function analyzeBotBehavior(behavior = {}, req = null) {
       visibilityChanges,
       sessionIdPresent: Boolean(sessionId && sessionId !== "no-session"),
       requestUserAgentPresent: Boolean(requestUserAgent),
-      behaviorUserAgentPresent: Boolean(behaviorUserAgent)
+      behaviorUserAgentPresent: Boolean(behaviorUserAgent),
+      originPresent: Boolean(origin),
+      refererPresent: Boolean(referer)
     }
   };
 }
@@ -583,8 +611,7 @@ export async function trackBotBehavior(behavior = {}, req = null, context = {}) 
   const behaviorUserAgent = normalizeUserAgent(behavior.userAgent || "");
   const userAgent = requestUserAgent || behaviorUserAgent;
 
-  const sessionId =
-    normalizeSessionId(context.sessionId || behavior.sessionId || "");
+  const sessionId = normalizeSessionId(context.sessionId || behavior.sessionId || "");
   const ip = normalizeIp(context.ip || extractForwardedIp(req) || "");
   const userId = normalizeUserId(context.userId || "");
   const redisKey = buildBotKey({ ip, sessionId, userId });
@@ -631,10 +658,11 @@ export async function trackBotBehavior(behavior = {}, req = null, context = {}) 
     scoreIncrease += 15;
   }
 
-  if (
-    analysis.recommendedAction === "block" &&
-    analysis.riskScore >= 90
-  ) {
+  if (recentSummary.uniqueRecentRoutes >= 4) {
+    scoreIncrease += 10;
+  }
+
+  if (analysis.recommendedAction === "block" && analysis.riskScore >= 90) {
     scoreIncrease += 20;
   }
 
@@ -649,11 +677,13 @@ export async function trackBotBehavior(behavior = {}, req = null, context = {}) 
   );
 
   if (analysis.hardBlockSignals > 0) {
-    record.hardBlockCount = toSafeInt(record.hardBlockCount, 0, 0, 1000) + analysis.hardBlockSignals;
+    record.hardBlockCount =
+      toSafeInt(record.hardBlockCount, 0, 0, 1000) + analysis.hardBlockSignals;
   }
 
   if (analysis.riskScore >= 40) {
-    record.suspiciousCount = toSafeInt(record.suspiciousCount, 0, 0, 100000) + 1;
+    record.suspiciousCount =
+      toSafeInt(record.suspiciousCount, 0, 0, 100000) + 1;
   }
 
   record.updatedAt = now;
@@ -664,12 +694,17 @@ export async function trackBotBehavior(behavior = {}, req = null, context = {}) 
   record.lastDecayAt = record.lastDecayAt || now;
 
   pushReasonHistory(record, analysis.reasons);
-  pushRecentSignal(record, {
-    route,
-    riskScore: analysis.riskScore,
-    hardBlockSignals: analysis.hardBlockSignals,
-    recommendedAction: analysis.recommendedAction
-  }, now);
+  pushRecentSignal(
+    record,
+    {
+      route,
+      riskScore: analysis.riskScore,
+      hardBlockSignals: analysis.hardBlockSignals,
+      recommendedAction: analysis.recommendedAction
+    },
+    now
+  );
+  pushRecentRoute(record, route);
 
   await storeBotRecord(redis, redisKey, record);
 
@@ -677,9 +712,7 @@ export async function trackBotBehavior(behavior = {}, req = null, context = {}) 
 
   if (record.hardBlockCount >= 2 || record.suspicionScore >= 120) {
     escalatedAction = "block";
-  } else if (
-    record.suspicionScore >= 90 || record.suspiciousCount >= 5
-  ) {
+  } else if (record.suspicionScore >= 90 || record.suspiciousCount >= 5) {
     escalatedAction = "challenge";
   } else if (
     escalatedAction === "allow" &&
@@ -699,6 +732,7 @@ export async function trackBotBehavior(behavior = {}, req = null, context = {}) 
       sameRouteRecent: recentSummary.sameRouteRecent,
       recentChallenges: recentSummary.recentChallenges,
       recentHardBlocks: recentSummary.recentHardBlocks,
+      uniqueRecentRoutes: recentSummary.uniqueRecentRoutes,
       clientKeyPreview: safeString(redisKey.replace(/^bot:/, ""), 24)
     }
   };
