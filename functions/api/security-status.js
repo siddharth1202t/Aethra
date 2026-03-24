@@ -23,15 +23,26 @@ function jsonResponse(payload, status = 200) {
 
 /* -------------------- UTIL -------------------- */
 
+function normalizeIp(value = "") {
+  return safeString(value || "unknown", 100)
+    .replace(/[^a-fA-F0-9:.,]/g, "")
+    .slice(0, 100) || "unknown";
+}
+
 function getClientIp(request) {
+  const cfIp = request.headers.get("cf-connecting-ip");
+  if (cfIp) {
+    return normalizeIp(cfIp.trim());
+  }
+
   const forwarded = request.headers.get("x-forwarded-for");
   if (forwarded) {
-    return forwarded.split(",")[0].trim().slice(0, 100);
+    return normalizeIp(forwarded.split(",")[0].trim());
   }
 
   const realIp = request.headers.get("x-real-ip");
   if (realIp) {
-    return realIp.trim().slice(0, 100);
+    return normalizeIp(realIp.trim());
   }
 
   return "unknown";
@@ -46,23 +57,19 @@ function unauthorizedResponse() {
 export async function onRequest(context) {
   const { request, env } = context;
 
-  /* ---- METHOD CHECK ---- */
   if (request.method !== "GET") {
-    const response = buildMethodNotAllowedResponse(["GET"]);
-    return jsonResponse(response.body, response.status);
+    return jsonResponse(buildMethodNotAllowedResponse(), 405);
   }
 
   const clientIp = getClientIp(request);
 
   try {
-    /* ---- ADMIN KEY VALIDATION ---- */
     const adminKey = safeString(
       request.headers.get("x-security-admin-key"),
       200
     );
 
     if (!env.SECURITY_ADMIN_API_KEY || adminKey !== env.SECURITY_ADMIN_API_KEY) {
-      // fire and forget (don’t block response on logging)
       writeSecurityLog({
         env,
         type: "security_status_unauthorized",
@@ -76,7 +83,6 @@ export async function onRequest(context) {
       return unauthorizedResponse();
     }
 
-    /* ---- PARALLEL FETCH (FASTER) ---- */
     const [adaptiveState, containmentState] = await Promise.all([
       getAdaptiveThreatMode(env),
       getContainmentState(env)
@@ -89,7 +95,6 @@ export async function onRequest(context) {
       timestamp: Date.now()
     });
 
-    // fire and forget logging
     writeSecurityLog({
       env,
       type: "security_status_accessed",
@@ -105,7 +110,6 @@ export async function onRequest(context) {
 
     return jsonResponse(payload, 200);
   } catch (error) {
-    // fire and forget logging
     writeSecurityLog({
       env,
       type: "security_status_error",
