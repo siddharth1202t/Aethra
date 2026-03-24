@@ -16,6 +16,8 @@ const ALLOWED_SEVERITIES = new Set([
   "critical"
 ]);
 
+/* -------------------- SAFETY -------------------- */
+
 function safeString(value, maxLength = 200) {
   return String(value ?? "")
     .replace(/[\u0000-\u001F\u007F]/g, "")
@@ -48,18 +50,19 @@ function normalizeKey(value = "") {
 
 function normalizeSeverity(value = "warning") {
   const normalized = safeString(value, 20).toLowerCase();
-  return ALLOWED_SEVERITIES.has(normalized)
-    ? normalized
-    : "warning";
+  return ALLOWED_SEVERITIES.has(normalized) ? normalized : "warning";
 }
 
-function buildAlertStateKey(alertType) {
-  return `${ALERT_STATE_PREFIX}:${normalizeKey(alertType)}`;
+/* -------------------- STATE -------------------- */
+
+function buildAlertStateKey(alertType, scopeKey = "") {
+  return `${ALERT_STATE_PREFIX}:${normalizeKey(alertType)}:${normalizeKey(scopeKey || "global")}`;
 }
 
-function createDefaultAlertState(alertType = "") {
+function createDefaultAlertState(alertType = "", scopeKey = "") {
   return {
     alertType: normalizeKey(alertType),
+    scopeKey: normalizeKey(scopeKey || "global"),
     lastTriggeredAt: 0,
     triggerCount: 0,
     lastSeverity: "info",
@@ -67,12 +70,13 @@ function createDefaultAlertState(alertType = "") {
   };
 }
 
-function normalizeAlertState(raw, alertType = "") {
-  const base = createDefaultAlertState(alertType);
+function normalizeAlertState(raw, alertType = "", scopeKey = "") {
+  const base = createDefaultAlertState(alertType, scopeKey);
   const state = raw && typeof raw === "object" ? raw : {};
 
   return {
     alertType: normalizeKey(state.alertType || base.alertType),
+    scopeKey: normalizeKey(state.scopeKey || base.scopeKey),
     lastTriggeredAt: safeInt(
       state.lastTriggeredAt,
       base.lastTriggeredAt,
@@ -90,48 +94,53 @@ function normalizeAlertState(raw, alertType = "") {
   };
 }
 
-async function getStoredAlertState(env, alertType) {
+async function getStoredAlertState(env, alertType, scopeKey = "") {
   const redis = getRedis(env);
   const safeAlertType = normalizeKey(alertType);
+  const safeScopeKey = normalizeKey(scopeKey || "global");
 
   if (!safeAlertType) {
-    return createDefaultAlertState(safeAlertType);
+    return createDefaultAlertState(safeAlertType, safeScopeKey);
   }
 
   try {
-    const key = buildAlertStateKey(safeAlertType);
+    const key = buildAlertStateKey(safeAlertType, safeScopeKey);
     const raw = await redis.get(key);
 
     if (!raw) {
-      return createDefaultAlertState(safeAlertType);
+      return createDefaultAlertState(safeAlertType, safeScopeKey);
     }
 
     if (typeof raw === "string") {
       const parsed = safeJsonParse(raw, null);
-      return normalizeAlertState(parsed, safeAlertType);
+      return normalizeAlertState(parsed, safeAlertType, safeScopeKey);
     }
 
     if (typeof raw === "object") {
-      return normalizeAlertState(raw, safeAlertType);
+      return normalizeAlertState(raw, safeAlertType, safeScopeKey);
     }
 
-    return createDefaultAlertState(safeAlertType);
+    return createDefaultAlertState(safeAlertType, safeScopeKey);
   } catch (error) {
     console.error("Alert state read failed:", error);
-    return createDefaultAlertState(safeAlertType);
+    return createDefaultAlertState(safeAlertType, safeScopeKey);
   }
 }
 
 async function storeAlertState(env, state) {
   const redis = getRedis(env);
-  const normalized = normalizeAlertState(state, state?.alertType || "");
+  const normalized = normalizeAlertState(
+    state,
+    state?.alertType || "",
+    state?.scopeKey || ""
+  );
 
   if (!normalized.alertType) {
     return false;
   }
 
   try {
-    const key = buildAlertStateKey(normalized.alertType);
+    const key = buildAlertStateKey(normalized.alertType, normalized.scopeKey);
 
     await redis.set(key, JSON.stringify(normalized), {
       ex: ALERT_STATE_TTL_SECONDS
@@ -144,8 +153,24 @@ async function storeAlertState(env, state) {
   }
 }
 
-async function shouldEmitAlert(env, alertType, severity = "warning", reason = "", now = Date.now()) {
-  const state = await getStoredAlertState(env, alertType);
+/* -------------------- SUPPRESSION -------------------- */
+
+function buildAlertScopeKey(alert = {}) {
+  const metadata = alert?.metadata && typeof alert.metadata === "object"
+    ? alert.metadata
+    : {};
+
+  return normalizeKey(
+    metadata.actorKey ||
+      metadata.userId ||
+      metadata.route ||
+      metadata.reasonKey ||
+      "global"
+  );
+}
+
+async function shouldEmitAlert(env, alertType, severity = "warning", reason = "", scopeKey = "", now = Date.now()) {
+  const state = await getStoredAlertState(env, alertType, scopeKey);
   const normalizedSeverity = normalizeSeverity(severity);
   const normalizedReason = safeString(reason || "", 120);
 
@@ -166,6 +191,7 @@ async function shouldEmitAlert(env, alertType, severity = "warning", reason = ""
 
   const nextState = {
     alertType: normalizeKey(alertType),
+    scopeKey: normalizeKey(scopeKey || "global"),
     lastTriggeredAt: now,
     triggerCount: safeInt(state.triggerCount, 0) + 1,
     lastSeverity: normalizedSeverity,
@@ -180,6 +206,8 @@ async function shouldEmitAlert(env, alertType, severity = "warning", reason = ""
   };
 }
 
+/* -------------------- ALERT BUILDING -------------------- */
+
 function pushAlert(alerts, alert) {
   if (!alert || typeof alert !== "object") return;
   alerts.push(alert);
@@ -191,6 +219,9 @@ function buildAlert({
   title,
   message,
   reason,
+  category = "security",
+  priority = "medium",
+  escalationRequired = false,
   metadata = {}
 }) {
   return {
@@ -199,10 +230,36 @@ function buildAlert({
     title: safeString(title, 120),
     message: safeString(message, 300),
     reason: safeString(reason, 120),
+    category: safeString(category, 50).toLowerCase(),
+    priority: safeString(priority, 30).toLowerCase(),
+    escalationRequired: escalationRequired === true,
     metadata: metadata && typeof metadata === "object"
       ? metadata
       : {}
   };
+}
+
+function deriveAlertEventAction(alert) {
+  const type = safeString(alert?.type || "", 120).toLowerCase();
+  const severity = normalizeSeverity(alert?.severity || "warning");
+
+  if (
+    type.includes("lockdown") ||
+    type.includes("critical_attack") ||
+    type.includes("breach") ||
+    type.includes("exploit") ||
+    type.includes("session_kill") ||
+    type.includes("account_lock") ||
+    type.includes("actor_block")
+  ) {
+    return "contain";
+  }
+
+  if (severity === "critical") {
+    return "contain";
+  }
+
+  return "observe";
 }
 
 async function emitAlertEvent(env, alert) {
@@ -210,12 +267,15 @@ async function emitAlertEvent(env, alert) {
     await appendSecurityEvent(env, {
       type: "security_alert_triggered",
       severity: normalizeSeverity(alert.severity),
-      action: alert.severity === "critical" ? "contain" : "observe",
+      action: deriveAlertEventAction(alert),
       reason: safeString(alert.reason || alert.type || "security_alert", 120),
       message: safeString(alert.message || "Security alert triggered.", 500),
       metadata: {
         alertType: safeString(alert.type || "", 120),
         alertTitle: safeString(alert.title || "", 120),
+        category: safeString(alert.category || "security", 50),
+        priority: safeString(alert.priority || "medium", 30),
+        escalationRequired: alert.escalationRequired === true,
         ...(alert.metadata || {})
       }
     });
@@ -223,6 +283,8 @@ async function emitAlertEvent(env, alert) {
     console.error("Security alert event write failed:", error);
   }
 }
+
+/* -------------------- NORMALIZATION -------------------- */
 
 function normalizeRisk(risk = null) {
   if (!risk || typeof risk !== "object") return {};
@@ -250,6 +312,8 @@ function normalizeAnomalyResult(anomalyResult = null) {
   };
 }
 
+/* -------------------- MAIN -------------------- */
+
 export async function evaluateSecurityAlerts({
   env = {},
   securityStatus = null,
@@ -274,12 +338,17 @@ export async function evaluateSecurityAlerts({
   const normalizedRisk = normalizeRisk(risk);
   const normalizedAnomaly = normalizeAnomalyResult(anomalyResult);
 
+  const containmentFlags =
+    containment?.flags && typeof containment.flags === "object"
+      ? containment.flags
+      : {};
+
   const mode = safeString(
     containment?.mode ||
-    adaptiveMode?.mode ||
-    status.mode ||
-    metrics.mode ||
-    "normal",
+      adaptiveMode?.mode ||
+      status.mode ||
+      metrics.mode ||
+      "normal",
     30
   ).toLowerCase();
 
@@ -295,8 +364,7 @@ export async function evaluateSecurityAlerts({
   const finalAction = safeString(normalizedRisk.finalAction || "allow", 20).toLowerCase();
 
   const recentCriticalEvents = safeEvents.filter(
-    (event) =>
-      safeString(event?.severity || "", 20).toLowerCase() === "critical"
+    (event) => safeString(event?.severity || "", 20).toLowerCase() === "critical"
   ).length;
 
   /* --- ALERT CONDITIONS --- */
@@ -308,7 +376,10 @@ export async function evaluateSecurityAlerts({
       title: "Lockdown active",
       message: "System is currently operating in lockdown mode.",
       reason: "lockdown_active",
-      metadata: { mode, threatPressure }
+      category: "containment",
+      priority: "critical",
+      escalationRequired: true,
+      metadata: { mode, threatPressure, reasonKey: "lockdown_active" }
     }));
   }
 
@@ -319,7 +390,10 @@ export async function evaluateSecurityAlerts({
       title: "Threat pressure critical",
       message: "Threat pressure is critically high across the system.",
       reason: "threat_pressure_critical",
-      metadata: { threatPressure }
+      category: "threat",
+      priority: "critical",
+      escalationRequired: true,
+      metadata: { threatPressure, reasonKey: "threat_pressure_critical" }
     }));
   }
 
@@ -330,12 +404,16 @@ export async function evaluateSecurityAlerts({
       title: "High anomaly detected",
       message: "Behavioral anomaly detection returned a high score.",
       reason: "high_anomaly_detected",
+      category: "anomaly",
+      priority: normalizedAnomaly.breachSignals > 0 ? "critical" : "high",
+      escalationRequired: normalizedAnomaly.breachSignals > 0,
       metadata: {
         anomalyScore,
         exploitSignals: normalizedAnomaly.exploitSignals,
         breachSignals: normalizedAnomaly.breachSignals,
         coordinatedSignals: normalizedAnomaly.coordinatedSignals,
-        replaySignals: normalizedAnomaly.replaySignals
+        replaySignals: normalizedAnomaly.replaySignals,
+        reasonKey: "high_anomaly_detected"
       }
     }));
   }
@@ -347,11 +425,15 @@ export async function evaluateSecurityAlerts({
       title: "Critical actor risk",
       message: "An actor reached critical risk or triggered a block decision.",
       reason: "critical_actor_risk",
+      category: "risk",
+      priority: "critical",
+      escalationRequired: true,
       metadata: {
         riskScore,
         finalAction,
         hardBlockSignals: normalizedRisk.hardBlockSignals,
-        criticalSignals: normalizedRisk.criticalSignals
+        criticalSignals: normalizedRisk.criticalSignals,
+        reasonKey: "critical_actor_risk"
       }
     }));
   }
@@ -363,9 +445,13 @@ export async function evaluateSecurityAlerts({
       title: "Critical attack likely",
       message: "Signals indicate a likely critical attack or exploitation attempt.",
       reason: "critical_attack_likely",
+      category: "attack",
+      priority: "critical",
+      escalationRequired: true,
       metadata: {
         riskScore,
-        anomalyScore
+        anomalyScore,
+        reasonKey: "critical_attack_likely"
       }
     }));
   }
@@ -377,9 +463,13 @@ export async function evaluateSecurityAlerts({
       title: "Exploit signal detected",
       message: "Exploit-like behavior was detected by anomaly analysis.",
       reason: "exploit_signal_detected",
+      category: "attack",
+      priority: "critical",
+      escalationRequired: true,
       metadata: {
         exploitSignals: normalizedAnomaly.exploitSignals,
-        anomalyScore
+        anomalyScore,
+        reasonKey: "exploit_signal_detected"
       }
     }));
   }
@@ -391,9 +481,13 @@ export async function evaluateSecurityAlerts({
       title: "Breach signal detected",
       message: "Potential breach-like behavior was detected.",
       reason: "breach_signal_detected",
+      category: "attack",
+      priority: "critical",
+      escalationRequired: true,
       metadata: {
         breachSignals: normalizedAnomaly.breachSignals,
-        anomalyScore
+        anomalyScore,
+        reasonKey: "breach_signal_detected"
       }
     }));
   }
@@ -405,9 +499,13 @@ export async function evaluateSecurityAlerts({
       title: "Coordinated attack detected",
       message: "Coordinated multi-signal attack behavior was detected.",
       reason: "coordinated_attack_detected",
+      category: "attack",
+      priority: "critical",
+      escalationRequired: true,
       metadata: {
         coordinatedSignals: normalizedAnomaly.coordinatedSignals,
-        anomalyScore
+        anomalyScore,
+        reasonKey: "coordinated_attack_detected"
       }
     }));
   }
@@ -419,8 +517,12 @@ export async function evaluateSecurityAlerts({
       title: "Replay attack signal",
       message: "Replay-like request behavior was detected.",
       reason: "replay_attack_signal",
+      category: "attack",
+      priority: "high",
+      escalationRequired: false,
       metadata: {
-        replaySignals: normalizedAnomaly.replaySignals
+        replaySignals: normalizedAnomaly.replaySignals,
+        reasonKey: "replay_attack_signal"
       }
     }));
   }
@@ -432,8 +534,60 @@ export async function evaluateSecurityAlerts({
       title: "Critical event cluster",
       message: "Multiple critical security events were observed recently.",
       reason: "critical_event_cluster",
+      category: "events",
+      priority: "critical",
+      escalationRequired: true,
       metadata: {
-        recentCriticalEvents
+        recentCriticalEvents,
+        reasonKey: "critical_event_cluster"
+      }
+    }));
+  }
+
+  if (containmentFlags.lockAccount === true) {
+    pushAlert(alerts, buildAlert({
+      type: "account_lock_enforced",
+      severity: "critical",
+      title: "Account lock enforced",
+      message: "Containment state indicates an account lock is active.",
+      reason: "account_lock_enforced",
+      category: "containment",
+      priority: "critical",
+      escalationRequired: true,
+      metadata: {
+        reasonKey: "account_lock_enforced"
+      }
+    }));
+  }
+
+  if (containmentFlags.killSessions === true) {
+    pushAlert(alerts, buildAlert({
+      type: "session_kill_enforced",
+      severity: "critical",
+      title: "Session kill enforced",
+      message: "Containment state indicates active sessions should be invalidated.",
+      reason: "session_kill_enforced",
+      category: "containment",
+      priority: "critical",
+      escalationRequired: true,
+      metadata: {
+        reasonKey: "session_kill_enforced"
+      }
+    }));
+  }
+
+  if (containmentFlags.blockActor === true) {
+    pushAlert(alerts, buildAlert({
+      type: "actor_block_enforced",
+      severity: "critical",
+      title: "Actor block enforced",
+      message: "Containment state indicates a targeted actor block is active.",
+      reason: "actor_block_enforced",
+      category: "containment",
+      priority: "critical",
+      escalationRequired: true,
+      metadata: {
+        reasonKey: "actor_block_enforced"
       }
     }));
   }
@@ -442,11 +596,14 @@ export async function evaluateSecurityAlerts({
   const now = Date.now();
 
   for (const alert of alerts) {
+    const scopeKey = buildAlertScopeKey(alert);
+
     const decision = await shouldEmitAlert(
       env,
       alert.type,
       alert.severity,
       alert.reason,
+      scopeKey,
       now
     );
 
