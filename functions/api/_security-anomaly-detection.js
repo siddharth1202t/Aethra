@@ -14,8 +14,8 @@ const MAX_REASON_LENGTH = 120;
 const MAX_REASONS = 20;
 const MAX_RECENT_ITEMS = 10;
 
-const ALLOWED_LEVELS = new Set(["low","medium","high","critical"]);
-const ALLOWED_ACTIONS = new Set(["allow","throttle","challenge","block"]);
+const ALLOWED_LEVELS = new Set(["low", "medium", "high", "critical"]);
+const ALLOWED_ACTIONS = new Set(["allow", "throttle", "challenge", "block"]);
 
 /* ------------------------------------------------ */
 /* SAFETY HELPERS */
@@ -51,130 +51,142 @@ function safeJsonParse(raw, fallback = null) {
 /* NORMALIZATION */
 /* ------------------------------------------------ */
 
-function normalizeLevel(value="low"){
-  const v = safeString(value,20).toLowerCase();
+function normalizeLevel(value = "low") {
+  const v = safeString(value, 20).toLowerCase();
   return ALLOWED_LEVELS.has(v) ? v : "low";
 }
 
-function normalizeAction(value="allow"){
-  const v = safeString(value,20).toLowerCase();
+function normalizeAction(value = "allow") {
+  const v = safeString(value, 20).toLowerCase();
   return ALLOWED_ACTIONS.has(v) ? v : "allow";
 }
 
-function normalizeKey(value=""){
-  return safeString(value,160).replace(/[^a-zA-Z0-9:_-]/g,"_");
+function normalizeKey(value = "") {
+  return safeString(value, 160).replace(/[^a-zA-Z0-9:_-]/g, "_");
 }
 
-function normalizeRoute(value=""){
-  const raw = safeString(value,300);
-  if(!raw) return "";
+function normalizeRoute(value = "") {
+  const raw = safeString(value, 300);
+  if (!raw) return "";
 
   return raw
     .split("?")[0]
     .split("#")[0]
-    .replace(/\/{2,}/g,"/")
-    .replace(/[^a-zA-Z0-9/_-]/g,"")
+    .replace(/\/{2,}/g, "/")
+    .replace(/[^a-zA-Z0-9/_:-]/g, "")
     .toLowerCase()
-    .slice(0,200);
+    .slice(0, 200);
 }
 
-function normalizeIp(value=""){
-  return safeString(value,100);
+function normalizeIp(value = "") {
+  return safeString(value, 100);
 }
 
-function normalizeReason(reason=""){
-  return safeString(reason,MAX_REASON_LENGTH)
-    .replace(/[^\w:.-]/g,"_");
+function normalizeReason(reason = "") {
+  return safeString(reason, MAX_REASON_LENGTH).replace(/[^\w:.-]/g, "_");
+}
+
+function normalizeRouteSensitivity(value = "normal") {
+  const v = safeString(value, 20).toLowerCase();
+  return v === "critical" || v === "high" ? v : "normal";
 }
 
 /* ------------------------------------------------ */
 /* STATE */
 /* ------------------------------------------------ */
 
-function buildStateKey(actorType,actorId){
+function buildStateKey(actorType, actorId) {
   return `${ANOMALY_STATE_PREFIX}:${normalizeKey(actorType)}:${normalizeKey(actorId)}`;
 }
 
-function createDefaultState(actorType="session",actorId=""){
+function createDefaultState(actorType = "session", actorId = "") {
   const now = Date.now();
 
   return {
-    actorType:normalizeKey(actorType),
-    actorId:normalizeKey(actorId),
+    actorType: normalizeKey(actorType),
+    actorId: normalizeKey(actorId),
 
-    updatedAt:now,
-    createdAt:now,
+    updatedAt: now,
+    createdAt: now,
 
-    recentIps:[],
-    recentRoutes:[],
-    recentActions:[],
-    recentRiskScores:[],
+    recentIps: [],
+    recentRoutes: [],
+    recentActions: [],
+    recentRiskScores: [],
 
-    loginCount:0,
-    signupCount:0,
-    passwordResetCount:0,
-    writeActionCount:0,
+    loginCount: 0,
+    signupCount: 0,
+    passwordResetCount: 0,
+    writeActionCount: 0,
 
-    suspiciousBurstCount:0,
-    ipChangeCount:0,
-    routeSpreadCount:0
+    suspiciousBurstCount: 0,
+    ipChangeCount: 0,
+    routeSpreadCount: 0,
+    exploitSignalCount: 0,
+    breachSignalCount: 0,
+    replaySignalCount: 0,
+    coordinatedSignalCount: 0
   };
 }
 
-function normalizeStringArray(values=[],maxItems=MAX_RECENT_ITEMS){
-  if(!Array.isArray(values)) return [];
+function normalizeStringArray(values = [], maxItems = MAX_RECENT_ITEMS) {
+  if (!Array.isArray(values)) return [];
 
-  const out=[];
-  for(const v of values){
-    const s=safeString(v,200);
-    if(!s) continue;
+  const out = [];
+  for (const v of values) {
+    const s = safeString(v, 200);
+    if (!s) continue;
 
-    if(!out.includes(s)){
+    if (!out.includes(s)) {
       out.push(s);
     }
 
-    if(out.length>=maxItems) break;
+    if (out.length >= maxItems) break;
   }
 
   return out;
 }
 
-function normalizeNumberArray(values=[],maxItems=MAX_RECENT_ITEMS){
-  if(!Array.isArray(values)) return [];
+function normalizeNumberArray(values = [], maxItems = MAX_RECENT_ITEMS) {
+  if (!Array.isArray(values)) return [];
 
-  const out=[];
-  for(const v of values){
-    out.push(safeInt(v,0,0,100));
-    if(out.length>=maxItems) break;
+  const out = [];
+  for (const v of values) {
+    out.push(safeInt(v, 0, 0, 100));
+    if (out.length >= maxItems) break;
   }
 
   return out;
 }
 
-function normalizeState(raw,actorType="session",actorId=""){
-  const base=createDefaultState(actorType,actorId);
-  const s=raw && typeof raw==="object" ? raw : {};
+function normalizeState(raw, actorType = "session", actorId = "") {
+  const base = createDefaultState(actorType, actorId);
+  const s = raw && typeof raw === "object" ? raw : {};
 
   return {
-    actorType:normalizeKey(s.actorType||base.actorType),
-    actorId:normalizeKey(s.actorId||base.actorId),
+    actorType: normalizeKey(s.actorType || base.actorType),
+    actorId: normalizeKey(s.actorId || base.actorId),
 
-    updatedAt:safeInt(s.updatedAt,base.updatedAt,0,Date.now()+60000),
-    createdAt:safeInt(s.createdAt,base.createdAt,0,Date.now()+60000),
+    updatedAt: safeInt(s.updatedAt, base.updatedAt, 0, Date.now() + 60000),
+    createdAt: safeInt(s.createdAt, base.createdAt, 0, Date.now() + 60000),
 
-    recentIps:normalizeStringArray(s.recentIps),
-    recentRoutes:normalizeStringArray(s.recentRoutes),
-    recentActions:normalizeStringArray(s.recentActions),
-    recentRiskScores:normalizeNumberArray(s.recentRiskScores),
+    recentIps: normalizeStringArray(s.recentIps),
+    recentRoutes: normalizeStringArray(s.recentRoutes),
+    recentActions: normalizeStringArray(s.recentActions),
+    recentRiskScores: normalizeNumberArray(s.recentRiskScores),
 
-    loginCount:safeInt(s.loginCount),
-    signupCount:safeInt(s.signupCount),
-    passwordResetCount:safeInt(s.passwordResetCount),
-    writeActionCount:safeInt(s.writeActionCount),
+    loginCount: safeInt(s.loginCount),
+    signupCount: safeInt(s.signupCount),
+    passwordResetCount: safeInt(s.passwordResetCount),
+    writeActionCount: safeInt(s.writeActionCount),
 
-    suspiciousBurstCount:safeInt(s.suspiciousBurstCount),
-    ipChangeCount:safeInt(s.ipChangeCount),
-    routeSpreadCount:safeInt(s.routeSpreadCount)
+    suspiciousBurstCount: safeInt(s.suspiciousBurstCount),
+    ipChangeCount: safeInt(s.ipChangeCount),
+    routeSpreadCount: safeInt(s.routeSpreadCount),
+    exploitSignalCount: safeInt(s.exploitSignalCount),
+    breachSignalCount: safeInt(s.breachSignalCount),
+    replaySignalCount: safeInt(s.replaySignalCount),
+    coordinatedSignalCount: safeInt(s.coordinatedSignalCount)
   };
 }
 
@@ -182,77 +194,66 @@ function normalizeState(raw,actorType="session",actorId=""){
 /* REDIS STORAGE */
 /* ------------------------------------------------ */
 
-async function getStoredState(env,actorType,actorId){
+async function getStoredState(env, actorType, actorId) {
+  const redis = getRedis(env);
 
-  const redis=getRedis(env);
+  const safeActorType = normalizeKey(actorType);
+  const safeActorId = normalizeKey(actorId);
 
-  const safeActorType=normalizeKey(actorType);
-  const safeActorId=normalizeKey(actorId);
-
-  if(!safeActorId){
-    return createDefaultState(safeActorType,safeActorId);
+  if (!safeActorId) {
+    return createDefaultState(safeActorType, safeActorId);
   }
 
-  try{
+  try {
+    const key = buildStateKey(safeActorType, safeActorId);
+    const raw = await redis.get(key);
 
-    const key=buildStateKey(safeActorType,safeActorId);
-
-    const raw=await redis.get(key);
-
-    if(!raw){
-      return createDefaultState(safeActorType,safeActorId);
+    if (!raw) {
+      return createDefaultState(safeActorType, safeActorId);
     }
 
-    if(typeof raw==="string"){
-      const parsed=safeJsonParse(raw,null);
-      return normalizeState(parsed,safeActorType,safeActorId);
+    if (typeof raw === "string") {
+      const parsed = safeJsonParse(raw, null);
+      return normalizeState(parsed, safeActorType, safeActorId);
     }
 
-    if(typeof raw==="object"){
-      return normalizeState(raw,safeActorType,safeActorId);
+    if (typeof raw === "object") {
+      return normalizeState(raw, safeActorType, safeActorId);
     }
 
-    return createDefaultState(safeActorType,safeActorId);
-
-  }catch(err){
-
-    console.error("Anomaly state read failed:",err);
-    return createDefaultState(safeActorType,safeActorId);
-
+    return createDefaultState(safeActorType, safeActorId);
+  } catch (err) {
+    console.error("Anomaly state read failed:", err);
+    return createDefaultState(safeActorType, safeActorId);
   }
 }
 
-async function storeState(env,state){
+async function storeState(env, state) {
+  const redis = getRedis(env);
 
-  const redis=getRedis(env);
-
-  const normalized=normalizeState(
+  const normalized = normalizeState(
     state,
     state?.actorType || "session",
     state?.actorId || ""
   );
 
-  if(!normalized.actorId){
+  if (!normalized.actorId) {
     return false;
   }
 
-  try{
-
-    const key=buildStateKey(normalized.actorType,normalized.actorId);
+  try {
+    const key = buildStateKey(normalized.actorType, normalized.actorId);
 
     await redis.set(
       key,
       JSON.stringify(normalized),
-      {ex:ANOMALY_STATE_TTL_SECONDS}
+      { ex: ANOMALY_STATE_TTL_SECONDS }
     );
 
     return true;
-
-  }catch(err){
-
-    console.error("Anomaly state write failed:",err);
+  } catch (err) {
+    console.error("Anomaly state write failed:", err);
     return false;
-
   }
 }
 
@@ -260,29 +261,30 @@ async function storeState(env,state){
 /* ANOMALY SCORE */
 /* ------------------------------------------------ */
 
-function getLevel(score){
-  const s=safeInt(score,0,0,100);
+function getLevel(score) {
+  const s = safeInt(score, 0, 0, 100);
 
-  if(s>=90) return "critical";
-  if(s>=70) return "high";
-  if(s>=40) return "medium";
+  if (s >= 90) return "critical";
+  if (s >= 70) return "high";
+  if (s >= 40) return "medium";
   return "low";
 }
 
-function getAction(score){
-  const s=safeInt(score,0,0,100);
+function getAction(score, criticalSignals = 0) {
+  const s = safeInt(score, 0, 0, 100);
+  const critical = safeInt(criticalSignals, 0, 0, 100);
 
-  if(s>=90) return "block";
-  if(s>=70) return "challenge";
-  if(s>=40) return "throttle";
+  if (critical >= 2 || s >= 90) return "block";
+  if (s >= 70) return "challenge";
+  if (s >= 40) return "throttle";
   return "allow";
 }
 
-function pushReason(list,reason){
-  const r=normalizeReason(reason);
-  if(!r) return;
+function pushReason(list, reason) {
+  const r = normalizeReason(reason);
+  if (!r) return;
 
-  if(!list.includes(r)){
+  if (!list.includes(r)) {
     list.push(r);
   }
 }
@@ -292,155 +294,248 @@ function pushReason(list,reason){
 /* ------------------------------------------------ */
 
 export async function evaluateAnomalyDetection({
+  env = {},
 
-  env={},
+  actorType = "session",
+  actorId = "",
 
-  actorType="session",
-  actorId="",
+  ip = "",
+  route = "",
+  routeSensitivity = "normal",
 
-  ip="",
-  route="",
+  riskScore = 0,
 
-  riskScore=0,
+  isWriteAction = false,
+  actionType = "",
 
-  isWriteAction=false,
-  actionType=""
+  payloadThreatResult = null,
+  abuseResult = null,
+  rateLimitResult = null,
+  freshnessResult = null,
+  risk = null
+} = {}) {
+  const safeActorType = normalizeKey(actorType);
+  const safeActorId = normalizeKey(actorId);
 
-}={}){
-
-  const safeActorType=normalizeKey(actorType);
-  const safeActorId=normalizeKey(actorId);
-
-  if(!safeActorId){
+  if (!safeActorId) {
     return {
-      anomalyScore:0,
-      level:"low",
-      action:"allow",
-      reasons:[]
+      anomalyScore: 0,
+      level: "low",
+      action: "allow",
+      reasons: [],
+      events: {
+        exploitSignals: 0,
+        breachSignals: 0,
+        coordinatedSignals: 0,
+        replaySignals: 0
+      }
     };
   }
 
-  const currentIp=normalizeIp(ip);
-  const currentRoute=normalizeRoute(route);
+  const currentIp = normalizeIp(ip);
+  const currentRoute = normalizeRoute(route);
+  const currentActionType = normalizeAction(actionType || "allow");
+  const normalizedRouteSensitivity = normalizeRouteSensitivity(routeSensitivity);
+  const safeRisk = safeInt(riskScore || risk?.riskScore, 0, 0, 100);
 
-  const previousState=
-    await getStoredState(env,safeActorType,safeActorId);
+  const payloadExploitSignals = safeInt(payloadThreatResult?.events?.exploitSignals, 0, 0, 100);
+  const payloadBreachSignals = safeInt(payloadThreatResult?.events?.breachSignals, 0, 0, 100);
+  const abuseBreachSignals = safeInt(abuseResult?.events?.breachSignals, 0, 0, 100);
+  const abuseEndpointSpread = safeInt(abuseResult?.events?.endpointSpread, 0, 0, 100);
+  const replaySignals = safeInt(freshnessResult?.events?.replaySignals, 0, 0, 100);
+  const rateHardBlockSignals = safeInt(rateLimitResult?.events?.hardBlockSignals, 0, 0, 100);
 
-  const now=Date.now();
+  const previousState = await getStoredState(env, safeActorType, safeActorId);
+  const now = Date.now();
 
-  const nextState=normalizeState({
-
+  const nextState = normalizeState({
     ...previousState,
-
-    updatedAt:now,
+    updatedAt: now,
 
     recentIps:
       currentIp
-        ? [currentIp,...previousState.recentIps.filter(v=>v!==currentIp)].slice(0,MAX_RECENT_ITEMS)
+        ? [currentIp, ...previousState.recentIps.filter((v) => v !== currentIp)].slice(0, MAX_RECENT_ITEMS)
         : previousState.recentIps,
 
     recentRoutes:
       currentRoute
-        ? [currentRoute,...previousState.recentRoutes.filter(v=>v!==currentRoute)].slice(0,MAX_RECENT_ITEMS)
+        ? [currentRoute, ...previousState.recentRoutes.filter((v) => v !== currentRoute)].slice(0, MAX_RECENT_ITEMS)
         : previousState.recentRoutes,
 
+    recentActions:
+      currentActionType
+        ? [currentActionType, ...previousState.recentActions.filter((v) => v !== currentActionType)].slice(0, MAX_RECENT_ITEMS)
+        : previousState.recentActions,
+
     recentRiskScores:
-      [safeInt(riskScore,0,0,100),...previousState.recentRiskScores]
-        .slice(0,MAX_RECENT_ITEMS)
+      [safeRisk, ...previousState.recentRiskScores].slice(0, MAX_RECENT_ITEMS),
 
-  },safeActorType,safeActorId);
+    writeActionCount: safeInt(previousState.writeActionCount, 0) + (isWriteAction ? 1 : 0),
+    exploitSignalCount: safeInt(previousState.exploitSignalCount, 0) + (payloadExploitSignals > 0 ? 1 : 0),
+    breachSignalCount: safeInt(previousState.breachSignalCount, 0) + ((payloadBreachSignals > 0 || abuseBreachSignals > 0) ? 1 : 0),
+    replaySignalCount: safeInt(previousState.replaySignalCount, 0) + (replaySignals > 0 ? 1 : 0),
+    coordinatedSignalCount: safeInt(previousState.coordinatedSignalCount, 0) + (abuseEndpointSpread >= 4 ? 1 : 0)
+  }, safeActorType, safeActorId);
 
-  /* basic anomaly scoring */
+  let score = 0;
+  let criticalSignals = 0;
+  const reasons = [];
 
-  let score=0;
-  const reasons=[];
-
-  const safeRisk=safeInt(riskScore,0,0,100);
-
-  if(safeRisk>=80){
-    score+=25;
-    pushReason(reasons,"anomaly:high_risk_alignment");
+  if (safeRisk >= 80) {
+    score += 25;
+    pushReason(reasons, "anomaly:high_risk_alignment");
+  } else if (safeRisk >= 60) {
+    score += 12;
+    pushReason(reasons, "anomaly:medium_risk_alignment");
   }
 
-  if(
+  if (
     currentIp &&
-    previousState.recentIps.length>0 &&
+    previousState.recentIps.length > 0 &&
     !previousState.recentIps.includes(currentIp)
-  ){
-    score+=20;
-    pushReason(reasons,"anomaly:ip_change_detected");
+  ) {
+    score += 20;
+    nextState.ipChangeCount = safeInt(previousState.ipChangeCount, 0) + 1;
+    pushReason(reasons, "anomaly:ip_change_detected");
   }
 
-  if(
+  if (
     currentRoute &&
     !previousState.recentRoutes.includes(currentRoute) &&
-    previousState.recentRoutes.length>=4
-  ){
-    score+=10;
-    pushReason(reasons,"anomaly:new_route_after_wide_spread");
+    previousState.recentRoutes.length >= 4
+  ) {
+    score += 10;
+    nextState.routeSpreadCount = safeInt(previousState.routeSpreadCount, 0) + 1;
+    pushReason(reasons, "anomaly:new_route_after_wide_spread");
   }
 
-  if(isWriteAction){
-    score+=8;
-    pushReason(reasons,"anomaly:write_action_pressure");
+  if (isWriteAction) {
+    score += 8;
+    pushReason(reasons, "anomaly:write_action_pressure");
   }
 
-  const anomalyScore=Math.min(100,Math.max(0,score));
+  if (normalizedRouteSensitivity === "critical") {
+    score += 10;
+    pushReason(reasons, "anomaly:critical_route_context");
+  } else if (normalizedRouteSensitivity === "high") {
+    score += 5;
+    pushReason(reasons, "anomaly:high_route_context");
+  }
 
-  const result={
+  if (payloadExploitSignals > 0) {
+    score += 28;
+    criticalSignals += 1;
+    pushReason(reasons, "anomaly:exploit_signal_detected");
+  }
+
+  if (payloadBreachSignals > 0 || abuseBreachSignals > 0) {
+    score += 35;
+    criticalSignals += 1;
+    pushReason(reasons, "anomaly:breach_signal_detected");
+  }
+
+  if (replaySignals > 0) {
+    score += 18;
+    pushReason(reasons, "anomaly:replay_signal_detected");
+    if (normalizedRouteSensitivity === "critical") {
+      criticalSignals += 1;
+    }
+  }
+
+  if (abuseEndpointSpread >= 4) {
+    score += 18;
+    pushReason(reasons, "anomaly:coordinated_route_spread");
+  }
+
+  if (rateHardBlockSignals > 0) {
+    score += 12;
+    pushReason(reasons, "anomaly:rate_limit_hard_block_signal");
+  }
+
+  if (safeInt(previousState.ipChangeCount, 0) >= 2) {
+    score += 10;
+    pushReason(reasons, "anomaly:repeated_ip_change_history");
+  }
+
+  if (safeInt(previousState.routeSpreadCount, 0) >= 2) {
+    score += 10;
+    pushReason(reasons, "anomaly:route_spread_history");
+  }
+
+  if (safeInt(previousState.exploitSignalCount, 0) >= 1) {
+    score += 15;
+    criticalSignals += 1;
+    pushReason(reasons, "anomaly:exploit_history");
+  }
+
+  if (safeInt(previousState.breachSignalCount, 0) >= 1) {
+    score += 20;
+    criticalSignals += 1;
+    pushReason(reasons, "anomaly:breach_history");
+  }
+
+  if (safeInt(previousState.replaySignalCount, 0) >= 2) {
+    score += 12;
+    pushReason(reasons, "anomaly:replay_history");
+  }
+
+  if (safeInt(previousState.coordinatedSignalCount, 0) >= 1) {
+    score += 15;
+    pushReason(reasons, "anomaly:coordinated_history");
+  }
+
+  const anomalyScore = Math.min(100, Math.max(0, score));
+
+  const result = {
     anomalyScore,
-    level:getLevel(anomalyScore),
-    action:getAction(anomalyScore),
-    reasons:reasons.slice(0,MAX_REASONS)
+    level: getLevel(anomalyScore),
+    action: getAction(anomalyScore, criticalSignals),
+    reasons: reasons.slice(0, MAX_REASONS),
+    events: {
+      exploitSignals: payloadExploitSignals > 0 ? 1 : 0,
+      breachSignals: payloadBreachSignals > 0 || abuseBreachSignals > 0 ? 1 : 0,
+      coordinatedSignals: abuseEndpointSpread >= 4 ? 1 : 0,
+      replaySignals: replaySignals > 0 ? 1 : 0,
+      criticalSignals: safeInt(criticalSignals, 0, 0, 100)
+    }
   };
 
-  const ok=await storeState(env,nextState);
+  const ok = await storeState(env, nextState);
 
-  if(ok && anomalyScore>=40){
-
-    try{
-
-      await appendSecurityEvent({
-
-        type:"anomaly_detected",
-
+  if (ok && anomalyScore >= 40) {
+    try {
+      await appendSecurityEvent(env, {
+        type: "anomaly_detected",
         severity:
-          result.level==="critical"
-            ?"critical"
-            :result.level==="high"
-            ?"warning"
-            :"info",
-
+          result.level === "critical"
+            ? "critical"
+            : result.level === "high"
+              ? "warning"
+              : "info",
         action:
-          result.action==="block" ||
-          result.action==="challenge" ||
-          result.action==="throttle"
+          result.action === "block" ||
+          result.action === "challenge" ||
+          result.action === "throttle"
             ? result.action
             : "observe",
-
-        route:currentRoute,
-        ip:currentIp,
-
-        reason:result.reasons[0] || "anomaly_detected",
-
-        message:"Behavioral anomaly detected for actor.",
-
-        metadata:{
-          actorType:safeActorType,
-          actorId:safeActorId,
-          anomalyScore:result.anomalyScore
+        route: currentRoute,
+        ip: currentIp,
+        reason: result.reasons[0] || "anomaly_detected",
+        message: "Behavioral anomaly detected for actor.",
+        metadata: {
+          actorType: safeActorType,
+          actorId: safeActorId,
+          anomalyScore: result.anomalyScore,
+          exploitSignals: result.events.exploitSignals,
+          breachSignals: result.events.breachSignals,
+          coordinatedSignals: result.events.coordinatedSignals,
+          replaySignals: result.events.replaySignals
         }
-
       });
-
-    }catch(err){
-
-      console.error("Anomaly event write failed:",err);
-
+    } catch (err) {
+      console.error("Anomaly event write failed:", err);
     }
-
   }
 
   return result;
-
 }
