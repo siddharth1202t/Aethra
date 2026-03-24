@@ -5,7 +5,8 @@ const FIREBASE_JWKS_URL =
   "https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com";
 
 const GOOGLE_ISSUER_PREFIX = "https://securetoken.google.com/";
-const JWKS_CACHE_TTL_MS = 60 * 60 * 1000;
+const DEFAULT_JWKS_CACHE_TTL_MS = 60 * 60 * 1000;
+const MAX_CLOCK_SKEW_SECONDS = 300;
 
 let jwksCache = {
   keys: null,
@@ -17,10 +18,6 @@ function safeString(value, maxLength = 300) {
     String(value ?? "").replace(/[\u0000-\u001F\u007F]/g, ""),
     maxLength
   );
-}
-
-function safeBoolean(value) {
-  return value === true;
 }
 
 function safeInt(value, fallback = 0, min = 0, max = 1_000_000_000) {
@@ -50,11 +47,9 @@ function getRequiredEnv(env = {}, name, maxLength = 5000) {
 
 function ensureProjectId(env = {}) {
   const projectId = getRequiredEnv(env, "FIREBASE_PROJECT_ID", 200);
-
   if (!projectId) {
     throw new Error("Missing Firebase project ID.");
   }
-
   return projectId;
 }
 
@@ -62,8 +57,10 @@ function getHeaderValue(req, name) {
   const headers = req?.headers;
   if (!headers || !name) return "";
 
+  const target = String(name).toLowerCase();
+
   if (typeof headers.get === "function") {
-    return safeString(headers.get(name) || "", 5000);
+    return safeString(headers.get(name) || headers.get(target) || "", 5000);
   }
 
   if (Array.isArray(headers)) {
@@ -71,7 +68,7 @@ function getHeaderValue(req, name) {
       if (
         Array.isArray(entry) &&
         entry.length >= 2 &&
-        String(entry[0]).toLowerCase() === String(name).toLowerCase()
+        String(entry[0]).toLowerCase() === target
       ) {
         return safeString(entry[1] || "", 5000);
       }
@@ -79,13 +76,8 @@ function getHeaderValue(req, name) {
     return "";
   }
 
-  const direct = headers?.[name];
-  if (direct !== undefined && direct !== null) {
-    return safeString(direct, 5000);
-  }
-
   for (const [key, value] of Object.entries(headers || {})) {
-    if (String(key).toLowerCase() === String(name).toLowerCase()) {
+    if (String(key).toLowerCase() === target) {
       return safeString(value, 5000);
     }
   }
@@ -95,42 +87,38 @@ function getHeaderValue(req, name) {
 
 function getBearerToken(req) {
   const authHeader = getHeaderValue(req, "authorization");
-
-  if (!authHeader) {
-    return "";
-  }
+  if (!authHeader) return "";
 
   const match = authHeader.match(/^Bearer\s+(.+)$/i);
-  if (!match) {
-    return "";
-  }
+  if (!match) return "";
 
   const token = safeString(match[1] || "", 4000);
+  return token && token.split(".").length === 3 ? token : "";
+}
 
-  if (!token || token.split(".").length !== 3) {
-    return "";
+function normalizeIp(value = "") {
+  let ip = safeString(value || "unknown", 100);
+  if (!ip) return "unknown";
+
+  if (ip.startsWith("::ffff:")) {
+    ip = ip.slice(7);
   }
 
-  return token;
+  ip = ip.replace(/[^a-fA-F0-9:.,]/g, "").slice(0, 100);
+  return ip || "unknown";
 }
 
 function getClientIp(req) {
-  const forwarded = getHeaderValue(req, "x-forwarded-for");
-  if (forwarded) {
-    return safeString(forwarded.split(",")[0] || "", 100);
-  }
-
   const cfIp = getHeaderValue(req, "cf-connecting-ip");
-  if (cfIp) {
-    return safeString(cfIp, 100);
-  }
+  if (cfIp) return normalizeIp(cfIp);
 
   const realIp = getHeaderValue(req, "x-real-ip");
-  if (realIp) {
-    return safeString(realIp, 100);
-  }
+  if (realIp) return normalizeIp(realIp);
 
-  return safeString(req?.ip || req?.socket?.remoteAddress || "", 100);
+  const forwarded = getHeaderValue(req, "x-forwarded-for");
+  if (forwarded) return normalizeIp(forwarded.split(",")[0] || "");
+
+  return normalizeIp(req?.ip || req?.socket?.remoteAddress || "");
 }
 
 function getOrigin(req) {
@@ -206,15 +194,42 @@ function parseJwt(token = "") {
   }
 
   const [encodedHeader, encodedPayload, encodedSignature] = parts;
+  const header = decodeJwtPart(encodedHeader);
+  const payload = decodeJwtPart(encodedPayload);
+
+  const alg = safeString(header?.alg || "", 20);
+  const typ = safeString(header?.typ || "", 20);
+  const kid = safeString(header?.kid || "", 200);
+
+  if (alg !== "RS256") {
+    throw new Error("Unsupported JWT algorithm.");
+  }
+
+  if (typ && typ !== "JWT") {
+    throw new Error("Invalid JWT type.");
+  }
+
+  if (!kid) {
+    throw new Error("JWT missing key ID.");
+  }
 
   return {
     encodedHeader,
     encodedPayload,
     encodedSignature,
     signedData: `${encodedHeader}.${encodedPayload}`,
-    header: decodeJwtPart(encodedHeader),
-    payload: decodeJwtPart(encodedPayload)
+    header,
+    payload
   };
+}
+
+function getCacheTtlMs(response) {
+  const cacheControl = safeString(response?.headers?.get?.("cache-control") || "", 500);
+  const match = cacheControl.match(/max-age=(\d+)/i);
+  if (!match) return DEFAULT_JWKS_CACHE_TTL_MS;
+
+  const seconds = safeInt(match[1], 3600, 1, 24 * 3600);
+  return seconds * 1000;
 }
 
 async function getFirebaseJwks() {
@@ -226,9 +241,7 @@ async function getFirebaseJwks() {
 
   const response = await fetch(FIREBASE_JWKS_URL, {
     method: "GET",
-    headers: {
-      accept: "application/json"
-    }
+    headers: { accept: "application/json" }
   });
 
   if (!response.ok) {
@@ -247,7 +260,7 @@ async function getFirebaseJwks() {
 
   jwksCache = {
     keys,
-    expiresAt: now + JWKS_CACHE_TTL_MS
+    expiresAt: now + getCacheTtlMs(response)
   };
 
   return keys;
@@ -257,10 +270,7 @@ async function importJwkForVerify(jwk) {
   return crypto.subtle.importKey(
     "jwk",
     jwk,
-    {
-      name: "RSASSA-PKCS1-v1_5",
-      hash: "SHA-256"
-    },
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
     false,
     ["verify"]
   );
@@ -268,11 +278,7 @@ async function importJwkForVerify(jwk) {
 
 async function verifyJwtSignature(token = "") {
   const parsed = parseJwt(token);
-  const kid = safeString(parsed?.header?.kid || "", 200);
-
-  if (!kid) {
-    throw new Error("JWT missing key ID.");
-  }
+  const kid = safeString(parsed.header?.kid || "", 200);
 
   const jwks = await getFirebaseJwks();
   const jwk = jwks.find((key) => safeString(key?.kid || "", 200) === kid);
@@ -302,7 +308,6 @@ async function verifyJwtSignature(token = "") {
 function validateDecodedToken(decodedToken = {}, projectId = "") {
   const nowSeconds = Math.floor(Date.now() / 1000);
   const issuer = `${GOOGLE_ISSUER_PREFIX}${projectId}`;
-  const audience = projectId;
 
   if (!decodedToken || typeof decodedToken !== "object") {
     throw new Error("Decoded token is invalid.");
@@ -311,12 +316,15 @@ function validateDecodedToken(decodedToken = {}, projectId = "") {
   const aud = safeString(decodedToken.aud || "", 300);
   const iss = safeString(decodedToken.iss || "", 500);
   const sub = safeString(decodedToken.sub || "", 128);
-  const uid = safeString(decodedToken.user_id || decodedToken.uid || decodedToken.sub || "", 128);
+  const uid = safeString(
+    decodedToken.user_id || decodedToken.uid || decodedToken.sub || "",
+    128
+  );
   const exp = safeInt(decodedToken.exp, 0, 0, 9_999_999_999);
   const iat = safeInt(decodedToken.iat, 0, 0, 9_999_999_999);
   const authTime = safeInt(decodedToken.auth_time, 0, 0, 9_999_999_999);
 
-  if (aud !== audience) {
+  if (aud !== projectId) {
     throw new Error("Token audience mismatch.");
   }
 
@@ -336,11 +344,11 @@ function validateDecodedToken(decodedToken = {}, projectId = "") {
     throw new Error("Token is expired.");
   }
 
-  if (iat && iat > nowSeconds + 300) {
+  if (iat && iat > nowSeconds + MAX_CLOCK_SKEW_SECONDS) {
     throw new Error("Token issued-at time is invalid.");
   }
 
-  if (authTime && authTime > nowSeconds + 300) {
+  if (authTime && authTime > nowSeconds + MAX_CLOCK_SKEW_SECONDS) {
     throw new Error("Token auth_time is invalid.");
   }
 
@@ -380,7 +388,7 @@ async function logDeniedAccess({
       type: safeString(type, 50),
       level: "warning",
       message: safeString(message, 300),
-      userId: safeString(tokenResult?.uid || tokenResult?.decodedToken?.uid || "", 128),
+      userId: safeString(tokenResult?.uid || "", 128),
       ip: getClientIp(req),
       route: normalizeRoute(route),
       metadata: {
@@ -394,16 +402,13 @@ async function logDeniedAccess({
       }
     });
   } catch {
-    // never break auth flow because logging failed
+    // do not break auth flow on log failure
   }
 }
 
 export async function verifyRequestToken(
   req,
-  {
-    env = {},
-    requireEmailVerified = false
-  } = {}
+  { env = {}, requireEmailVerified = false } = {}
 ) {
   try {
     const token = getBearerToken(req);
@@ -428,11 +433,10 @@ export async function verifyRequestToken(
         status: 403,
         code: "email_not_verified",
         message: "Verified email required.",
-        decodedToken,
+        decodedToken: null,
         claims,
         uid,
-        emailVerified,
-        disabled: false
+        emailVerified
       });
     }
 
@@ -444,8 +448,7 @@ export async function verifyRequestToken(
       decodedToken,
       claims,
       uid,
-      emailVerified,
-      disabled: false
+      emailVerified
     });
   } catch (error) {
     const message = safeString(error?.message || "", 200);
@@ -455,17 +458,14 @@ export async function verifyRequestToken(
         ? "server_auth_not_configured"
         : "invalid_token";
 
-    const status = code === "server_auth_not_configured" ? 500 : 401;
-    const responseMessage =
-      code === "server_auth_not_configured"
-        ? "Server authentication is not configured."
-        : "Invalid or expired token.";
-
     return buildRoleResult({
       ok: false,
-      status,
+      status: code === "server_auth_not_configured" ? 500 : 401,
       code,
-      message: responseMessage
+      message:
+        code === "server_auth_not_configured"
+          ? "Server authentication is not configured."
+          : "Invalid or expired token."
     });
   }
 }
@@ -493,8 +493,7 @@ export async function requireDeveloperAccess(
         type: "developer_access_denied",
         route: normalizedRoute,
         tokenResult,
-        message:
-          "Developer access denied due to missing, invalid, or unverified token",
+        message: "Developer access denied.",
         code: tokenResult.code
       });
     }
@@ -515,7 +514,7 @@ export async function requireDeveloperAccess(
         type: "developer_access_denied",
         route: normalizedRoute,
         tokenResult,
-        message: "Developer access denied due to insufficient role",
+        message: "Developer access denied due to insufficient role.",
         code: "insufficient_role"
       });
     }
@@ -563,8 +562,7 @@ export async function requireAdminAccess(
         type: "admin_access_denied",
         route: normalizedRoute,
         tokenResult,
-        message:
-          "Admin access denied due to missing, invalid, or unverified token",
+        message: "Admin access denied.",
         code: tokenResult.code
       });
     }
@@ -585,7 +583,7 @@ export async function requireAdminAccess(
         type: "admin_access_denied",
         route: normalizedRoute,
         tokenResult,
-        message: "Admin access denied due to insufficient role",
+        message: "Admin access denied due to insufficient role.",
         code: "insufficient_role"
       });
     }
