@@ -101,11 +101,18 @@ function createDefaultRiskState(actorType = "session", actorId = "") {
     lastAction: "allow",
     lastEvaluatedAt: now,
     createdAt: now,
+
     suspiciousEventCount: 0,
     challengeCount: 0,
     throttleCount: 0,
     blockCount: 0,
     hardBlockSignalCount: 0,
+
+    exploitFlagCount: 0,
+    breachFlagCount: 0,
+    replayFlagCount: 0,
+    coordinatedFlagCount: 0,
+
     trustedEventCount: 0,
     successfulAuthCount: 0,
     failedLoginCount: 0,
@@ -114,6 +121,7 @@ function createDefaultRiskState(actorType = "session", actorId = "") {
     captchaFailureCount: 0,
     rateLimitHitCount: 0,
     lockoutCount: 0,
+
     lastReasonSummary: []
   };
 }
@@ -140,11 +148,18 @@ function normalizeRiskState(raw, actorType = "session", actorId = "") {
     lastAction: normalizeAction(state.lastAction || base.lastAction),
     lastEvaluatedAt: safeInt(state.lastEvaluatedAt, base.lastEvaluatedAt, 0, nowMax),
     createdAt: safeInt(state.createdAt, base.createdAt, 0, nowMax),
+
     suspiciousEventCount: safeInt(state.suspiciousEventCount, 0),
     challengeCount: safeInt(state.challengeCount, 0),
     throttleCount: safeInt(state.throttleCount, 0),
     blockCount: safeInt(state.blockCount, 0),
     hardBlockSignalCount: safeInt(state.hardBlockSignalCount, 0),
+
+    exploitFlagCount: safeInt(state.exploitFlagCount, 0),
+    breachFlagCount: safeInt(state.breachFlagCount, 0),
+    replayFlagCount: safeInt(state.replayFlagCount, 0),
+    coordinatedFlagCount: safeInt(state.coordinatedFlagCount, 0),
+
     trustedEventCount: safeInt(state.trustedEventCount, 0),
     successfulAuthCount: safeInt(state.successfulAuthCount, 0),
     failedLoginCount: safeInt(state.failedLoginCount, 0),
@@ -153,6 +168,7 @@ function normalizeRiskState(raw, actorType = "session", actorId = "") {
     captchaFailureCount: safeInt(state.captchaFailureCount, 0),
     rateLimitHitCount: safeInt(state.rateLimitHitCount, 0),
     lockoutCount: safeInt(state.lockoutCount, 0),
+
     lastReasonSummary: normalizeReasonList(state.lastReasonSummary || [])
   };
 }
@@ -275,9 +291,9 @@ function shouldRecordRiskChange(previousState, nextState) {
   );
 }
 
-async function recordRiskStateEvent(previousState, nextState, reason = "risk_state_updated") {
+async function recordRiskStateEvent(env, previousState, nextState, reason = "risk_state_updated") {
   try {
-    await appendSecurityEvent({
+    await appendSecurityEvent(env, {
       type: "risk_state_updated",
       severity:
         nextState.currentRiskLevel === "critical"
@@ -306,7 +322,11 @@ async function recordRiskStateEvent(previousState, nextState, reason = "risk_sta
         challengeCount: nextState.challengeCount,
         throttleCount: nextState.throttleCount,
         blockCount: nextState.blockCount,
-        hardBlockSignalCount: nextState.hardBlockSignalCount
+        hardBlockSignalCount: nextState.hardBlockSignalCount,
+        exploitFlagCount: nextState.exploitFlagCount,
+        breachFlagCount: nextState.breachFlagCount,
+        replayFlagCount: nextState.replayFlagCount,
+        coordinatedFlagCount: nextState.coordinatedFlagCount
       }
     });
   } catch (error) {
@@ -359,7 +379,7 @@ export async function updateRiskState({
     riskResult?.level || getLevelFromScore(nextRiskScore)
   );
   const nextAction = normalizeAction(
-    riskResult?.action || currentState.lastAction || "allow"
+    riskResult?.finalAction || riskResult?.action || currentState.lastAction || "allow"
   );
 
   const nextState = normalizeRiskState(
@@ -371,49 +391,78 @@ export async function updateRiskState({
       currentRiskLevel: nextRiskLevel,
       lastAction: nextAction,
       lastEvaluatedAt: now,
+
       suspiciousEventCount:
         currentState.suspiciousEventCount +
         safeInt(increments.suspiciousEventCount, 0),
+
       challengeCount:
         currentState.challengeCount +
-        (nextAction === "challenge" ? 1 : 0) +
         safeInt(increments.challengeCount, 0),
+
       throttleCount:
         currentState.throttleCount +
-        (nextAction === "throttle" ? 1 : 0) +
         safeInt(increments.throttleCount, 0),
+
       blockCount:
         currentState.blockCount +
-        (nextAction === "block" ? 1 : 0) +
         safeInt(increments.blockCount, 0),
+
       hardBlockSignalCount:
         currentState.hardBlockSignalCount +
         safeInt(riskResult?.hardBlockSignals, 0, 0, 100) +
         safeInt(increments.hardBlockSignalCount, 0),
+
+      exploitFlagCount:
+        currentState.exploitFlagCount +
+        safeInt(increments.exploitFlagCount, 0) +
+        (safeInt(riskResult?.criticalSignals, 0, 0, 100) > 0 ? 1 : 0),
+
+      breachFlagCount:
+        currentState.breachFlagCount +
+        safeInt(increments.breachFlagCount, 0) +
+        (riskResult?.criticalAttackLikely === true ? 1 : 0),
+
+      replayFlagCount:
+        currentState.replayFlagCount +
+        safeInt(increments.replayFlagCount, 0),
+
+      coordinatedFlagCount:
+        currentState.coordinatedFlagCount +
+        safeInt(increments.coordinatedFlagCount, 0),
+
       trustedEventCount:
         currentState.trustedEventCount +
         safeInt(increments.trustedEventCount, 0),
+
       successfulAuthCount:
         currentState.successfulAuthCount +
         safeInt(increments.successfulAuthCount, 0),
+
       failedLoginCount:
         currentState.failedLoginCount +
         safeInt(increments.failedLoginCount, 0),
+
       failedSignupCount:
         currentState.failedSignupCount +
         safeInt(increments.failedSignupCount, 0),
+
       failedPasswordResetCount:
         currentState.failedPasswordResetCount +
         safeInt(increments.failedPasswordResetCount, 0),
+
       captchaFailureCount:
         currentState.captchaFailureCount +
         safeInt(increments.captchaFailureCount, 0),
+
       rateLimitHitCount:
         currentState.rateLimitHitCount +
         safeInt(increments.rateLimitHitCount, 0),
+
       lockoutCount:
         currentState.lockoutCount +
         safeInt(increments.lockoutCount, 0),
+
       lastReasonSummary: buildMergedReasons(
         currentState.lastReasonSummary,
         Array.isArray(riskResult?.reasons) ? riskResult.reasons : [reason]
@@ -426,7 +475,7 @@ export async function updateRiskState({
   const ok = await storeRiskState(env, nextState);
 
   if (ok && shouldRecordRiskChange(currentState, nextState)) {
-    await recordRiskStateEvent(currentState, nextState, reason || "risk_state_updated");
+    await recordRiskStateEvent(env, currentState, nextState, reason || "risk_state_updated");
   }
 
   return {
@@ -457,7 +506,7 @@ export async function clearRiskState({
 
   if (ok) {
     try {
-      await appendSecurityEvent({
+      await appendSecurityEvent(env, {
         type: "risk_state_cleared",
         severity: "info",
         action: "observe",
