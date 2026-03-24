@@ -1,4 +1,5 @@
 import { updateSecurityState } from "./_security-state-manager.js";
+import { appendSecurityEvent } from "./_security-event-store.js";
 
 const ALLOWED_LEVELS = new Set([
   "info",
@@ -343,10 +344,7 @@ async function createServiceJwt(env) {
 async function getAccessToken(env) {
   const now = Date.now();
 
-  if (
-    tokenCache.accessToken &&
-    tokenCache.expiresAt > now + 60 * 1000
-  ) {
+  if (tokenCache.accessToken && tokenCache.expiresAt > now + 60 * 1000) {
     return tokenCache.accessToken;
   }
 
@@ -382,6 +380,13 @@ async function getAccessToken(env) {
   };
 
   return accessToken;
+}
+
+function clearAccessTokenCache() {
+  tokenCache = {
+    accessToken: "",
+    expiresAt: 0
+  };
 }
 
 function toFirestoreValue(value) {
@@ -447,7 +452,7 @@ function toFirestoreDocumentFields(data) {
   return fields;
 }
 
-async function writeFirestoreDocument(env, collectionName, documentId, payload) {
+async function writeFirestoreDocument(env, collectionName, documentId, payload, retry = true) {
   const projectId = getRequiredEnv(env, "FIREBASE_PROJECT_ID", 200);
   const accessToken = await getAccessToken(env);
 
@@ -469,6 +474,12 @@ async function writeFirestoreDocument(env, collectionName, documentId, payload) 
 
   if (!response.ok) {
     const errorText = await response.text().catch(() => "");
+
+    if ((response.status === 401 || response.status === 403) && retry) {
+      clearAccessTokenCache();
+      return writeFirestoreDocument(env, collectionName, documentId, payload, false);
+    }
+
     throw new Error(
       `Firestore write failed: ${response.status} ${safeString(errorText, 500)}`
     );
@@ -528,6 +539,7 @@ export async function writeSecurityLog(data = {}) {
         source
       }));
 
+    const includeRawIdentity = data.includeRawIdentity === true;
     const now = Date.now();
 
     const log = {
@@ -536,10 +548,10 @@ export async function writeSecurityLog(data = {}) {
       level,
       severityScore,
       message,
-      email,
+      email: includeRawIdentity ? email : "",
       emailHash,
       userId,
-      ip,
+      ip: includeRawIdentity ? ip : "",
       ipHash,
       route,
       routeGroup,
@@ -551,6 +563,26 @@ export async function writeSecurityLog(data = {}) {
     };
 
     await writeFirestoreDocument(env, "securityLogs", eventId, log);
+
+    try {
+      await appendSecurityEvent(env, {
+        type,
+        severity: level === "error" ? "error" : level,
+        action: level === "critical" ? "contain" : "observe",
+        route,
+        ip: includeRawIdentity ? ip : "",
+        userId,
+        reason: type,
+        message,
+        metadata: {
+          routeGroup,
+          source,
+          fingerprint
+        }
+      });
+    } catch (eventStoreError) {
+      console.error("appendSecurityEvent failed:", eventStoreError);
+    }
 
     try {
       await updateSecurityState({
