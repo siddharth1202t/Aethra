@@ -1,4 +1,4 @@
-import { redis } from "./_redis.js";
+import { getRedis } from "./_redis.js";
 
 const SECURITY_EVENTS_KEY = "security:events:recent";
 const SECURITY_EVENTS_MAX_ITEMS = 100;
@@ -175,6 +175,8 @@ function normalizeStoredEvent(raw) {
     ip: normalizeIp(event.ip || ""),
     sessionId: safeString(event.sessionId || "", 120),
     userId: safeString(event.userId || "", 120),
+    actorKey: safeString(event.actorKey || "", 240),
+    requestId: safeString(event.requestId || "", 120),
     mode: safeString(event.mode || "", 30).toLowerCase(),
     reason: safeString(event.reason || "", 300),
     message: safeString(event.message || "", 500),
@@ -182,7 +184,9 @@ function normalizeStoredEvent(raw) {
   };
 }
 
-async function getStoredEvents() {
+async function getStoredEvents(env = {}) {
+  const redis = getRedis(env);
+
   try {
     const raw = await redis.get(SECURITY_EVENTS_KEY);
 
@@ -214,7 +218,9 @@ function sortEventsNewestFirst(events = []) {
   );
 }
 
-async function storeEvents(events = []) {
+async function storeEvents(env = {}, events = []) {
+  const redis = getRedis(env);
+
   try {
     const normalizedEvents = Array.isArray(events)
       ? sortEventsNewestFirst(events.map(normalizeStoredEvent)).slice(
@@ -234,38 +240,47 @@ async function storeEvents(events = []) {
   }
 }
 
-export async function appendSecurityEvent({
-  type = "security_event",
-  severity = "info",
-  action = "observe",
-  route = "",
-  ip = "",
-  sessionId = "",
-  userId = "",
-  mode = "",
-  reason = "",
-  message = "",
-  metadata = {}
-} = {}) {
+function extractAppendArgs(arg1, arg2) {
+  // supports both:
+  // appendSecurityEvent(env, event)
+  // appendSecurityEvent(event)
+  if (arg2 !== undefined) {
+    return {
+      env: arg1 && typeof arg1 === "object" ? arg1 : {},
+      event: arg2 && typeof arg2 === "object" ? arg2 : {}
+    };
+  }
+
+  return {
+    env: {},
+    event: arg1 && typeof arg1 === "object" ? arg1 : {}
+  };
+}
+
+export async function appendSecurityEvent(arg1 = {}, arg2 = undefined) {
+  const { env, event: rawEvent } = extractAppendArgs(arg1, arg2);
+
   const event = normalizeStoredEvent({
     id: createEventId(),
     timestamp: Date.now(),
-    type,
-    severity,
-    action,
-    route,
-    ip,
-    sessionId,
-    userId,
-    mode,
-    reason,
-    message,
-    metadata
+    type: rawEvent.type,
+    severity: rawEvent.severity,
+    action: rawEvent.action,
+    route: rawEvent.route,
+    ip: rawEvent.ip,
+    sessionId: rawEvent.sessionId,
+    userId: rawEvent.userId,
+    actorKey: rawEvent.actorKey,
+    requestId: rawEvent.requestId,
+    mode: rawEvent.mode,
+    reason: rawEvent.reason,
+    message: rawEvent.message,
+    metadata: rawEvent.metadata
   });
 
-  const currentEvents = await getStoredEvents();
+  const currentEvents = await getStoredEvents(env);
   const nextEvents = [event, ...currentEvents];
-  const ok = await storeEvents(nextEvents);
+  const ok = await storeEvents(env, nextEvents);
 
   return {
     ok,
@@ -273,40 +288,40 @@ export async function appendSecurityEvent({
   };
 }
 
-export async function getRecentSecurityEvents({
-  limit = 50,
-  severity = "",
-  action = "",
-  type = ""
-} = {}) {
-  const safeLimit = safeInt(limit, 50, 1, SECURITY_EVENTS_MAX_ITEMS);
-  const normalizedSeverity = severity ? normalizeSeverity(severity) : "";
-  const normalizedAction = action ? normalizeAction(action) : "";
-  const normalizedType = type ? normalizeEventType(type) : "";
+export async function getRecentSecurityEvents(envOrOptions = {}, maybeOptions = undefined) {
+  let env = {};
+  let options = {};
 
-  const events = sortEventsNewestFirst(await getStoredEvents());
+  if (maybeOptions !== undefined) {
+    env = envOrOptions && typeof envOrOptions === "object" ? envOrOptions : {};
+    options = maybeOptions && typeof maybeOptions === "object" ? maybeOptions : {};
+  } else {
+    options = envOrOptions && typeof envOrOptions === "object" ? envOrOptions : {};
+  }
+
+  const safeLimit = safeInt(options.limit, 50, 1, SECURITY_EVENTS_MAX_ITEMS);
+  const normalizedSeverity = options.severity ? normalizeSeverity(options.severity) : "";
+  const normalizedAction = options.action ? normalizeAction(options.action) : "";
+  const normalizedType = options.type ? normalizeEventType(options.type) : "";
+  const normalizedUserId = options.userId ? safeString(options.userId, 120) : "";
+  const normalizedActorKey = options.actorKey ? safeString(options.actorKey, 240) : "";
+
+  const events = sortEventsNewestFirst(await getStoredEvents(env));
 
   const filtered = events.filter((event) => {
-    if (normalizedSeverity && event.severity !== normalizedSeverity) {
-      return false;
-    }
-
-    if (normalizedAction && event.action !== normalizedAction) {
-      return false;
-    }
-
-    if (normalizedType && event.type !== normalizedType) {
-      return false;
-    }
-
+    if (normalizedSeverity && event.severity !== normalizedSeverity) return false;
+    if (normalizedAction && event.action !== normalizedAction) return false;
+    if (normalizedType && event.type !== normalizedType) return false;
+    if (normalizedUserId && event.userId !== normalizedUserId) return false;
+    if (normalizedActorKey && event.actorKey !== normalizedActorKey) return false;
     return true;
   });
 
   return filtered.slice(0, safeLimit);
 }
 
-export async function clearSecurityEvents() {
-  const ok = await storeEvents([]);
+export async function clearSecurityEvents(env = {}) {
+  const ok = await storeEvents(env, []);
 
   return {
     ok,
