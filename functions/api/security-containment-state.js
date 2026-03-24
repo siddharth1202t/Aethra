@@ -64,12 +64,16 @@ function buildFlags(flags = {}) {
     readOnlyMode: flags?.readOnlyMode === true,
     disableUploads: flags?.disableUploads === true,
     forceCaptcha: flags?.forceCaptcha === true,
-    lockdown: flags?.lockdown === true
+    lockdown: flags?.lockdown === true,
+    lockAccount: flags?.lockAccount === true,
+    killSessions: flags?.killSessions === true,
+    blockActor: flags?.blockActor === true
   };
 }
 
 export async function onRequestGet(context) {
   const origin = context.request.headers.get("origin") || "";
+  const { env } = context;
 
   try {
     const normalizedOrigin = normalizeOrigin(origin);
@@ -85,7 +89,7 @@ export async function onRequestGet(context) {
       );
     }
 
-    const state = await getContainmentState();
+    const state = await getContainmentState(env);
 
     return jsonResponse(origin, {
       success: true,
