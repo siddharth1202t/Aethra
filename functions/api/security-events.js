@@ -30,18 +30,26 @@ function json(data, status = 200) {
   });
 }
 
+function normalizeIp(ip = "") {
+  return safeString(ip || "unknown", 100)
+    .replace(/[^a-fA-F0-9:.,]/g, "")
+    .slice(0, 100) || "unknown";
+}
+
 function getClientIp(request) {
+  const cfIp = request.headers.get("cf-connecting-ip");
+  if (cfIp) {
+    return normalizeIp(cfIp);
+  }
 
   const forwarded = request.headers.get("x-forwarded-for");
-
   if (forwarded) {
-    return forwarded.split(",")[0].trim().slice(0, 100);
+    return normalizeIp(forwarded.split(",")[0].trim());
   }
 
   const realIp = request.headers.get("x-real-ip");
-
   if (realIp) {
-    return realIp.trim().slice(0, 100);
+    return normalizeIp(realIp.trim());
   }
 
   return "unknown";
@@ -55,7 +63,6 @@ function buildUnauthorizedResponse() {
 }
 
 function parseLimit(value) {
-
   const num = Number(value);
 
   if (!Number.isFinite(num)) {
@@ -67,11 +74,9 @@ function parseLimit(value) {
 
 /* ---------------- event logs ---------------- */
 
-async function recordUnauthorizedAccess({ ip, method }) {
-
+async function recordUnauthorizedAccess({ env, ip, method }) {
   try {
-
-    await appendSecurityEvent({
+    await appendSecurityEvent(env, {
       type: "admin_endpoint_unauthorized",
       severity: "warning",
       action: "block",
@@ -83,25 +88,21 @@ async function recordUnauthorizedAccess({ ip, method }) {
         method
       }
     });
-
   } catch (error) {
-
     console.error("Security events unauthorized event write failed:", error);
-
   }
 }
 
 async function recordAuthorizedAccess({
+  env,
   ip,
   eventCount,
   mode,
   containmentMode,
   filters
 }) {
-
   try {
-
-    await appendSecurityEvent({
+    await appendSecurityEvent(env, {
       type: "security_events_accessed",
       severity: "info",
       action: "observe",
@@ -119,30 +120,23 @@ async function recordAuthorizedAccess({
         limit: filters.limit
       }
     });
-
   } catch (error) {
-
     console.error("Security events access event write failed:", error);
-
   }
 }
 
 /* ---------------- main handler ---------------- */
 
 export async function onRequest(context) {
-
   const { request, env } = context;
 
   if (request.method !== "GET") {
-
-    const response = buildMethodNotAllowedResponse(["GET"]);
-    return json(response.body, response.status);
+    return json(buildMethodNotAllowedResponse(), 405);
   }
 
   const clientIp = getClientIp(request);
 
   try {
-
     const adminKey = safeString(
       request.headers.get("x-security-admin-key") || "",
       200
@@ -152,8 +146,8 @@ export async function onRequest(context) {
       !env.SECURITY_ADMIN_API_KEY ||
       adminKey !== env.SECURITY_ADMIN_API_KEY
     ) {
-
       await writeSecurityLog({
+        env,
         type: "security_events_unauthorized",
         level: "warning",
         route: ROUTE,
@@ -165,6 +159,7 @@ export async function onRequest(context) {
       });
 
       await recordUnauthorizedAccess({
+        env,
         ip: clientIp,
         method: request.method
       });
@@ -175,19 +170,15 @@ export async function onRequest(context) {
     const url = new URL(request.url);
 
     const filters = {
-
       limit: parseLimit(url.searchParams.get("limit")),
-
       severity: safeString(
         url.searchParams.get("severity") || "",
         20
       ).toLowerCase(),
-
       action: safeString(
         url.searchParams.get("action") || "",
         20
       ).toLowerCase(),
-
       type: safeString(
         url.searchParams.get("type") || "",
         80
@@ -195,12 +186,13 @@ export async function onRequest(context) {
     };
 
     const [events, adaptiveState, containmentState] = await Promise.all([
-      getRecentSecurityEvents(filters),
-      getAdaptiveThreatMode(),
-      getContainmentState()
+      getRecentSecurityEvents(env, filters),
+      getAdaptiveThreatMode(env),
+      getContainmentState(env)
     ]);
 
     await writeSecurityLog({
+      env,
       type: "security_events_accessed",
       level: "info",
       route: ROUTE,
@@ -216,6 +208,7 @@ export async function onRequest(context) {
     });
 
     await recordAuthorizedAccess({
+      env,
       ip: clientIp,
       eventCount: events.length,
       mode: adaptiveState?.mode || "normal",
@@ -227,31 +220,30 @@ export async function onRequest(context) {
       ok: true,
       timestamp: new Date().toISOString(),
       count: events.length,
-
       filters: {
         limit: filters.limit,
         severity: filters.severity || "",
         action: filters.action || "",
         type: filters.type || ""
       },
-
       mode: adaptiveState?.mode || "normal",
       containmentMode: containmentState?.mode || "normal",
       events
     });
-
   } catch (error) {
-
-    await writeSecurityLog({
-      type: "security_events_error",
-      level: "error",
-      route: ROUTE,
-      ip: clientIp,
-      message: "Failed to fetch security events.",
-      metadata: {
-        error: error instanceof Error ? error.message : "unknown_error"
-      }
-    });
+    try {
+      await writeSecurityLog({
+        env,
+        type: "security_events_error",
+        level: "error",
+        route: ROUTE,
+        ip: clientIp,
+        message: "Failed to fetch security events.",
+        metadata: {
+          error: error instanceof Error ? error.message : "unknown_error"
+        }
+      });
+    } catch {}
 
     return json({
       ok: false,
