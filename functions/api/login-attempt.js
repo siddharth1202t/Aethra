@@ -6,8 +6,6 @@ import {
   safeString,
   safePositiveInt,
   sanitizeBody,
-  sanitizeMetadata,
-  buildBlockedResponse,
   buildMethodNotAllowedResponse
 } from "./_api-security.js";
 
@@ -21,10 +19,6 @@ const STALE_RECORD_TTL_MS = 24 * 60 * 60 * 1000;
 const ROUTE = "/api/login-attempt";
 const MAX_BODY_KEYS = 25;
 const MAX_CONTENT_LENGTH_BYTES = 12 * 1024;
-
-const GOOGLE_PLACEHOLDER_EMAIL = "google-login";
-
-/* ---------------- crypto fingerprint (WebCrypto) ---------------- */
 
 async function buildAttemptFingerprint({ email, ip, action, actionLabel }) {
   const encoder = new TextEncoder();
@@ -46,8 +40,6 @@ async function buildAttemptFingerprint({ email, ip, action, actionLabel }) {
     .join("")
     .slice(0, 32);
 }
-
-/* ---------------- helpers ---------------- */
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -99,6 +91,16 @@ function createDefaultRecord(now = Date.now()) {
   };
 }
 
+function normalizeRecord(raw, now = Date.now()) {
+  const record = raw && typeof raw === "object" ? raw : {};
+  return {
+    count: safePositiveInt(record.count, 0),
+    lockUntil: safePositiveInt(record.lockUntil, 0),
+    lastAttempt: safePositiveInt(record.lastAttempt, now),
+    escalationCount: safePositiveInt(record.escalationCount, 0)
+  };
+}
+
 async function getStoredRecord(redis, key) {
   const now = Date.now();
 
@@ -107,9 +109,15 @@ async function getStoredRecord(redis, key) {
 
     if (!raw) return createDefaultRecord(now);
 
-    return typeof raw === "string"
-      ? JSON.parse(raw)
-      : raw;
+    if (typeof raw === "string") {
+      return normalizeRecord(JSON.parse(raw), now);
+    }
+
+    if (typeof raw === "object") {
+      return normalizeRecord(raw, now);
+    }
+
+    return createDefaultRecord(now);
   } catch {
     return createDefaultRecord(now);
   }
@@ -117,13 +125,10 @@ async function getStoredRecord(redis, key) {
 
 async function saveStoredRecord(redis, key, record) {
   const ttlSeconds = Math.max(1, Math.ceil(STALE_RECORD_TTL_MS / 1000));
-  await redis.set(key, JSON.stringify(record), { ex: ttlSeconds });
+  await redis.set(key, JSON.stringify(normalizeRecord(record)), { ex: ttlSeconds });
 }
 
-/* ---------------- main handler ---------------- */
-
 export async function onRequest(context) {
-
   const { request, env } = context;
   const redis = getRedis(env);
 
@@ -144,9 +149,7 @@ export async function onRequest(context) {
     }, 415);
   }
 
-  const contentLength = Number(
-    request.headers.get("content-length") || 0
-  );
+  const contentLength = Number(request.headers.get("content-length") || 0);
 
   if (contentLength > MAX_CONTENT_LENGTH_BYTES) {
     return json({
@@ -156,7 +159,6 @@ export async function onRequest(context) {
   }
 
   try {
-
     const bodyRaw = await request.json();
     const body = sanitizeBody(bodyRaw, MAX_BODY_KEYS);
 
@@ -165,13 +167,51 @@ export async function onRequest(context) {
     const actionLabel = safeString(body.actionLabel, 100);
 
     const actor = createActorContext({
-      request,
+      req: request,
       body,
       route: `${ROUTE}:${action || "unknown"}`
     });
 
     const ip = normalizeIp(actor.ip);
     const now = Date.now();
+
+    const security = await runSecurityOrchestrator({
+      env,
+      req: request,
+      body,
+      route: `${ROUTE}:${action || "unknown"}`,
+      abuseSuccess: action !== "fail",
+      containmentConfig: {
+        isWriteAction: true,
+        actionType: "auth_attempt",
+        routeSensitivity: "critical"
+      },
+      rateLimitConfig: {
+        key: `login-attempt:${actor.actorKey}`,
+        limit: 20,
+        windowMs: 60 * 1000
+      }
+    });
+
+    if (security?.risk?.finalAction === "block") {
+      await writeSecurityLog({
+        env,
+        type: "login_attempt_blocked",
+        level: "warning",
+        message: "Login attempt request blocked by security orchestrator",
+        ip,
+        route: ROUTE,
+        metadata: {
+          finalAction: security?.risk?.finalAction,
+          riskScore: security?.risk?.riskScore
+        }
+      });
+
+      return json({
+        success: false,
+        message: "Request blocked."
+      }, 403);
+    }
 
     const fingerprint = await buildAttemptFingerprint({
       email: rawEmail,
@@ -181,7 +221,7 @@ export async function onRequest(context) {
     });
 
     const ipRedisKey = buildIpAttemptKey(ip);
-    const userRedisKey = buildLoginAttemptKey(rawEmail, ip);
+    const userRedisKey = buildLoginAttemptKey(rawEmail || "anon", ip);
 
     const ipRecord = await getStoredRecord(redis, ipRedisKey);
     const record = await getStoredRecord(redis, userRedisKey);
@@ -195,8 +235,16 @@ export async function onRequest(context) {
       });
     }
 
-    if (action === "check") {
+    if (record.lockUntil > now && action !== "success") {
+      return json({
+        success: true,
+        isLocked: true,
+        remainingMs: record.lockUntil - now,
+        lockType: "user"
+      });
+    }
 
+    if (action === "check") {
       const isLocked = record.lockUntil > now;
 
       return json({
@@ -207,8 +255,23 @@ export async function onRequest(context) {
       });
     }
 
-    if (action === "fail") {
+    if (action === "success") {
+      record.count = 0;
+      record.lockUntil = 0;
+      record.lastAttempt = now;
 
+      await saveStoredRecord(redis, userRedisKey, record);
+
+      return json({
+        success: true,
+        isLocked: false,
+        remainingMs: 0,
+        lockType: "none",
+        fingerprint
+      });
+    }
+
+    if (action === "fail") {
       record.count += 1;
       ipRecord.count += 1;
 
@@ -233,6 +296,22 @@ export async function onRequest(context) {
       const isUserLocked = record.lockUntil > now;
       const isIpLocked = ipRecord.lockUntil > now;
 
+      if (isUserLocked || isIpLocked) {
+        await writeSecurityLog({
+          env,
+          type: "login_lockout_triggered",
+          level: "warning",
+          message: "Login lockout triggered after repeated failed attempts",
+          ip,
+          route: ROUTE,
+          metadata: {
+            lockType: isUserLocked ? "user" : "ip",
+            attempts: record.count,
+            ipAttempts: ipRecord.count
+          }
+        });
+      }
+
       return json({
         success: true,
         isLocked: isUserLocked || isIpLocked,
@@ -250,20 +329,21 @@ export async function onRequest(context) {
       success: false,
       message: "Invalid request."
     }, 400);
-
   } catch (error) {
-
     console.error("Login attempt API error:", error);
 
-    await writeSecurityLog({
-      type: "login_attempt_api_error",
-      level: "error",
-      message: "Unhandled server error",
-      route: ROUTE,
-      metadata: {
-        error: safeString(error?.message || "Unknown error", 500)
-      }
-    });
+    try {
+      await writeSecurityLog({
+        env,
+        type: "login_attempt_api_error",
+        level: "error",
+        message: "Unhandled server error",
+        route: ROUTE,
+        metadata: {
+          error: safeString(error?.message || "Unknown error", 500)
+        }
+      });
+    } catch {}
 
     return json({
       success: false,
