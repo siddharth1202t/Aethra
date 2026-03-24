@@ -61,7 +61,12 @@ function normalizeCounters(input = {}) {
     repeatedOffenderSignals: safeInt(counters.repeatedOffenderSignals),
     lockdownTriggers: safeInt(counters.lockdownTriggers),
     highRiskStateSignals: safeInt(counters.highRiskStateSignals),
-    routePressureSignals: safeInt(counters.routePressureSignals)
+    routePressureSignals: safeInt(counters.routePressureSignals),
+
+    burstSignals: safeInt(counters.burstSignals),
+    coordinatedAttackSignals: safeInt(counters.coordinatedAttackSignals),
+    breachAttemptSignals: safeInt(counters.breachAttemptSignals),
+    exploitAttemptSignals: safeInt(counters.exploitAttemptSignals)
   };
 
   const totalSum = Object.values(normalized).reduce((a, b) => a + b, 0);
@@ -84,7 +89,22 @@ function normalizeContainment(containment = {}) {
     disableUploads: flags.disableUploads === true,
     forceCaptcha: flags.forceCaptcha === true,
     readOnlyMode: flags.readOnlyMode === true,
-    lockdown: flags.lockdown === true
+    lockdown: flags.lockdown === true,
+    lockAccount: flags.lockAccount === true,
+    killSessions: flags.killSessions === true,
+    blockActor: flags.blockActor === true
+  };
+}
+
+function normalizeThreatSnapshot(threatSnapshot = {}) {
+  const safeThreatSnapshot = sanitizeObject(threatSnapshot);
+
+  return {
+    activeThreats: safeInt(safeThreatSnapshot.activeThreats, 0),
+    exploitSignals: safeInt(safeThreatSnapshot.exploitSignals, 0),
+    breachSignals: safeInt(safeThreatSnapshot.breachSignals, 0),
+    coordinatedSignals: safeInt(safeThreatSnapshot.coordinatedSignals, 0),
+    replaySignals: safeInt(safeThreatSnapshot.replaySignals, 0)
   };
 }
 
@@ -99,14 +119,19 @@ function detectAnomaly(c) {
 function calculateThreatPressure(mode, counters, timestamp) {
   let pressure = 0;
 
-  pressure += Math.min(20, counters.totalSignals * 2);
-  pressure += Math.min(20, counters.criticalSignals * 5);
-  pressure += Math.min(15, counters.blockSignals * 4);
-  pressure += Math.min(10, counters.challengeSignals * 2);
-  pressure += Math.min(15, counters.repeatedOffenderSignals * 4);
-  pressure += Math.min(10, counters.lockdownTriggers * 5);
+  pressure += Math.min(15, counters.totalSignals * 2);
+  pressure += Math.min(15, counters.criticalSignals * 4);
+  pressure += Math.min(10, counters.blockSignals * 3);
+  pressure += Math.min(8, counters.challengeSignals * 2);
+  pressure += Math.min(10, counters.repeatedOffenderSignals * 3);
+  pressure += Math.min(8, counters.lockdownTriggers * 5);
   pressure += Math.min(5, counters.highRiskStateSignals * 2);
   pressure += Math.min(5, counters.routePressureSignals * 2);
+
+  pressure += Math.min(8, counters.burstSignals * 3);
+  pressure += Math.min(10, counters.coordinatedAttackSignals * 4);
+  pressure += Math.min(12, counters.breachAttemptSignals * 5);
+  pressure += Math.min(12, counters.exploitAttemptSignals * 5);
 
   if (mode === "elevated") pressure = Math.max(pressure, 35);
   if (mode === "defense") pressure = Math.max(pressure, 65);
@@ -157,11 +182,11 @@ export function buildSecurityStatus({
   timestamp = Date.now()
 } = {}) {
   const safeAdaptiveState = sanitizeObject(adaptiveState);
-  const safeThreatSnapshot = sanitizeObject(threatSnapshot);
+  const normalizedThreatSnapshot = normalizeThreatSnapshot(threatSnapshot);
 
   let mode = normalizeMode(safeAdaptiveState.mode);
-
   const counters = normalizeCounters(safeAdaptiveState.counters);
+
   if (!counters) {
     return deepFreeze({
       ok: false,
@@ -186,7 +211,18 @@ export function buildSecurityStatus({
     counters.criticalSignals +
     counters.blockSignals +
     counters.repeatedOffenderSignals +
-    safeInt(safeThreatSnapshot.activeThreats);
+    counters.coordinatedAttackSignals +
+    counters.breachAttemptSignals +
+    counters.exploitAttemptSignals +
+    normalizedThreatSnapshot.activeThreats;
+
+  const criticalAttackLikely =
+    mode === "lockdown" ||
+    counters.breachAttemptSignals > 0 ||
+    counters.exploitAttemptSignals > 0 ||
+    normalizedThreatSnapshot.breachSignals > 0 ||
+    normalizedThreatSnapshot.exploitSignals > 0 ||
+    normalizedThreatSnapshot.coordinatedSignals > 0;
 
   const response = {
     ok: true,
@@ -194,6 +230,7 @@ export function buildSecurityStatus({
     mode,
     threatPressure,
     activeThreats,
+    criticalAttackLikely,
     systemHealth: normalizeHealth(mode, threatPressure),
     adaptive: {
       updatedAt: normalizeTimestamp(safeAdaptiveState.updatedAt, 0),
@@ -206,6 +243,7 @@ export function buildSecurityStatus({
       )
     },
     counters,
+    threatSnapshot: normalizedThreatSnapshot,
     containment: normalizedContainment
   };
 
