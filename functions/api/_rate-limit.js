@@ -12,6 +12,9 @@ const PENALTY_REAPPLY_GUARD_MS = 60 * 1000;
 const BURST_WINDOW_MS = 15 * 1000;
 const VIOLATION_DECAY_MS = 30 * 60 * 1000;
 
+const MAX_LIMIT = 10_000;
+const MAX_WINDOW_MS = 24 * 60 * 60 * 1000;
+
 function safeNumber(value, fallback = 0) {
   const num = Number(value);
   return Number.isFinite(num) ? num : fallback;
@@ -112,7 +115,10 @@ function getRouteSensitivity(route) {
     normalized.includes("admin") ||
     normalized.includes("developer") ||
     normalized.includes("role") ||
-    normalized.includes("claims")
+    normalized.includes("claims") ||
+    normalized.includes("security") ||
+    normalized.includes("containment") ||
+    normalized.includes("metrics")
   ) {
     return "critical";
   }
@@ -121,7 +127,9 @@ function getRouteSensitivity(route) {
     normalized.includes("login") ||
     normalized.includes("signup") ||
     normalized.includes("verify") ||
-    normalized.includes("security-log")
+    normalized.includes("auth") ||
+    normalized.includes("password") ||
+    normalized.includes("session")
   ) {
     return "high";
   }
@@ -220,6 +228,7 @@ function applyPenalty(record, now, routeSensitivity = "normal") {
 
   record.penaltyUntil = now + penaltyMs;
   record.lastPenaltyAppliedAt = now;
+  return penaltyMs;
 }
 
 function updateBurstMemory(record, now) {
@@ -239,15 +248,11 @@ async function getStoredRecord(redis, redisKey, now) {
   try {
     const raw = await redis.get(redisKey);
 
-    if (!raw) {
-      return null;
-    }
+    if (!raw) return null;
 
     if (typeof raw === "string") {
       const parsed = safeJsonParse(raw, null);
-      if (!parsed || typeof parsed !== "object") {
-        return null;
-      }
+      if (!parsed || typeof parsed !== "object") return null;
       return normalizeRecord(parsed, now);
     }
 
@@ -288,8 +293,8 @@ export async function checkApiRateLimit(options = {}) {
   } else {
     env = options.env || {};
     key = normalizeKey(options.key);
-    limit = Math.max(1, normalizePositiveInteger(options.limit, DEFAULT_LIMIT));
-    windowMs = Math.max(1_000, normalizePositiveInteger(options.windowMs, DEFAULT_WINDOW_MS));
+    limit = Math.max(1, Math.min(MAX_LIMIT, normalizePositiveInteger(options.limit, DEFAULT_LIMIT)));
+    windowMs = Math.max(1_000, Math.min(MAX_WINDOW_MS, normalizePositiveInteger(options.windowMs, DEFAULT_WINDOW_MS)));
     route = normalizeRoute(options.route);
   }
 
@@ -299,7 +304,6 @@ export async function checkApiRateLimit(options = {}) {
   const redisKey = buildRedisKey(key);
 
   let record = await getStoredRecord(redis, redisKey, now);
-
   if (!record) {
     record = createEmptyRecord(now);
   }
@@ -313,8 +317,7 @@ export async function checkApiRateLimit(options = {}) {
 
   const penaltyActiveBefore = safeTimestamp(record.penaltyUntil, 0) > now;
 
-  record.count = normalizePositiveInteger(record.count, 0);
-  record.count += routeWeight;
+  record.count = normalizePositiveInteger(record.count, 0) + routeWeight;
   record.updatedAt = now;
   record.lastRoute = route;
   record.highestCountSeen = Math.max(
@@ -325,6 +328,8 @@ export async function checkApiRateLimit(options = {}) {
   const burstCount = updateBurstMemory(record, now);
 
   let allowed = record.count <= limit && !penaltyActiveBefore;
+  let penaltyApplied = false;
+  let penaltyAppliedMs = 0;
 
   if (!allowed && !penaltyActiveBefore) {
     record.violations = normalizePositiveInteger(record.violations, 0) + 1;
@@ -338,7 +343,8 @@ export async function checkApiRateLimit(options = {}) {
         (routeSensitivity === "critical" && record.violations >= 2)
       )
     ) {
-      applyPenalty(record, now, routeSensitivity);
+      penaltyAppliedMs = applyPenalty(record, now, routeSensitivity);
+      penaltyApplied = penaltyAppliedMs > 0;
     }
   }
 
@@ -356,7 +362,7 @@ export async function checkApiRateLimit(options = {}) {
   const remainingMs = penaltyActive
     ? penaltyRemainingMs
     : allowed
-      ? 0
+      ? Math.max(0, windowMs - (now - safeTimestamp(record.start, now)))
       : Math.max(0, windowMs - (now - safeTimestamp(record.start, now)));
 
   const recommendedAction = getRecommendedAction({
@@ -370,14 +376,25 @@ export async function checkApiRateLimit(options = {}) {
 
   let containmentAction = "none";
   if (recommendedAction === "block") {
-    containmentAction = routeSensitivity === "critical"
-      ? "freeze_sensitive_route"
-      : "temporary_containment";
+    containmentAction =
+      routeSensitivity === "critical"
+        ? "freeze_sensitive_route"
+        : "temporary_containment";
   } else if (recommendedAction === "challenge") {
     containmentAction = "step_up_verification";
   } else if (recommendedAction === "throttle") {
     containmentAction = "slow_down_actor";
   }
+
+  const events = {
+    blockEvents: recommendedAction === "block" ? 1 : 0,
+    challengeEvents: recommendedAction === "challenge" ? 1 : 0,
+    throttleEvents: recommendedAction === "throttle" ? 1 : 0,
+    hardBlockSignals:
+      penaltyActive || (routeSensitivity === "critical" && !allowed) ? 1 : 0,
+    burstSignals: burstCount >= 8 ? 1 : 0,
+    criticalRouteHits: routeSensitivity === "critical" ? 1 : 0
+  };
 
   return {
     allowed,
@@ -392,10 +409,13 @@ export async function checkApiRateLimit(options = {}) {
     resetAt: safeTimestamp(record.start, now) + windowMs,
     penaltyActive,
     penaltyUntil: safeTimestamp(record.penaltyUntil, 0),
+    penaltyApplied,
+    penaltyAppliedMs,
     violations: normalizePositiveInteger(record.violations, 0),
     routeWeight,
     routeSensitivity,
     burstCount,
-    highestCountSeen: normalizePositiveInteger(record.highestCountSeen, 0)
+    highestCountSeen: normalizePositiveInteger(record.highestCountSeen, 0),
+    events
   };
 }
