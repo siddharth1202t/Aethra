@@ -1,4 +1,5 @@
 import { getRedis } from "./_redis.js";
+import { appendSecurityEvent } from "./_security-event-store.js";
 
 const BOT_STATE_TTL_MS = 24 * 60 * 60 * 1000;
 const BOT_SIGNAL_WINDOW_MS = 30 * 60 * 1000;
@@ -12,6 +13,8 @@ const MAX_USER_AGENT_LENGTH = 500;
 const MAX_REASON_LENGTH = 80;
 const MAX_REASON_HISTORY = 30;
 const MAX_SIGNAL_HISTORY = 40;
+
+/* -------------------- SAFETY -------------------- */
 
 function toNumber(value, fallback = 0) {
   const num = Number(value);
@@ -46,8 +49,12 @@ function sanitizeKeyPart(value = "", maxLength = 120, fallback = "") {
 }
 
 function isPlainObject(value) {
-  return Object.prototype.toString.call(value) === "[object Object]";
+  if (Object.prototype.toString.call(value) !== "[object Object]") return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === null || proto === Object.prototype;
 }
+
+/* -------------------- REQUEST HELPERS -------------------- */
 
 function getHeaderValue(req, name) {
   const headers = req?.headers;
@@ -162,6 +169,13 @@ function buildBotKey({ ip = "", sessionId = "", userId = "" } = {}) {
   return `bot:${safeIp}::${safeSessionId}::${safeUserId}`;
 }
 
+function buildClientKeyPreview({ ip = "", sessionId = "" } = {}) {
+  return safeString(
+    `${normalizeIp(ip)}:${normalizeSessionId(sessionId).slice(0, 6)}`,
+    24
+  );
+}
+
 function isSuspiciousUserAgent(userAgent) {
   return /headless|phantom|selenium|playwright|puppeteer|crawler|spider|curl|wget|python-requests|httpclient|node-fetch/i.test(
     userAgent
@@ -184,7 +198,20 @@ function getRouteSensitivity(route) {
   return 1;
 }
 
-function getRecommendedAction({ riskScore, telemetryQualityScore, hardBlockSignals }) {
+function getRecommendedAction({
+  riskScore,
+  telemetryQualityScore,
+  hardBlockSignals,
+  suspiciousUserAgent = false,
+  routeSensitivity = 1
+}) {
+  if (
+    hardBlockSignals > 0 &&
+    (suspiciousUserAgent || routeSensitivity >= 2 || riskScore >= 75)
+  ) {
+    return "block";
+  }
+
   if (hardBlockSignals > 0 || riskScore >= 90) {
     return "block";
   }
@@ -199,6 +226,8 @@ function getRecommendedAction({ riskScore, telemetryQualityScore, hardBlockSigna
 
   return "allow";
 }
+
+/* -------------------- STATE -------------------- */
 
 function createEmptyBotRecord(now) {
   return {
@@ -388,6 +417,8 @@ function extractForwardedIp(req = null) {
   return normalizeIp(req?.socket?.remoteAddress || "");
 }
 
+/* -------------------- ANALYSIS -------------------- */
+
 export function analyzeBotBehavior(behavior = {}, req = null) {
   const now = Date.now();
 
@@ -431,6 +462,7 @@ export function analyzeBotBehavior(behavior = {}, req = null) {
   const reasons = [];
   const telemetryWarnings = [];
   const routeSensitivity = getRouteSensitivity(route);
+  const suspiciousUa = isSuspiciousUserAgent(userAgent);
 
   if (!sessionId || sessionId === "no-session") {
     riskScore += 10;
@@ -499,7 +531,7 @@ export function analyzeBotBehavior(behavior = {}, req = null) {
     telemetryWarnings.push("missing_user_agent");
   }
 
-  if (isSuspiciousUserAgent(userAgent)) {
+  if (suspiciousUa) {
     riskScore += 45;
     hardBlockSignals += 1;
     reasons.push("suspicious_user_agent");
@@ -545,11 +577,19 @@ export function analyzeBotBehavior(behavior = {}, req = null) {
   if (!origin) {
     telemetryQualityScore -= 5;
     telemetryWarnings.push("missing_origin");
+    if (routeSensitivity >= 2) {
+      riskScore += 5;
+      reasons.push("missing_origin_high_risk_route");
+    }
   }
 
   if (!referer) {
     telemetryQualityScore -= 5;
     telemetryWarnings.push("missing_referer");
+    if (routeSensitivity >= 2) {
+      riskScore += 5;
+      reasons.push("missing_referer_high_risk_route");
+    }
   }
 
   telemetryQualityScore = Math.max(0, Math.min(100, telemetryQualityScore));
@@ -565,7 +605,9 @@ export function analyzeBotBehavior(behavior = {}, req = null) {
   const recommendedAction = getRecommendedAction({
     riskScore,
     telemetryQualityScore,
-    hardBlockSignals
+    hardBlockSignals,
+    suspiciousUserAgent: suspiciousUa,
+    routeSensitivity
   });
 
   return {
@@ -578,7 +620,8 @@ export function analyzeBotBehavior(behavior = {}, req = null) {
     telemetryWarnings,
     events: {
       botSignals: reasons.length > 0 ? 1 : 0,
-      hardBlockSignals
+      hardBlockSignals,
+      coordinatedSignals: 0
     },
     signals: {
       route,
@@ -596,11 +639,14 @@ export function analyzeBotBehavior(behavior = {}, req = null) {
       sessionIdPresent: Boolean(sessionId && sessionId !== "no-session"),
       requestUserAgentPresent: Boolean(requestUserAgent),
       behaviorUserAgentPresent: Boolean(behaviorUserAgent),
+      suspiciousUserAgent: suspiciousUa,
       originPresent: Boolean(origin),
       refererPresent: Boolean(referer)
     }
   };
 }
+
+/* -------------------- TRACKING -------------------- */
 
 export async function trackBotBehavior(behavior = {}, req = null, context = {}) {
   const now = Date.now();
@@ -709,6 +755,11 @@ export async function trackBotBehavior(behavior = {}, req = null, context = {}) 
   await storeBotRecord(redis, redisKey, record);
 
   let escalatedAction = analysis.recommendedAction;
+  let coordinatedSignals = 0;
+
+  if (recentSummary.uniqueRecentRoutes >= 4) {
+    coordinatedSignals = 1;
+  }
 
   if (record.hardBlockCount >= 2 || record.suspicionScore >= 120) {
     escalatedAction = "block";
@@ -721,9 +772,41 @@ export async function trackBotBehavior(behavior = {}, req = null, context = {}) 
     escalatedAction = "throttle";
   }
 
+  if (
+    escalatedAction === "block" ||
+    (analysis.hardBlockSignals > 0 && analysis.riskScore >= 70)
+  ) {
+    try {
+      await appendSecurityEvent(context.env || {}, {
+        type: "bot_detection_escalated",
+        severity: escalatedAction === "block" ? "critical" : "warning",
+        action: escalatedAction === "block" ? "block" : escalatedAction,
+        route,
+        ip,
+        userId: userId || "",
+        reason: safeString(analysis.reasons[0] || "bot_escalation", 120),
+        message: "Bot detection escalated for actor.",
+        metadata: {
+          actorKey: safeString(redisKey.replace(/^bot:/, ""), 240),
+          suspicionScore: toSafeInt(record.suspicionScore, 0, 0, 1000),
+          highestRiskScore: toSafeInt(record.highestRiskScore, 0, 0, 100),
+          hardBlockCount: toSafeInt(record.hardBlockCount, 0, 0, 1000),
+          suspiciousCount: toSafeInt(record.suspiciousCount, 0, 0, 100000),
+          coordinatedSignals
+        }
+      });
+    } catch (error) {
+      console.error("Bot detection event write failed:", error);
+    }
+  }
+
   return {
     ...analysis,
     escalatedAction,
+    events: {
+      ...analysis.events,
+      coordinatedSignals
+    },
     distributed: {
       suspicionScore: toSafeInt(record.suspicionScore, 0, 0, 1000),
       highestRiskScore: toSafeInt(record.highestRiskScore, 0, 0, 100),
@@ -733,31 +816,36 @@ export async function trackBotBehavior(behavior = {}, req = null, context = {}) 
       recentChallenges: recentSummary.recentChallenges,
       recentHardBlocks: recentSummary.recentHardBlocks,
       uniqueRecentRoutes: recentSummary.uniqueRecentRoutes,
-      clientKeyPreview: safeString(redisKey.replace(/^bot:/, ""), 24)
+      clientKeyPreview: buildClientKeyPreview({ ip, sessionId })
     }
   };
 }
 
 export async function getBotBehaviorSnapshot(context = {}) {
   const now = Date.now();
+  const ip = context.ip || "";
+  const sessionId = context.sessionId || "";
+  const userId = context.userId || "";
+
   const redisKey = buildBotKey({
-    ip: context.ip || "",
-    sessionId: context.sessionId || "",
-    userId: context.userId || ""
+    ip,
+    sessionId,
+    userId
   });
+
   const redis = getRedis(context.env || {});
   const record = await getStoredBotRecord(redis, redisKey, now);
 
   if (!record) {
     return {
       found: false,
-      clientKeyPreview: safeString(redisKey.replace(/^bot:/, ""), 24)
+      clientKeyPreview: buildClientKeyPreview({ ip, sessionId })
     };
   }
 
   return {
     found: true,
-    clientKeyPreview: safeString(redisKey.replace(/^bot:/, ""), 24),
+    clientKeyPreview: buildClientKeyPreview({ ip, sessionId }),
     suspicionScore: toSafeInt(record.suspicionScore, 0, 0, 1000),
     highestRiskScore: toSafeInt(record.highestRiskScore, 0, 0, 100),
     hardBlockCount: toSafeInt(record.hardBlockCount, 0, 0, 1000),
