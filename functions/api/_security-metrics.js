@@ -40,16 +40,26 @@ function calculateThreatPressureFromCounters(counters = {}, mode = "normal") {
   const highRiskStateSignals = safeInt(counters.highRiskStateSignals, 0);
   const routePressureSignals = safeInt(counters.routePressureSignals, 0);
 
+  const burstSignals = safeInt(counters.burstSignals, 0);
+  const coordinatedAttackSignals = safeInt(counters.coordinatedAttackSignals, 0);
+  const breachAttemptSignals = safeInt(counters.breachAttemptSignals, 0);
+  const exploitAttemptSignals = safeInt(counters.exploitAttemptSignals, 0);
+
   let pressure = 0;
 
-  pressure += Math.min(20, totalSignals * 2);
-  pressure += Math.min(20, criticalSignals * 5);
-  pressure += Math.min(15, blockSignals * 4);
-  pressure += Math.min(10, challengeSignals * 2);
-  pressure += Math.min(15, repeatedOffenderSignals * 4);
-  pressure += Math.min(10, lockdownTriggers * 5);
+  pressure += Math.min(15, totalSignals * 2);
+  pressure += Math.min(15, criticalSignals * 4);
+  pressure += Math.min(10, blockSignals * 3);
+  pressure += Math.min(8, challengeSignals * 2);
+  pressure += Math.min(10, repeatedOffenderSignals * 3);
+  pressure += Math.min(8, lockdownTriggers * 5);
   pressure += Math.min(5, highRiskStateSignals * 2);
   pressure += Math.min(5, routePressureSignals * 2);
+
+  pressure += Math.min(8, burstSignals * 3);
+  pressure += Math.min(10, coordinatedAttackSignals * 4);
+  pressure += Math.min(12, breachAttemptSignals * 5);
+  pressure += Math.min(12, exploitAttemptSignals * 5);
 
   if (mode === "elevated") pressure = Math.max(pressure, 35);
   if (mode === "defense") pressure = Math.max(pressure, 65);
@@ -78,6 +88,15 @@ function createEmptyActionCounts() {
   };
 }
 
+function createEmptySignalCounts() {
+  return {
+    exploitSignals: 0,
+    breachSignals: 0,
+    replaySignals: 0,
+    coordinatedSignals: 0
+  };
+}
+
 function normalizeCounters(input = {}) {
   const counters = isPlainObject(input) ? input : {};
 
@@ -89,7 +108,12 @@ function normalizeCounters(input = {}) {
     repeatedOffenderSignals: safeInt(counters.repeatedOffenderSignals, 0),
     lockdownTriggers: safeInt(counters.lockdownTriggers, 0),
     highRiskStateSignals: safeInt(counters.highRiskStateSignals, 0),
-    routePressureSignals: safeInt(counters.routePressureSignals, 0)
+    routePressureSignals: safeInt(counters.routePressureSignals, 0),
+
+    burstSignals: safeInt(counters.burstSignals, 0),
+    coordinatedAttackSignals: safeInt(counters.coordinatedAttackSignals, 0),
+    breachAttemptSignals: safeInt(counters.breachAttemptSignals, 0),
+    exploitAttemptSignals: safeInt(counters.exploitAttemptSignals, 0)
   };
 }
 
@@ -122,10 +146,12 @@ export function buildSecurityMetrics({
 
   const severityCounts = createEmptySeverityCounts();
   const actionCounts = createEmptyActionCounts();
+  const signalCounts = createEmptySignalCounts();
 
   let recentHighSeverityCount = 0;
   let containmentEventCount = 0;
   let unauthorizedAdminAttempts = 0;
+  let criticalEventCluster = 0;
 
   for (const event of safeEvents) {
     const severity = safeString(event?.severity || "", 20).toLowerCase();
@@ -148,17 +174,49 @@ export function buildSecurityMetrics({
       recentHighSeverityCount += 1;
     }
 
-    if (type.startsWith("containment_")) {
+    if (severity === "critical") {
+      criticalEventCluster += 1;
+    }
+
+    if (type.startsWith("containment_") || type.startsWith("actor_containment_")) {
       containmentEventCount += 1;
     }
 
-    if (type === "admin_endpoint_unauthorized") {
+    if (
+      type === "admin_endpoint_unauthorized" ||
+      type === "admin_access_denied" ||
+      type === "developer_access_denied"
+    ) {
       unauthorizedAdminAttempts += 1;
+    }
+
+    if (type.includes("exploit")) {
+      signalCounts.exploitSignals += 1;
+    }
+
+    if (type.includes("breach")) {
+      signalCounts.breachSignals += 1;
+    }
+
+    if (type.includes("replay")) {
+      signalCounts.replaySignals += 1;
+    }
+
+    if (type.includes("coordinated")) {
+      signalCounts.coordinatedSignals += 1;
     }
   }
 
   const threatPressure = calculateThreatPressureFromCounters(counters, mode);
   const normalizedTimestamp = normalizeTimestamp(timestamp);
+
+  const criticalAttackLikely =
+    mode === "lockdown" ||
+    counters.breachAttemptSignals > 0 ||
+    counters.exploitAttemptSignals > 0 ||
+    signalCounts.breachSignals > 0 ||
+    signalCounts.exploitSignals > 0 ||
+    criticalEventCluster >= 3;
 
   return {
     ok: true,
@@ -170,7 +228,8 @@ export function buildSecurityMetrics({
     counters,
     eventCounts: {
       bySeverity: severityCounts,
-      byAction: actionCounts
+      byAction: actionCounts,
+      bySignal: signalCounts
     },
     highlights: {
       recentHighSeverityCount,
@@ -178,7 +237,8 @@ export function buildSecurityMetrics({
       unauthorizedAdminAttempts,
       forceCaptchaEnabled: safeContainmentState?.flags?.forceCaptcha === true,
       lockdownActive: safeContainmentState?.flags?.lockdown === true,
-      readOnlyMode: safeContainmentState?.flags?.readOnlyMode === true
+      readOnlyMode: safeContainmentState?.flags?.readOnlyMode === true,
+      criticalAttackLikely
     }
   };
 }
