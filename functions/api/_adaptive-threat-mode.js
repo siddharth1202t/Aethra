@@ -36,6 +36,8 @@ const ALLOWED_ROUTE_SENSITIVITY = new Set([
 const MAX_COUNTER_VALUE = 1_000_000;
 const MAX_TIMESTAMP_FUTURE_SKEW_MS = 60_000;
 
+/* -------------------- SAFETY -------------------- */
+
 function safeString(value, maxLength = 200) {
   return String(value ?? "")
     .replace(/[\u0000-\u001F\u007F]/g, "")
@@ -61,6 +63,8 @@ function safeJsonParse(raw, fallback = null) {
     return fallback;
   }
 }
+
+/* -------------------- NORMALIZATION -------------------- */
 
 function normalizeMode(mode = "") {
   const normalized = safeString(mode || "normal", 30).toLowerCase();
@@ -93,6 +97,7 @@ function createDefaultAdaptiveState() {
     criticalSignals: 0,
     blockSignals: 0,
     challengeSignals: 0,
+    throttleSignals: 0,
     repeatedOffenderSignals: 0,
     lockdownTriggers: 0,
     highRiskStateSignals: 0,
@@ -102,6 +107,7 @@ function createDefaultAdaptiveState() {
     coordinatedAttackSignals: 0,
     breachAttemptSignals: 0,
     exploitAttemptSignals: 0,
+    replayAttackSignals: 0,
 
     lastReason: "stable_activity"
   };
@@ -121,6 +127,7 @@ function normalizeAdaptiveState(raw) {
     criticalSignals: safeInt(state.criticalSignals, 0),
     blockSignals: safeInt(state.blockSignals, 0),
     challengeSignals: safeInt(state.challengeSignals, 0),
+    throttleSignals: safeInt(state.throttleSignals, 0),
     repeatedOffenderSignals: safeInt(state.repeatedOffenderSignals, 0),
     lockdownTriggers: safeInt(state.lockdownTriggers, 0),
     highRiskStateSignals: safeInt(state.highRiskStateSignals, 0),
@@ -130,6 +137,7 @@ function normalizeAdaptiveState(raw) {
     coordinatedAttackSignals: safeInt(state.coordinatedAttackSignals, 0),
     breachAttemptSignals: safeInt(state.breachAttemptSignals, 0),
     exploitAttemptSignals: safeInt(state.exploitAttemptSignals, 0),
+    replayAttackSignals: safeInt(state.replayAttackSignals, 0),
 
     lastReason: normalizeReason(state.lastReason || base.lastReason)
   };
@@ -141,6 +149,7 @@ function normalizeCounters(state) {
     criticalSignals: safeInt(state?.criticalSignals, 0),
     blockSignals: safeInt(state?.blockSignals, 0),
     challengeSignals: safeInt(state?.challengeSignals, 0),
+    throttleSignals: safeInt(state?.throttleSignals, 0),
     repeatedOffenderSignals: safeInt(state?.repeatedOffenderSignals, 0),
     lockdownTriggers: safeInt(state?.lockdownTriggers, 0),
     highRiskStateSignals: safeInt(state?.highRiskStateSignals, 0),
@@ -148,9 +157,44 @@ function normalizeCounters(state) {
     burstSignals: safeInt(state?.burstSignals, 0),
     coordinatedAttackSignals: safeInt(state?.coordinatedAttackSignals, 0),
     breachAttemptSignals: safeInt(state?.breachAttemptSignals, 0),
-    exploitAttemptSignals: safeInt(state?.exploitAttemptSignals, 0)
+    exploitAttemptSignals: safeInt(state?.exploitAttemptSignals, 0),
+    replayAttackSignals: safeInt(state?.replayAttackSignals, 0)
   };
 }
+
+function buildPressureSummary(counters = {}) {
+  return {
+    trafficPressure: Math.min(
+      100,
+      safeInt(counters.totalSignals, 0) +
+      safeInt(counters.burstSignals, 0) * 2
+    ),
+    criticalPressure: Math.min(
+      100,
+      safeInt(counters.criticalSignals, 0) * 5 +
+      safeInt(counters.blockSignals, 0) * 4 +
+      safeInt(counters.lockdownTriggers, 0) * 8
+    ),
+    coordinationPressure: Math.min(
+      100,
+      safeInt(counters.coordinatedAttackSignals, 0) * 8 +
+      safeInt(counters.routePressureSignals, 0) * 3 +
+      safeInt(counters.repeatedOffenderSignals, 0) * 4
+    ),
+    attackPressure: Math.min(
+      100,
+      safeInt(counters.breachAttemptSignals, 0) * 10 +
+      safeInt(counters.exploitAttemptSignals, 0) * 8 +
+      safeInt(counters.replayAttackSignals, 0) * 5
+    ),
+    persistencePressure: Math.min(
+      100,
+      safeInt(counters.highRiskStateSignals, 0) * 5
+    )
+  };
+}
+
+/* -------------------- STORAGE -------------------- */
 
 async function getStoredAdaptiveState(env = {}) {
   const redis = getRedis(env);
@@ -196,6 +240,7 @@ function resetWindow(state, now) {
   state.criticalSignals = 0;
   state.blockSignals = 0;
   state.challengeSignals = 0;
+  state.throttleSignals = 0;
   state.repeatedOffenderSignals = 0;
   state.lockdownTriggers = 0;
   state.highRiskStateSignals = 0;
@@ -204,6 +249,7 @@ function resetWindow(state, now) {
   state.coordinatedAttackSignals = 0;
   state.breachAttemptSignals = 0;
   state.exploitAttemptSignals = 0;
+  state.replayAttackSignals = 0;
   state.lastReason = "stable_activity";
 }
 
@@ -212,8 +258,9 @@ function hasWindowExpired(windowStartedAt, now) {
   return now - safeWindowStartedAt > ADAPTIVE_MODE_WINDOW_MS;
 }
 
+/* -------------------- DECISION ENGINE -------------------- */
+
 function decideAdaptiveMode(state) {
-  // Level 9 / critical pressure path
   if (
     state.breachAttemptSignals >= 2 ||
     state.exploitAttemptSignals >= 3 ||
@@ -228,12 +275,12 @@ function decideAdaptiveMode(state) {
     };
   }
 
-  // Level 7–8 sustained threat path
   if (
     state.blockSignals >= 4 ||
     state.repeatedOffenderSignals >= 5 ||
     state.criticalSignals >= 3 ||
     state.burstSignals >= 4 ||
+    state.replayAttackSignals >= 2 ||
     (state.highRiskStateSignals >= 3 && state.routePressureSignals >= 3)
   ) {
     return {
@@ -242,9 +289,9 @@ function decideAdaptiveMode(state) {
     };
   }
 
-  // Elevated suspicious path
   if (
     state.challengeSignals >= 5 ||
+    state.throttleSignals >= 5 ||
     state.totalSignals >= 10 ||
     state.routePressureSignals >= 4
   ) {
@@ -276,7 +323,9 @@ function normalizeSecurityState(securityState = null) {
     rateLimitHitCount: safeInt(securityState.rateLimitHitCount, 0),
     lockoutCount: safeInt(securityState.lockoutCount, 0),
     exploitFlagCount: safeInt(securityState.exploitFlagCount, 0),
-    breachFlagCount: safeInt(securityState.breachFlagCount, 0)
+    breachFlagCount: safeInt(securityState.breachFlagCount, 0),
+    replayFlagCount: safeInt(securityState.replayFlagCount, 0),
+    coordinatedFlagCount: safeInt(securityState.coordinatedFlagCount, 0)
   };
 }
 
@@ -298,6 +347,13 @@ async function syncContainmentToMode(env = {}, mode, reason) {
   const normalizedReason = normalizeReason(reason || "adaptive_sync");
   const currentContainment = await getContainmentState(env);
 
+  if (normalizeMode(currentContainment?.mode || "normal") === normalizedMode) {
+    return {
+      ok: true,
+      state: currentContainment
+    };
+  }
+
   if (normalizedMode === "lockdown") {
     return setContainmentState(env, {
       mode: "lockdown",
@@ -317,7 +373,7 @@ async function syncContainmentToMode(env = {}, mode, reason) {
 
   if (normalizedMode === "defense") {
     return setContainmentState(env, {
-      mode: "elevated",
+      mode: "defense",
       reason: normalizedReason,
       durationMs: 20 * 60 * 1000,
       flags: {
@@ -382,7 +438,14 @@ async function recordAdaptiveModeChange({
   try {
     await appendSecurityEvent(env, {
       type: "adaptive_mode_changed",
-      severity: nextMode === "lockdown" ? "critical" : nextMode === "defense" ? "high" : "warning",
+      severity:
+        nextMode === "lockdown"
+          ? "critical"
+          : nextMode === "defense"
+            ? "error"
+            : nextMode === "elevated"
+              ? "warning"
+              : "info",
       action: nextMode === "lockdown" ? "contain" : "observe",
       mode: nextMode,
       reason,
@@ -403,6 +466,8 @@ function isBurstAttack(now, state) {
   const perMinute = (safeInt(state.totalSignals, 0) * 60000) / elapsed;
   return perMinute >= 20;
 }
+
+/* -------------------- MAIN -------------------- */
 
 export async function evaluateAdaptiveThreatMode({
   env = {},
@@ -436,16 +501,37 @@ export async function evaluateAdaptiveThreatMode({
   const hardBlockSignals = safeInt(threatResult?.events?.hardBlockSignals, 0);
   const criticalRouteHits = safeInt(threatResult?.events?.criticalRouteHits, 0);
 
-  const exploitSignals = safeInt(threatResult?.events?.exploitSignals, 0);
-  const breachSignals = safeInt(abuseResult?.events?.breachSignals, 0);
-  const endpointSpread = safeInt(threatResult?.events?.endpointSpread, 0);
+  const exploitSignals =
+    safeInt(threatResult?.events?.exploitSignals, 0) +
+    safeInt(risk?.events?.exploitSignals, 0);
+
+  const breachSignals =
+    safeInt(abuseResult?.events?.breachSignals, 0) +
+    safeInt(threatResult?.events?.breachSignals, 0) +
+    safeInt(risk?.events?.breachSignals, 0);
+
+  const replaySignals =
+    safeInt(risk?.events?.replaySignals, 0) +
+    safeInt(threatResult?.signals?.replayPressure, 0, 0, 100) > 0
+      ? 1
+      : 0;
+
+  const coordinatedSignals =
+    safeInt(threatResult?.events?.endpointSpread, 0) >= 3 ||
+    safeInt(risk?.events?.coordinatedSignals, 0) > 0
+      ? 1
+      : 0;
 
   if (riskAction === "block") {
     state.blockSignals += 1;
   }
 
-  if (riskAction === "challenge" || riskAction === "throttle") {
+  if (riskAction === "challenge") {
     state.challengeSignals += 1;
+  }
+
+  if (riskAction === "throttle") {
+    state.throttleSignals += 1;
   }
 
   if (
@@ -468,21 +554,26 @@ export async function evaluateAdaptiveThreatMode({
   if (
     riskScore >= 95 ||
     threatScore >= 95 ||
-    hardBlockSignals >= 3
+    hardBlockSignals >= 3 ||
+    safeInt(risk?.hardBlockSignals, 0, 0, 100) >= 2
   ) {
     state.lockdownTriggers += 1;
   }
 
-  if (exploitSignals >= 1 || riskScore >= 98) {
+  if (exploitSignals > 0 || riskScore >= 98) {
     state.exploitAttemptSignals += 1;
   }
 
-  if (breachSignals >= 1 || abuseScore >= 90) {
+  if (breachSignals > 0 || abuseScore >= 90 || risk?.criticalAttackLikely === true) {
     state.breachAttemptSignals += 1;
   }
 
-  if (endpointSpread >= 3 || criticalRouteHits >= 6) {
+  if (coordinatedSignals > 0 || criticalRouteHits >= 6) {
     state.coordinatedAttackSignals += 1;
+  }
+
+  if (replaySignals > 0) {
+    state.replayAttackSignals += 1;
   }
 
   if (normalizedRouteSensitivity === "critical") {
@@ -526,6 +617,14 @@ export async function evaluateAdaptiveThreatMode({
     if (normalizedSecurityState.breachFlagCount >= 1) {
       state.breachAttemptSignals += 1;
     }
+
+    if (normalizedSecurityState.replayFlagCount >= 1) {
+      state.replayAttackSignals += 1;
+    }
+
+    if (normalizedSecurityState.coordinatedFlagCount >= 1) {
+      state.coordinatedAttackSignals += 1;
+    }
   }
 
   if (isBurstAttack(now, state)) {
@@ -542,6 +641,7 @@ export async function evaluateAdaptiveThreatMode({
   const containment = await syncContainmentToMode(env, state.mode, state.lastReason);
 
   const normalizedCounters = normalizeCounters(state);
+  const pressures = buildPressureSummary(normalizedCounters);
 
   if (previousMode !== state.mode) {
     await recordAdaptiveModeChange({
@@ -553,6 +653,13 @@ export async function evaluateAdaptiveThreatMode({
     });
   }
 
+  const criticalAttackLikely =
+    state.mode === "lockdown" ||
+    normalizedCounters.breachAttemptSignals > 0 ||
+    normalizedCounters.exploitAttemptSignals > 0 ||
+    normalizedCounters.coordinatedAttackSignals >= 2 ||
+    normalizedCounters.lockdownTriggers >= 2;
+
   return {
     mode: state.mode,
     previousMode,
@@ -561,23 +668,23 @@ export async function evaluateAdaptiveThreatMode({
     windowStartedAt: state.windowStartedAt,
     updatedAt: state.updatedAt,
     counters: normalizedCounters,
+    pressures,
     containment: containment?.state || null,
-    criticalAttackLikely:
-      state.mode === "lockdown" ||
-      normalizedCounters.breachAttemptSignals > 0 ||
-      normalizedCounters.exploitAttemptSignals > 0
+    criticalAttackLikely
   };
 }
 
 export async function getAdaptiveThreatMode(env = {}) {
   const state = await getStoredAdaptiveState(env);
+  const counters = normalizeCounters(state);
 
   return {
     mode: state.mode,
     updatedAt: state.updatedAt,
     windowStartedAt: state.windowStartedAt,
     lastReason: state.lastReason,
-    counters: normalizeCounters(state)
+    counters,
+    pressures: buildPressureSummary(counters)
   };
 }
 
