@@ -8,6 +8,15 @@ const ALLOWED_LEVELS = new Set([
   "critical"
 ]);
 
+const ALLOWED_EVENT_ACTIONS = new Set([
+  "allow",
+  "observe",
+  "throttle",
+  "challenge",
+  "block",
+  "contain"
+]);
+
 const MAX_TYPE_LENGTH = 60;
 const MAX_MESSAGE_LENGTH = 500;
 const MAX_EMAIL_LENGTH = 200;
@@ -34,6 +43,8 @@ let tokenCache = {
   expiresAt: 0
 };
 
+/* -------------------- SAFETY -------------------- */
+
 function safeString(value, maxLength = 300) {
   return String(value ?? "")
     .replace(/[\u0000-\u001F\u007F]/g, "")
@@ -57,9 +68,18 @@ function safeLevel(level) {
   return ALLOWED_LEVELS.has(normalized) ? normalized : "warning";
 }
 
-function isPlainObject(value) {
-  return Object.prototype.toString.call(value) === "[object Object]";
+function safeEventAction(action = "", fallback = "observe") {
+  const normalized = safeString(action || fallback, 20).toLowerCase();
+  return ALLOWED_EVENT_ACTIONS.has(normalized) ? normalized : fallback;
 }
+
+function isPlainObject(value) {
+  if (Object.prototype.toString.call(value) !== "[object Object]") return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === null || proto === Object.prototype;
+}
+
+/* -------------------- NORMALIZATION -------------------- */
 
 function normalizeEmail(value = "") {
   const email = safeString(value || "", MAX_EMAIL_LENGTH).toLowerCase();
@@ -76,6 +96,10 @@ function normalizeEmailHash(value = "") {
 
 function normalizeUserId(value = "") {
   return safeString(value || "", MAX_USER_ID_LENGTH).replace(/[^a-zA-Z0-9._:@/-]/g, "");
+}
+
+function normalizeSessionId(value = "") {
+  return safeString(value || "", 128).replace(/[^a-zA-Z0-9._:@/-]/g, "");
 }
 
 function normalizeIp(value = "") {
@@ -189,6 +213,8 @@ function hasFirebaseAdminEnv(env) {
   );
 }
 
+/* -------------------- IDS / HASHING -------------------- */
+
 function createEventId() {
   const bytes = new Uint8Array(6);
   crypto.getRandomValues(bytes);
@@ -214,14 +240,10 @@ async function sha256Hex(input = "") {
 
 async function deriveEmailHash(email = "", providedHash = "") {
   const normalizedProvided = normalizeEmailHash(providedHash);
-  if (normalizedProvided) {
-    return normalizedProvided;
-  }
+  if (normalizedProvided) return normalizedProvided;
 
   const normalizedEmail = normalizeEmail(email);
-  if (!normalizedEmail) {
-    return "";
-  }
+  if (!normalizedEmail) return "";
 
   return (await sha256Hex(normalizedEmail)).slice(0, MAX_EMAIL_HASH_LENGTH);
 }
@@ -265,6 +287,31 @@ function getSeverityScore(level) {
   if (level === "warning") return 40;
   return 10;
 }
+
+function deriveEventAction(level, metadataInput = {}, data = {}) {
+  const explicitAction = safeEventAction(
+    metadataInput?.action || data?.action || "",
+    ""
+  );
+
+  if (explicitAction) return explicitAction;
+
+  if (level === "critical") return "contain";
+  if (level === "error") return "observe";
+  if (level === "warning") return "observe";
+  return "observe";
+}
+
+function extractSessionId(metadataInput = {}, sanitizedMetadata = {}) {
+  return normalizeSessionId(
+    metadataInput?.sessionId ||
+      sanitizedMetadata?.sessionId ||
+      metadataInput?.client?.sessionId ||
+      ""
+  );
+}
+
+/* -------------------- OAUTH -------------------- */
 
 function base64UrlEncodeBytes(bytes) {
   let binary = "";
@@ -313,11 +360,7 @@ async function createServiceJwt(env) {
   const privateKey = getRequiredEnv(env, "FIREBASE_PRIVATE_KEY", 20000).replace(/\\n/g, "\n");
 
   const now = Math.floor(Date.now() / 1000);
-  const header = {
-    alg: "RS256",
-    typ: "JWT"
-  };
-
+  const header = { alg: "RS256", typ: "JWT" };
   const claimSet = {
     iss: clientEmail,
     scope: FIRESTORE_SCOPE,
@@ -363,7 +406,9 @@ async function getAccessToken(env) {
 
   if (!response.ok) {
     const errorText = await response.text().catch(() => "");
-    throw new Error(`OAuth token request failed: ${response.status} ${safeString(errorText, 300)}`);
+    throw new Error(
+      `OAuth token request failed: ${response.status} ${safeString(errorText, 300)}`
+    );
   }
 
   const data = await response.json();
@@ -388,6 +433,8 @@ function clearAccessTokenCache() {
     expiresAt: 0
   };
 }
+
+/* -------------------- FIRESTORE SERIALIZATION -------------------- */
 
 function toFirestoreValue(value) {
   if (value === null || value === undefined) {
@@ -488,6 +535,8 @@ async function writeFirestoreDocument(env, collectionName, documentId, payload, 
   return true;
 }
 
+/* -------------------- MAIN -------------------- */
+
 export async function writeSecurityLog(data = {}) {
   try {
     const env = data?.env || null;
@@ -540,6 +589,8 @@ export async function writeSecurityLog(data = {}) {
       }));
 
     const includeRawIdentity = data.includeRawIdentity === true;
+    const sessionId = extractSessionId(metadataInput, metadata);
+    const eventAction = deriveEventAction(level, metadataInput, data);
     const now = Date.now();
 
     const log = {
@@ -567,17 +618,20 @@ export async function writeSecurityLog(data = {}) {
     try {
       await appendSecurityEvent(env, {
         type,
-        severity: level === "error" ? "error" : level,
-        action: level === "critical" ? "contain" : "observe",
+        severity: level,
+        action: eventAction,
         route,
         ip: includeRawIdentity ? ip : "",
         userId,
         reason: type,
         message,
         metadata: {
+          eventId,
           routeGroup,
           source,
-          fingerprint
+          fingerprint,
+          severityScore,
+          sessionId: sessionId || ""
         }
       });
     } catch (eventStoreError) {
@@ -593,13 +647,7 @@ export async function writeSecurityLog(data = {}) {
           userId,
           emailHash,
           ipHash,
-          sessionId: safeString(
-            metadataInput?.sessionId ||
-              metadata?.sessionId ||
-              metadataInput?.client?.sessionId ||
-              "",
-            128
-          ),
+          sessionId,
           routeGroup,
           source
         }
