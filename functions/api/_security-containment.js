@@ -1,7 +1,8 @@
-import { redis } from "./_redis.js";
+import { getRedis } from "./_redis.js";
 import { appendSecurityEvent } from "./_security-event-store.js";
 
 const CONTAINMENT_KEY = "security:containment:global";
+const ACTOR_CONTAINMENT_PREFIX = "security:containment:actor";
 const CONTAINMENT_TTL_MS = 24 * 60 * 60 * 1000;
 const CONTAINMENT_TTL_SECONDS = Math.max(
   1,
@@ -22,7 +23,10 @@ const ALLOWED_FLAGS = new Set([
   "readOnlyMode",
   "disableUploads",
   "forceCaptcha",
-  "lockdown"
+  "lockdown",
+  "lockAccount",
+  "killSessions",
+  "blockActor"
 ]);
 
 const MODE_RANK = {
@@ -87,6 +91,18 @@ function normalizeActionType(value = "") {
   return safeString(value || "", 50).toLowerCase();
 }
 
+function normalizeActorType(value = "") {
+  return safeString(value || "actor", 40).replace(/[^a-zA-Z0-9:_-]/g, "_").toLowerCase();
+}
+
+function normalizeActorId(value = "") {
+  return safeString(value || "", 160).replace(/[^a-zA-Z0-9._:@/-]/g, "");
+}
+
+function buildActorContainmentKey(actorType = "actor", actorId = "") {
+  return `${ACTOR_CONTAINMENT_PREFIX}:${normalizeActorType(actorType)}:${normalizeActorId(actorId)}`;
+}
+
 function createDefaultFlags() {
   return {
     freezeRegistrations: false,
@@ -95,7 +111,10 @@ function createDefaultFlags() {
     readOnlyMode: false,
     disableUploads: false,
     forceCaptcha: false,
-    lockdown: false
+    lockdown: false,
+    lockAccount: false,
+    killSessions: false,
+    blockActor: false
   };
 }
 
@@ -122,7 +141,10 @@ function getDefaultFlagsForMode(mode = "normal") {
       readOnlyMode: true,
       disableUploads: true,
       forceCaptcha: true,
-      lockdown: true
+      lockdown: true,
+      lockAccount: false,
+      killSessions: false,
+      blockActor: false
     };
   }
 
@@ -134,7 +156,10 @@ function getDefaultFlagsForMode(mode = "normal") {
       readOnlyMode: false,
       disableUploads: false,
       forceCaptcha: true,
-      lockdown: false
+      lockdown: false,
+      lockAccount: false,
+      killSessions: false,
+      blockActor: false
     };
   }
 
@@ -148,6 +173,22 @@ function createDefaultContainmentState() {
     updatedAt: Date.now(),
     expiresAt: 0,
     flags: createDefaultFlags()
+  };
+}
+
+function createDefaultActorContainmentState(actorType = "actor", actorId = "") {
+  return {
+    actorType: normalizeActorType(actorType),
+    actorId: normalizeActorId(actorId),
+    reason: "",
+    updatedAt: Date.now(),
+    expiresAt: 0,
+    flags: {
+      ...createDefaultFlags(),
+      lockAccount: false,
+      killSessions: false,
+      blockActor: false
+    }
   };
 }
 
@@ -184,6 +225,24 @@ function normalizeContainmentState(raw) {
     updatedAt,
     expiresAt,
     flags: sanitizeFlags(flags)
+  };
+}
+
+function normalizeActorContainmentState(raw, actorType = "actor", actorId = "") {
+  const base = createDefaultActorContainmentState(actorType, actorId);
+  const state = raw && typeof raw === "object" ? raw : {};
+  const nowMax = getNowMax();
+
+  return {
+    actorType: normalizeActorType(state.actorType || base.actorType),
+    actorId: normalizeActorId(state.actorId || base.actorId),
+    reason: safeString(state.reason || "", 300),
+    updatedAt: safeInt(state.updatedAt, base.updatedAt, 0, nowMax),
+    expiresAt: safeInt(state.expiresAt, 0, 0, nowMax),
+    flags: sanitizeFlags({
+      ...base.flags,
+      ...(state.flags || {})
+    })
   };
 }
 
@@ -239,21 +298,26 @@ function buildContainmentMetadata(state = {}) {
     readOnlyMode: normalized.flags.readOnlyMode,
     disableUploads: normalized.flags.disableUploads,
     forceCaptcha: normalized.flags.forceCaptcha,
-    lockdown: normalized.flags.lockdown
+    lockdown: normalized.flags.lockdown,
+    lockAccount: normalized.flags.lockAccount,
+    killSessions: normalized.flags.killSessions,
+    blockActor: normalized.flags.blockActor
   };
 }
 
 async function recordContainmentEvent({
+  env = {},
   type,
   severity,
   action,
   reason,
   previousState,
   nextState,
-  message
+  message,
+  metadata = {}
 }) {
   try {
-    await appendSecurityEvent({
+    await appendSecurityEvent(env, {
       type: safeString(type || "containment_updated", 60),
       severity: safeString(severity || "warning", 20).toLowerCase(),
       action: safeString(action || "contain", 30).toLowerCase(),
@@ -265,7 +329,8 @@ async function recordContainmentEvent({
         nextMode: normalizeMode(nextState?.mode || "normal"),
         previousExpiresAt: safeInt(previousState?.expiresAt, 0, 0, getNowMax()),
         nextExpiresAt: safeInt(nextState?.expiresAt, 0, 0, getNowMax()),
-        ...buildContainmentMetadata(nextState)
+        ...buildContainmentMetadata(nextState),
+        ...(metadata || {})
       }
     });
   } catch (error) {
@@ -273,7 +338,9 @@ async function recordContainmentEvent({
   }
 }
 
-async function getStoredContainmentState() {
+async function getStoredContainmentState(env = {}) {
+  const redis = getRedis(env);
+
   try {
     const raw = await redis.get(CONTAINMENT_KEY);
 
@@ -297,7 +364,9 @@ async function getStoredContainmentState() {
   }
 }
 
-async function storeContainmentState(state) {
+async function storeContainmentState(env = {}, state) {
+  const redis = getRedis(env);
+
   try {
     const normalized = normalizeContainmentState(state);
 
@@ -312,8 +381,63 @@ async function storeContainmentState(state) {
   }
 }
 
-export async function getContainmentState() {
-  const state = await getStoredContainmentState();
+async function getStoredActorContainmentState(env = {}, actorType = "actor", actorId = "") {
+  const redis = getRedis(env);
+  const safeActorType = normalizeActorType(actorType);
+  const safeActorId = normalizeActorId(actorId);
+
+  if (!safeActorId) {
+    return createDefaultActorContainmentState(safeActorType, safeActorId);
+  }
+
+  try {
+    const raw = await redis.get(buildActorContainmentKey(safeActorType, safeActorId));
+
+    if (!raw) {
+      return createDefaultActorContainmentState(safeActorType, safeActorId);
+    }
+
+    if (typeof raw === "string") {
+      const parsed = safeJsonParse(raw, null);
+      return normalizeActorContainmentState(parsed, safeActorType, safeActorId);
+    }
+
+    if (typeof raw === "object") {
+      return normalizeActorContainmentState(raw, safeActorType, safeActorId);
+    }
+
+    return createDefaultActorContainmentState(safeActorType, safeActorId);
+  } catch (error) {
+    console.error("Actor containment read failed:", error);
+    return createDefaultActorContainmentState(safeActorType, safeActorId);
+  }
+}
+
+async function storeActorContainmentState(env = {}, state) {
+  const redis = getRedis(env);
+  const normalized = normalizeActorContainmentState(
+    state,
+    state?.actorType || "actor",
+    state?.actorId || ""
+  );
+
+  if (!normalized.actorId) return false;
+
+  try {
+    await redis.set(
+      buildActorContainmentKey(normalized.actorType, normalized.actorId),
+      JSON.stringify(normalized),
+      { ex: CONTAINMENT_TTL_SECONDS }
+    );
+    return true;
+  } catch (error) {
+    console.error("Actor containment write failed:", error);
+    return false;
+  }
+}
+
+export async function getContainmentState(env = {}) {
+  const state = await getStoredContainmentState(env);
 
   if (!isContainmentExpired(state)) {
     return normalizeContainmentState(state);
@@ -322,9 +446,10 @@ export async function getContainmentState() {
   const previousState = normalizeContainmentState(state);
   const resetState = createDefaultContainmentState();
 
-  await storeContainmentState(resetState);
+  await storeContainmentState(env, resetState);
 
   await recordContainmentEvent({
+    env,
     type: "containment_expired_reset",
     severity: "info",
     action: "observe",
@@ -337,7 +462,7 @@ export async function getContainmentState() {
   return resetState;
 }
 
-export async function setContainmentState({
+export async function setContainmentState(env = {}, {
   mode = "normal",
   reason = "",
   durationMs = 0,
@@ -350,7 +475,7 @@ export async function setContainmentState({
   const requestedFlags = sanitizeFlags(flags);
   const now = Date.now();
 
-  const currentState = await getContainmentState();
+  const currentState = await getContainmentState(env);
 
   let finalMode = requestedMode;
   let finalFlags = {
@@ -370,10 +495,7 @@ export async function setContainmentState({
           ...requestedFlags
         }
       );
-    } else if (
-      strongerMode === currentState.mode &&
-      strongerMode === requestedMode
-    ) {
+    } else if (strongerMode === currentState.mode && strongerMode === requestedMode) {
       finalFlags = mergeFlagsForEscalation(currentState.flags, finalFlags);
     }
   }
@@ -398,10 +520,11 @@ export async function setContainmentState({
     flags: finalFlags
   });
 
-  const ok = await storeContainmentState(nextState);
+  const ok = await storeContainmentState(env, nextState);
 
   if (ok && !statesAreEquivalent(currentState, nextState)) {
     await recordContainmentEvent({
+      env,
       type: nextState.mode === "normal" ? "containment_cleared" : "containment_updated",
       severity:
         nextState.mode === "lockdown"
@@ -430,13 +553,90 @@ export async function setContainmentState({
   };
 }
 
-export async function clearContainmentState() {
-  const previousState = await getContainmentState();
+export async function setActorContainment(env = {}, {
+  actorType = "actor",
+  actorId = "",
+  reason = "",
+  durationMs = 15 * 60 * 1000,
+  flags = {}
+} = {}) {
+  const safeActorType = normalizeActorType(actorType);
+  const safeActorId = normalizeActorId(actorId);
+
+  if (!safeActorId) {
+    return { ok: false, code: "missing_actor_id" };
+  }
+
+  const now = Date.now();
+  const currentState = await getStoredActorContainmentState(env, safeActorType, safeActorId);
+
+  const nextState = normalizeActorContainmentState({
+    actorType: safeActorType,
+    actorId: safeActorId,
+    reason: safeString(reason || "actor_containment", 300),
+    updatedAt: now,
+    expiresAt: durationMs > 0 ? now + Math.max(0, safeNumber(durationMs, 0)) : 0,
+    flags: sanitizeFlags({
+      ...currentState.flags,
+      ...flags
+    })
+  }, safeActorType, safeActorId);
+
+  const ok = await storeActorContainmentState(env, nextState);
+
+  if (ok) {
+    await recordContainmentEvent({
+      env,
+      type: "actor_containment_updated",
+      severity:
+        nextState.flags.lockAccount || nextState.flags.killSessions || nextState.flags.blockActor
+          ? "critical"
+          : "warning",
+      action: "contain",
+      reason: nextState.reason,
+      previousState: currentState,
+      nextState: {
+        mode: nextState.flags.blockActor ? "lockdown" : "elevated",
+        ...nextState
+      },
+      message: "Actor-specific containment state updated.",
+      metadata: {
+        actorType: safeActorType,
+        actorId: safeActorId,
+        actorContainment: true
+      }
+    });
+  }
+
+  return {
+    ok,
+    state: nextState
+  };
+}
+
+export async function getActorContainment(env = {}, {
+  actorType = "actor",
+  actorId = ""
+} = {}) {
+  const state = await getStoredActorContainmentState(env, actorType, actorId);
+
+  if (!isContainmentExpired(state)) {
+    return state;
+  }
+
+  const resetState = createDefaultActorContainmentState(actorType, actorId);
+  await storeActorContainmentState(env, resetState);
+  return resetState;
+}
+
+export async function clearContainmentState(env = {}) {
+  const previousState = await getContainmentState(env);
   const clearedState = createDefaultContainmentState();
-  const ok = await storeContainmentState(clearedState);
+  const ok = await storeContainmentState(env, clearedState);
 
   if (ok && !statesAreEquivalent(previousState, clearedState)) {
     await recordContainmentEvent({
+      env,
       type: "containment_cleared",
       severity: "info",
       action: "observe",
@@ -453,69 +653,93 @@ export async function clearContainmentState() {
   };
 }
 
-export async function evaluateContainment({
+export async function evaluateContainment(env = {}, {
   route = "",
   isAdminRoute = false,
   isWriteAction = false,
-  actionType = ""
+  actionType = "",
+  actorType = "",
+  actorId = ""
 } = {}) {
-  const state = await getContainmentState();
+  const globalState = await getContainmentState(env);
+  const actorState =
+    actorId ? await getActorContainment(env, { actorType, actorId }) : null;
+
   const normalizedRoute = normalizeRoute(route);
   const normalizedActionType = normalizeActionType(actionType);
+
+  const mergedFlags = sanitizeFlags({
+    ...(globalState?.flags || {}),
+    ...(actorState?.flags || {})
+  });
 
   let blocked = false;
   let reason = "";
   let action = "allow";
 
-  if (state.flags.lockdown) {
+  if (mergedFlags.lockdown || mergedFlags.blockActor) {
     blocked = true;
     action = "block";
-    reason = "lockdown_active";
-  } else if (state.flags.readOnlyMode && isWriteAction) {
+    reason = mergedFlags.blockActor ? "actor_blocked" : "lockdown_active";
+  } else if (mergedFlags.lockAccount) {
+    blocked = true;
+    action = "block";
+    reason = "account_locked";
+  } else if (mergedFlags.readOnlyMode && isWriteAction) {
     blocked = true;
     action = "block";
     reason = "read_only_mode_active";
   } else if (
-    state.flags.freezeRegistrations &&
+    mergedFlags.freezeRegistrations &&
     normalizedRoute.includes("signup")
   ) {
     blocked = true;
     action = "block";
     reason = "registrations_frozen";
   } else if (
-    state.flags.disableProfileEdits &&
+    mergedFlags.disableProfileEdits &&
     normalizedRoute.includes("profile")
   ) {
     blocked = true;
     action = "block";
     reason = "profile_edits_disabled";
   } else if (
-    state.flags.disableUploads &&
+    mergedFlags.disableUploads &&
     normalizedActionType === "upload"
   ) {
     blocked = true;
     action = "block";
     reason = "uploads_disabled";
   } else if (
-    state.flags.lockAdminWrites &&
+    mergedFlags.lockAdminWrites &&
     isAdminRoute &&
     isWriteAction
   ) {
     blocked = true;
     action = "block";
     reason = "admin_writes_locked";
-  } else if (state.flags.forceCaptcha) {
+  } else if (mergedFlags.forceCaptcha) {
     action = "challenge";
     reason = "force_captcha_enabled";
   }
 
   return {
-    mode: state.mode,
+    mode: globalState.mode,
     blocked,
     action,
     reason,
-    flags: sanitizeFlags(state.flags),
-    expiresAt: safeInt(state.expiresAt, 0, 0, getNowMax()),
-    updatedAt: safeInt(state.updatedAt, Date.now(), 0, getNowMax())
+    flags: mergedFlags,
+    expiresAt: safeInt(globalState.expiresAt, 0, 0, getNowMax()),
+    updatedAt: safeInt(globalState.updatedAt, Date.now(), 0, getNowMax()),
+    actorContainment: actorState
+      ? {
+          actorType: actorState.actorType,
+          actorId: actorState.actorId,
+          expiresAt: safeInt(actorState.expiresAt, 0, 0, getNowMax()),
+          killSessions: safeBoolean(actorState.flags?.killSessions),
+          lockAccount: safeBoolean(actorState.flags?.lockAccount),
+          blockActor: safeBoolean(actorState.flags?.blockActor)
+        }
+      : null
   };
 }
