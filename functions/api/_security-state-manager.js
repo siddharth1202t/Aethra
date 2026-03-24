@@ -31,6 +31,10 @@ function safeInt(value, fallback = 0, min = 0, max = 1_000_000) {
   return Math.min(max, Math.max(min, num));
 }
 
+function clampRiskScore(score) {
+  return Math.min(100, Math.max(0, safeInt(score, 0, 0, 100)));
+}
+
 function normalizeId(value = "", maxLength = MAX_ID_LENGTH) {
   return safeString(value || "", maxLength).replace(/[^a-zA-Z0-9._:@/-]/g, "");
 }
@@ -103,7 +107,9 @@ function getRiskDeltaByType(type = "", level = "") {
   if (
     normalizedType.includes("suspicious") ||
     normalizedType.includes("challenge") ||
-    normalizedType.includes("throttle")
+    normalizedType.includes("throttle") ||
+    normalizedType.includes("exploit") ||
+    normalizedType.includes("breach")
   ) {
     return 4 * severityWeight;
   }
@@ -116,10 +122,6 @@ function getRiskDeltaByType(type = "", level = "") {
   }
 
   return severityWeight;
-}
-
-function clampRiskScore(score) {
-  return Math.min(100, Math.max(0, safeInt(score, 0, 0, 100)));
 }
 
 function getRiskLevel(score = 0) {
@@ -254,6 +256,13 @@ async function getAccessToken(env) {
   return accessToken;
 }
 
+function clearAccessTokenCache() {
+  tokenCache = {
+    accessToken: "",
+    expiresAt: 0
+  };
+}
+
 function fromFirestoreValue(value) {
   if (!value || typeof value !== "object") return null;
 
@@ -351,7 +360,7 @@ function toFirestoreDocumentFields(data) {
   return fields;
 }
 
-async function firestoreGetDocument(env, collectionName, documentId) {
+async function firestoreGetDocument(env, collectionName, documentId, retry = true) {
   const projectId = safeString(env?.FIREBASE_PROJECT_ID || "", 200);
   const accessToken = await getAccessToken(env);
 
@@ -372,6 +381,12 @@ async function firestoreGetDocument(env, collectionName, documentId) {
 
   if (!response.ok) {
     const errorText = await response.text().catch(() => "");
+
+    if ((response.status === 401 || response.status === 403) && retry) {
+      clearAccessTokenCache();
+      return firestoreGetDocument(env, collectionName, documentId, false);
+    }
+
     throw new Error(
       `Firestore read failed: ${response.status} ${safeString(errorText, 500)}`
     );
@@ -381,7 +396,7 @@ async function firestoreGetDocument(env, collectionName, documentId) {
   return fromFirestoreDocument(data);
 }
 
-async function firestorePatchDocument(env, collectionName, documentId, payload) {
+async function firestorePatchDocument(env, collectionName, documentId, payload, retry = true) {
   const projectId = safeString(env?.FIREBASE_PROJECT_ID || "", 200);
   const accessToken = await getAccessToken(env);
 
@@ -402,6 +417,12 @@ async function firestorePatchDocument(env, collectionName, documentId, payload) 
 
   if (!response.ok) {
     const errorText = await response.text().catch(() => "");
+
+    if ((response.status === 401 || response.status === 403) && retry) {
+      clearAccessTokenCache();
+      return firestorePatchDocument(env, collectionName, documentId, payload, false);
+    }
+
     throw new Error(
       `Firestore patch failed: ${response.status} ${safeString(errorText, 500)}`
     );
@@ -446,6 +467,7 @@ function buildCounterPatch(existing = {}, event = {}) {
     errorEvents: safeInt(existing.errorEvents, 0),
     warningEvents: safeInt(existing.warningEvents, 0),
     infoEvents: safeInt(existing.infoEvents, 0),
+
     failedLoginCount: safeInt(existing.failedLoginCount, 0),
     failedSignupCount: safeInt(existing.failedSignupCount, 0),
     failedPasswordResetCount: safeInt(existing.failedPasswordResetCount, 0),
@@ -454,7 +476,12 @@ function buildCounterPatch(existing = {}, event = {}) {
     suspiciousEventCount: safeInt(existing.suspiciousEventCount, 0),
     rateLimitHitCount: safeInt(existing.rateLimitHitCount, 0),
     lockoutCount: safeInt(existing.lockoutCount, 0),
-    successfulAuthCount: safeInt(existing.successfulAuthCount, 0)
+    successfulAuthCount: safeInt(existing.successfulAuthCount, 0),
+
+    exploitFlagCount: safeInt(existing.exploitFlagCount, 0),
+    breachFlagCount: safeInt(existing.breachFlagCount, 0),
+    replayFlagCount: safeInt(existing.replayFlagCount, 0),
+    coordinatedFlagCount: safeInt(existing.coordinatedFlagCount, 0)
   };
 
   if (level === "critical") patch.criticalEvents += 1;
@@ -482,7 +509,8 @@ function buildCounterPatch(existing = {}, event = {}) {
     shouldIncrementCounter(type, [
       "turnstile_verification_failed",
       "captcha_missing",
-      "captcha_failed"
+      "captcha_failed",
+      "replay"
     ])
   ) {
     patch.captchaFailureCount += 1;
@@ -494,7 +522,9 @@ function buildCounterPatch(existing = {}, event = {}) {
       "forbidden",
       "challenge",
       "throttle",
-      "suspicious"
+      "suspicious",
+      "exploit",
+      "breach"
     ])
   ) {
     patch.suspiciousEventCount += 1;
@@ -516,6 +546,22 @@ function buildCounterPatch(existing = {}, event = {}) {
     ])
   ) {
     patch.successfulAuthCount += 1;
+  }
+
+  if (shouldIncrementCounter(type, ["exploit"])) {
+    patch.exploitFlagCount += 1;
+  }
+
+  if (shouldIncrementCounter(type, ["breach"])) {
+    patch.breachFlagCount += 1;
+  }
+
+  if (shouldIncrementCounter(type, ["replay"])) {
+    patch.replayFlagCount += 1;
+  }
+
+  if (shouldIncrementCounter(type, ["coordinated"])) {
+    patch.coordinatedFlagCount += 1;
   }
 
   return patch;
