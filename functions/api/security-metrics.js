@@ -25,15 +25,26 @@ function jsonResponse(payload, status = 200) {
   });
 }
 
+function normalizeIp(ip = "") {
+  return safeString(ip || "unknown", 100)
+    .replace(/[^a-fA-F0-9:.,]/g, "")
+    .slice(0, 100) || "unknown";
+}
+
 function getClientIp(request) {
+  const cfIp = request.headers.get("cf-connecting-ip");
+  if (typeof cfIp === "string" && cfIp.trim()) {
+    return normalizeIp(cfIp.trim());
+  }
+
   const forwarded = request.headers.get("x-forwarded-for");
   if (typeof forwarded === "string" && forwarded.trim()) {
-    return forwarded.split(",")[0].trim().slice(0, 100);
+    return normalizeIp(forwarded.split(",")[0].trim());
   }
 
   const realIp = request.headers.get("x-real-ip");
   if (typeof realIp === "string" && realIp.trim()) {
-    return realIp.trim().slice(0, 100);
+    return normalizeIp(realIp.trim());
   }
 
   return "unknown";
@@ -52,9 +63,9 @@ function buildUnauthorizedResponse() {
   };
 }
 
-async function recordUnauthorizedAccess({ ip, method }) {
+async function recordUnauthorizedAccess({ env, ip, method }) {
   try {
-    await appendSecurityEvent({
+    await appendSecurityEvent(env, {
       type: "admin_endpoint_unauthorized",
       severity: "warning",
       action: "block",
@@ -76,8 +87,7 @@ export async function onRequest(context) {
   const { request, env } = context;
 
   if (request.method !== "GET") {
-    const response = buildMethodNotAllowedResponse(["GET"]);
-    return jsonResponse(response.body, response.status);
+    return jsonResponse(buildMethodNotAllowedResponse(), 405);
   }
 
   const clientIp = getClientIp(request);
@@ -105,6 +115,7 @@ export async function onRequest(context) {
       });
 
       await recordUnauthorizedAccess({
+        env,
         ip: clientIp,
         method: request.method
       });
@@ -118,7 +129,7 @@ export async function onRequest(context) {
     const [adaptiveState, containmentState, events] = await Promise.all([
       getAdaptiveThreatMode(env),
       getContainmentState(env),
-      getRecentSecurityEvents({ env, limit })
+      getRecentSecurityEvents(env, { limit })
     ]);
 
     const payload = buildSecurityMetrics({
@@ -144,17 +155,19 @@ export async function onRequest(context) {
 
     return jsonResponse(payload, 200);
   } catch (error) {
-    await writeSecurityLog({
-      env,
-      type: "security_metrics_error",
-      level: "error",
-      route: ROUTE,
-      ip: clientIp,
-      message: "Failed to fetch security metrics.",
-      metadata: {
-        error: error instanceof Error ? error.message : "unknown_error"
-      }
-    });
+    try {
+      await writeSecurityLog({
+        env,
+        type: "security_metrics_error",
+        level: "error",
+        route: ROUTE,
+        ip: clientIp,
+        message: "Failed to fetch security metrics.",
+        metadata: {
+          error: error instanceof Error ? error.message : "unknown_error"
+        }
+      });
+    } catch {}
 
     return jsonResponse(
       {
