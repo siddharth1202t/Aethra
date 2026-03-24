@@ -9,6 +9,8 @@ import {
   buildMethodNotAllowedResponse
 } from "./_api-security.js";
 
+const ROUTE = "/api/login-attempt";
+
 const MAX_ATTEMPTS = 5;
 const MAX_IP_ATTEMPTS = 20;
 
@@ -16,40 +18,47 @@ const LOCK_WINDOW_MS = 15 * 60 * 1000;
 const IP_LOCK_WINDOW_MS = 10 * 60 * 1000;
 const STALE_RECORD_TTL_MS = 24 * 60 * 60 * 1000;
 
-const ROUTE = "/api/login-attempt";
 const MAX_BODY_KEYS = 25;
 const MAX_CONTENT_LENGTH_BYTES = 12 * 1024;
 
-async function buildAttemptFingerprint({ email, ip, action, actionLabel }) {
-  const encoder = new TextEncoder();
+const ALLOWED_ACTIONS = new Set(["check", "fail", "success"]);
 
-  const data = encoder.encode(
-    [
-      safeString(email, 200),
-      safeString(ip, 100),
-      safeString(action, 50),
-      safeString(actionLabel, 100)
-    ].join("|")
-  );
-
-  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
-
-  return hashArray
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("")
-    .slice(0, 32);
-}
+/* ---------------- RESPONSE ---------------- */
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
     headers: {
       "content-type": "application/json; charset=utf-8",
-      "cache-control": "no-store"
+      "cache-control": "no-store",
+      "pragma": "no-cache",
+      "x-content-type-options": "nosniff"
     }
   });
 }
+
+function buildAttemptResponse({
+  isLocked,
+  remainingMs = 0,
+  lockType = "none",
+  attempts = 0,
+  action = "allow",
+  fingerprint = null,
+  message = null
+}) {
+  return {
+    success: true,
+    action,
+    isLocked: Boolean(isLocked),
+    remainingMs: Math.max(0, safePositiveInt(remainingMs, 0)),
+    lockType,
+    attempts: safePositiveInt(attempts, 0),
+    ...(fingerprint ? { fingerprint } : {}),
+    ...(message ? { message } : {})
+  };
+}
+
+/* ---------------- NORMALIZATION ---------------- */
 
 function normalizeEmail(email) {
   return safeString(email || "", 200).trim().toLowerCase();
@@ -66,6 +75,10 @@ function normalizeIp(ip) {
   return value || "unknown";
 }
 
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
 function getEscalatedLockMs(baseMs, escalationCount) {
   const multiplier = Math.min(
     4,
@@ -74,6 +87,8 @@ function getEscalatedLockMs(baseMs, escalationCount) {
   return Math.floor(baseMs * multiplier);
 }
 
+/* ---------------- KEYS ---------------- */
+
 function buildLoginAttemptKey(email, ip) {
   return `login-attempt:${email}::${ip}`;
 }
@@ -81,6 +96,8 @@ function buildLoginAttemptKey(email, ip) {
 function buildIpAttemptKey(ip) {
   return `login-attempt-ip:${ip}`;
 }
+
+/* ---------------- RECORD HELPERS ---------------- */
 
 function createDefaultRecord(now = Date.now()) {
   return {
@@ -128,9 +145,65 @@ async function saveStoredRecord(redis, key, record) {
   await redis.set(key, JSON.stringify(normalizeRecord(record)), { ex: ttlSeconds });
 }
 
+/* ---------------- FINGERPRINT ---------------- */
+
+async function buildAttemptFingerprint({ email, ip, action, actionLabel }) {
+  const encoder = new TextEncoder();
+
+  const data = encoder.encode(
+    [
+      safeString(email, 200),
+      safeString(ip, 100),
+      safeString(action, 50),
+      safeString(actionLabel, 100)
+    ].join("|")
+  );
+
+  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+
+  return hashArray
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("")
+    .slice(0, 32);
+}
+
+/* ---------------- LOGGING ---------------- */
+
+async function logLoginAttempt({
+  env,
+  type,
+  level,
+  actor,
+  ip,
+  email,
+  action,
+  message,
+  metadata = {}
+}) {
+  await writeSecurityLog({
+    env,
+    type,
+    level,
+    message,
+    ip: ip || actor?.ip || "unknown",
+    route: ROUTE,
+    userId: actor?.userId || null,
+    sessionId: actor?.sessionId || null,
+    metadata: {
+      actorKey: actor?.actorKey || null,
+      routeKey: actor?.routeKey || null,
+      email: safeString(email || "", 200),
+      action: safeString(action || "", 50),
+      ...metadata
+    }
+  });
+}
+
+/* ---------------- MAIN HANDLER ---------------- */
+
 export async function onRequest(context) {
   const { request, env } = context;
-  const redis = getRedis(env);
 
   if (request.method === "OPTIONS") {
     return new Response(null, { status: 204 });
@@ -141,21 +214,52 @@ export async function onRequest(context) {
   }
 
   const contentType = request.headers.get("content-type") || "";
-
-  if (!contentType.startsWith("application/json")) {
-    return json({
-      success: false,
-      message: "Unsupported content type."
-    }, 415);
+  if (!contentType.toLowerCase().includes("application/json")) {
+    return json(
+      {
+        success: false,
+        action: "deny",
+        message: "Unsupported content type."
+      },
+      415
+    );
   }
 
   const contentLength = Number(request.headers.get("content-length") || 0);
+  if (Number.isFinite(contentLength) && contentLength > MAX_CONTENT_LENGTH_BYTES) {
+    return json(
+      {
+        success: false,
+        action: "deny",
+        message: "Request body too large."
+      },
+      413
+    );
+  }
 
-  if (contentLength > MAX_CONTENT_LENGTH_BYTES) {
-    return json({
-      success: false,
-      message: "Request body too large."
-    }, 413);
+  let redis;
+  try {
+    redis = getRedis(env);
+  } catch (error) {
+    await writeSecurityLog({
+      env,
+      type: "login_attempt_redis_unavailable",
+      level: "critical",
+      message: "Redis unavailable during login-attempt processing",
+      route: ROUTE,
+      metadata: {
+        error: safeString(error?.message || "Redis init failed", 300)
+      }
+    });
+
+    return json(
+      {
+        success: false,
+        action: "deny",
+        message: "Service temporarily unavailable."
+      },
+      503
+    );
   }
 
   try {
@@ -165,6 +269,28 @@ export async function onRequest(context) {
     const rawEmail = normalizeEmail(body.email);
     const action = safeString(body.action, 50).toLowerCase();
     const actionLabel = safeString(body.actionLabel, 100);
+
+    if (!ALLOWED_ACTIONS.has(action)) {
+      return json(
+        {
+          success: false,
+          action: "deny",
+          message: "Invalid action."
+        },
+        400
+      );
+    }
+
+    if (!rawEmail || !isValidEmail(rawEmail)) {
+      return json(
+        {
+          success: false,
+          action: "deny",
+          message: "Invalid email."
+        },
+        400
+      );
+    }
 
     const actor = createActorContext({
       req: request,
@@ -180,6 +306,12 @@ export async function onRequest(context) {
       req: request,
       body,
       route: `${ROUTE}:${action || "unknown"}`,
+      context: {
+        ip: actor.ip,
+        sessionId: actor.sessionId,
+        userId: actor.userId,
+        email: rawEmail
+      },
       abuseSuccess: action !== "fail",
       containmentConfig: {
         isWriteAction: true,
@@ -193,24 +325,62 @@ export async function onRequest(context) {
       }
     });
 
-    if (security?.risk?.finalAction === "block") {
-      await writeSecurityLog({
+    const finalAction = safeString(
+      security?.risk?.finalAction || "allow",
+      50
+    ).toLowerCase();
+    const riskScore = safePositiveInt(security?.risk?.riskScore, 0);
+
+    if (finalAction === "block") {
+      await logLoginAttempt({
         env,
         type: "login_attempt_blocked",
         level: "warning",
-        message: "Login attempt request blocked by security orchestrator",
+        actor,
         ip,
-        route: ROUTE,
+        email: rawEmail,
+        action,
+        message: "Login attempt request blocked by security orchestrator",
         metadata: {
-          finalAction: security?.risk?.finalAction,
-          riskScore: security?.risk?.riskScore
+          finalAction,
+          riskScore
         }
       });
 
-      return json({
-        success: false,
-        message: "Request blocked."
-      }, 403);
+      return json(
+        {
+          success: false,
+          action: "block",
+          message: "Request blocked."
+        },
+        403
+      );
+    }
+
+    if (finalAction === "challenge") {
+      await logLoginAttempt({
+        env,
+        type: "login_attempt_challenged",
+        level: "warning",
+        actor,
+        ip,
+        email: rawEmail,
+        action,
+        message: "Login attempt requires additional verification",
+        metadata: {
+          finalAction,
+          riskScore
+        }
+      });
+
+      return json(
+        {
+          success: false,
+          action: "challenge",
+          message: "Verification required."
+        },
+        403
+      );
     }
 
     const fingerprint = await buildAttemptFingerprint({
@@ -221,38 +391,113 @@ export async function onRequest(context) {
     });
 
     const ipRedisKey = buildIpAttemptKey(ip);
-    const userRedisKey = buildLoginAttemptKey(rawEmail || "anon", ip);
+    const userRedisKey = buildLoginAttemptKey(rawEmail, ip);
 
-    const ipRecord = await getStoredRecord(redis, ipRedisKey);
-    const record = await getStoredRecord(redis, userRedisKey);
+    const [ipRecord, record] = await Promise.all([
+      getStoredRecord(redis, ipRedisKey),
+      getStoredRecord(redis, userRedisKey)
+    ]);
 
     if (ipRecord.lockUntil > now) {
-      return json({
-        success: true,
-        isLocked: true,
-        remainingMs: ipRecord.lockUntil - now,
-        lockType: "ip"
+      const remainingMs = ipRecord.lockUntil - now;
+
+      await logLoginAttempt({
+        env,
+        type: "login_ip_lock_enforced",
+        level: "warning",
+        actor,
+        ip,
+        email: rawEmail,
+        action,
+        message: "Login attempt denied due to active IP lock",
+        metadata: {
+          remainingMs,
+          ipAttempts: ipRecord.count,
+          escalationCount: ipRecord.escalationCount,
+          fingerprint
+        }
       });
+
+      return json(
+        buildAttemptResponse({
+          isLocked: true,
+          remainingMs,
+          lockType: "ip",
+          attempts: ipRecord.count,
+          action: "deny",
+          fingerprint,
+          message: "Too many attempts. Please try again later."
+        }),
+        200
+      );
     }
 
     if (record.lockUntil > now && action !== "success") {
-      return json({
-        success: true,
-        isLocked: true,
-        remainingMs: record.lockUntil - now,
-        lockType: "user"
+      const remainingMs = record.lockUntil - now;
+
+      await logLoginAttempt({
+        env,
+        type: "login_user_lock_enforced",
+        level: "warning",
+        actor,
+        ip,
+        email: rawEmail,
+        action,
+        message: "Login attempt denied due to active user lock",
+        metadata: {
+          remainingMs,
+          attempts: record.count,
+          escalationCount: record.escalationCount,
+          fingerprint
+        }
       });
+
+      return json(
+        buildAttemptResponse({
+          isLocked: true,
+          remainingMs,
+          lockType: "user",
+          attempts: record.count,
+          action: "deny",
+          fingerprint,
+          message: "Too many attempts. Please try again later."
+        }),
+        200
+      );
     }
 
     if (action === "check") {
       const isLocked = record.lockUntil > now;
+      const remainingMs = isLocked ? record.lockUntil - now : 0;
 
-      return json({
-        success: true,
-        isLocked,
-        remainingMs: isLocked ? record.lockUntil - now : 0,
-        lockType: isLocked ? "user" : "none"
+      await logLoginAttempt({
+        env,
+        type: "login_attempt_checked",
+        level: "info",
+        actor,
+        ip,
+        email: rawEmail,
+        action,
+        message: "Login attempt lock state checked",
+        metadata: {
+          isLocked,
+          remainingMs,
+          attempts: record.count,
+          fingerprint
+        }
       });
+
+      return json(
+        buildAttemptResponse({
+          isLocked,
+          remainingMs,
+          lockType: isLocked ? "user" : "none",
+          attempts: record.count,
+          action: "allow",
+          fingerprint
+        }),
+        200
+      );
     }
 
     if (action === "success") {
@@ -262,13 +507,31 @@ export async function onRequest(context) {
 
       await saveStoredRecord(redis, userRedisKey, record);
 
-      return json({
-        success: true,
-        isLocked: false,
-        remainingMs: 0,
-        lockType: "none",
-        fingerprint
+      await logLoginAttempt({
+        env,
+        type: "login_attempt_reset",
+        level: "info",
+        actor,
+        ip,
+        email: rawEmail,
+        action,
+        message: "Login attempt counters reset after success",
+        metadata: {
+          fingerprint
+        }
       });
+
+      return json(
+        buildAttemptResponse({
+          isLocked: false,
+          remainingMs: 0,
+          lockType: "none",
+          attempts: 0,
+          action: "allow",
+          fingerprint
+        }),
+        200
+      );
     }
 
     if (action === "fail") {
@@ -290,45 +553,68 @@ export async function onRequest(context) {
           now + getEscalatedLockMs(IP_LOCK_WINDOW_MS, ipRecord.escalationCount);
       }
 
-      await saveStoredRecord(redis, userRedisKey, record);
-      await saveStoredRecord(redis, ipRedisKey, ipRecord);
+      await Promise.all([
+        saveStoredRecord(redis, userRedisKey, record),
+        saveStoredRecord(redis, ipRedisKey, ipRecord)
+      ]);
 
       const isUserLocked = record.lockUntil > now;
       const isIpLocked = ipRecord.lockUntil > now;
+      const lockType = isUserLocked ? "user" : isIpLocked ? "ip" : "none";
+      const remainingMs = Math.max(
+        isUserLocked ? record.lockUntil - now : 0,
+        isIpLocked ? ipRecord.lockUntil - now : 0
+      );
 
-      if (isUserLocked || isIpLocked) {
-        await writeSecurityLog({
-          env,
-          type: "login_lockout_triggered",
-          level: "warning",
-          message: "Login lockout triggered after repeated failed attempts",
-          ip,
-          route: ROUTE,
-          metadata: {
-            lockType: isUserLocked ? "user" : "ip",
-            attempts: record.count,
-            ipAttempts: ipRecord.count
-          }
-        });
-      }
-
-      return json({
-        success: true,
-        isLocked: isUserLocked || isIpLocked,
-        remainingMs: Math.max(
-          isUserLocked ? record.lockUntil - now : 0,
-          isIpLocked ? ipRecord.lockUntil - now : 0
-        ),
-        lockType: isUserLocked ? "user" : isIpLocked ? "ip" : "none",
-        attempts: record.count,
-        fingerprint
+      await logLoginAttempt({
+        env,
+        type: isUserLocked || isIpLocked
+          ? "login_lockout_triggered"
+          : "login_attempt_failed",
+        level: isUserLocked || isIpLocked ? "warning" : "info",
+        actor,
+        ip,
+        email: rawEmail,
+        action,
+        message: isUserLocked || isIpLocked
+          ? "Login lockout triggered after repeated failed attempts"
+          : "Login failure recorded",
+        metadata: {
+          lockType,
+          attempts: record.count,
+          ipAttempts: ipRecord.count,
+          remainingMs,
+          userEscalationCount: record.escalationCount,
+          ipEscalationCount: ipRecord.escalationCount,
+          fingerprint
+        }
       });
+
+      return json(
+        buildAttemptResponse({
+          isLocked: isUserLocked || isIpLocked,
+          remainingMs,
+          lockType,
+          attempts: record.count,
+          action: isUserLocked || isIpLocked ? "deny" : "allow",
+          fingerprint,
+          message:
+            isUserLocked || isIpLocked
+              ? "Too many attempts. Please try again later."
+              : null
+        }),
+        200
+      );
     }
 
-    return json({
-      success: false,
-      message: "Invalid request."
-    }, 400);
+    return json(
+      {
+        success: false,
+        action: "deny",
+        message: "Invalid request."
+      },
+      400
+    );
   } catch (error) {
     console.error("Login attempt API error:", error);
 
@@ -345,9 +631,13 @@ export async function onRequest(context) {
       });
     } catch {}
 
-    return json({
-      success: false,
-      message: "Internal server error."
-    }, 500);
+    return json(
+      {
+        success: false,
+        action: "deny",
+        message: "Internal server error."
+      },
+      500
+    );
   }
 }
