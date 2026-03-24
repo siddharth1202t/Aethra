@@ -25,6 +25,8 @@ const ALLOWED_ACTIONS = new Set([
   "observe"
 ]);
 
+/* -------------------- SAFETY -------------------- */
+
 function safeString(value, maxLength = 200) {
   return String(value ?? "")
     .replace(/[\u0000-\u001F\u007F]/g, "")
@@ -51,6 +53,8 @@ function safeJsonParse(raw, fallback = null) {
   }
 }
 
+/* -------------------- NORMALIZATION -------------------- */
+
 function normalizeSeverity(value = "info") {
   const normalized = safeString(value || "info", 20).toLowerCase();
   return ALLOWED_SEVERITIES.has(normalized) ? normalized : "info";
@@ -63,7 +67,6 @@ function normalizeAction(value = "observe") {
 
 function normalizeRoute(value = "") {
   const raw = safeString(value || "", 300);
-
   if (!raw) return "";
 
   return raw
@@ -77,7 +80,6 @@ function normalizeRoute(value = "") {
 
 function normalizeIp(value = "") {
   let ip = safeString(value || "", 100);
-
   if (!ip) return "";
 
   if (ip.startsWith("::ffff:")) {
@@ -99,11 +101,7 @@ function sanitizeMetadataValue(value, depth = 0) {
     return "[complex]";
   }
 
-  if (
-    value === null ||
-    typeof value === "number" ||
-    typeof value === "boolean"
-  ) {
+  if (value === null || typeof value === "number" || typeof value === "boolean") {
     return value;
   }
 
@@ -163,6 +161,7 @@ function createEventId() {
 
 function normalizeStoredEvent(raw) {
   const event = raw && typeof raw === "object" ? raw : {};
+  const metadata = sanitizeMetadata(event.metadata || {});
   const maxTimestamp = Date.now() + MAX_FUTURE_EVENT_MS;
 
   return {
@@ -173,32 +172,46 @@ function normalizeStoredEvent(raw) {
     action: normalizeAction(event.action || "observe"),
     route: normalizeRoute(event.route || ""),
     ip: normalizeIp(event.ip || ""),
-    sessionId: safeString(event.sessionId || "", 120),
+    sessionId: safeString(event.sessionId || metadata.sessionId || "", 120),
     userId: safeString(event.userId || "", 120),
-    actorKey: safeString(event.actorKey || "", 240),
-    requestId: safeString(event.requestId || "", 120),
+    actorKey: safeString(event.actorKey || metadata.actorKey || "", 240),
+    requestId: safeString(event.requestId || metadata.requestId || "", 120),
     mode: safeString(event.mode || "", 30).toLowerCase(),
     reason: safeString(event.reason || "", 300),
     message: safeString(event.message || "", 500),
-    metadata: sanitizeMetadata(event.metadata || {})
+    metadata
   };
 }
 
-async function getStoredEvents(env = {}) {
-  const redis = getRedis(env);
+function sortEventsNewestFirst(events = []) {
+  return [...events].sort(
+    (a, b) => safeInt(b?.timestamp, 0) - safeInt(a?.timestamp, 0)
+  );
+}
 
+/* -------------------- REDIS MODE DETECTION -------------------- */
+
+function supportsRedisListOps(redis) {
+  return Boolean(
+    redis &&
+      typeof redis.lpush === "function" &&
+      typeof redis.lrange === "function" &&
+      typeof redis.ltrim === "function" &&
+      typeof redis.expire === "function"
+  );
+}
+
+/* -------------------- LEGACY ARRAY STORAGE -------------------- */
+
+async function getStoredEventsFromJson(redis) {
   try {
     const raw = await redis.get(SECURITY_EVENTS_KEY);
 
-    if (!raw) {
-      return [];
-    }
+    if (!raw) return [];
 
     if (typeof raw === "string") {
       const parsed = safeJsonParse(raw, []);
-      return Array.isArray(parsed)
-        ? parsed.map(normalizeStoredEvent)
-        : [];
+      return Array.isArray(parsed) ? parsed.map(normalizeStoredEvent) : [];
     }
 
     if (Array.isArray(raw)) {
@@ -212,15 +225,7 @@ async function getStoredEvents(env = {}) {
   }
 }
 
-function sortEventsNewestFirst(events = []) {
-  return [...events].sort(
-    (a, b) => safeInt(b?.timestamp, 0) - safeInt(a?.timestamp, 0)
-  );
-}
-
-async function storeEvents(env = {}, events = []) {
-  const redis = getRedis(env);
-
+async function storeEventsAsJson(redis, events = []) {
   try {
     const normalizedEvents = Array.isArray(events)
       ? sortEventsNewestFirst(events.map(normalizeStoredEvent)).slice(
@@ -240,10 +245,93 @@ async function storeEvents(env = {}, events = []) {
   }
 }
 
+/* -------------------- PRIMARY STORAGE -------------------- */
+
+async function getStoredEvents(env = {}) {
+  const redis = getRedis(env);
+
+  if (supportsRedisListOps(redis)) {
+    try {
+      const rawItems = await redis.lrange(
+        SECURITY_EVENTS_KEY,
+        0,
+        SECURITY_EVENTS_MAX_ITEMS - 1
+      );
+
+      if (!Array.isArray(rawItems)) return [];
+
+      return rawItems
+        .map((item) => {
+          if (typeof item === "string") {
+            return normalizeStoredEvent(safeJsonParse(item, {}));
+          }
+          if (item && typeof item === "object") {
+            return normalizeStoredEvent(item);
+          }
+          return null;
+        })
+        .filter(Boolean);
+    } catch (error) {
+      console.error("Security events list read failed:", error);
+      return [];
+    }
+  }
+
+  return getStoredEventsFromJson(redis);
+}
+
+async function appendStoredEvent(env = {}, event = {}) {
+  const redis = getRedis(env);
+  const normalizedEvent = normalizeStoredEvent(event);
+
+  if (supportsRedisListOps(redis)) {
+    try {
+      await redis.lpush(SECURITY_EVENTS_KEY, JSON.stringify(normalizedEvent));
+      await redis.ltrim(SECURITY_EVENTS_KEY, 0, SECURITY_EVENTS_MAX_ITEMS - 1);
+      await redis.expire(SECURITY_EVENTS_KEY, SECURITY_EVENTS_TTL_SECONDS);
+
+      return {
+        ok: true,
+        event: normalizedEvent
+      };
+    } catch (error) {
+      console.error("Security events list append failed:", error);
+      return {
+        ok: false,
+        event: normalizedEvent
+      };
+    }
+  }
+
+  const currentEvents = await getStoredEventsFromJson(redis);
+  const nextEvents = [normalizedEvent, ...currentEvents];
+  const ok = await storeEventsAsJson(redis, nextEvents);
+
+  return {
+    ok,
+    event: normalizedEvent
+  };
+}
+
+async function clearStoredEvents(env = {}) {
+  const redis = getRedis(env);
+
+  if (supportsRedisListOps(redis)) {
+    try {
+      await redis.del(SECURITY_EVENTS_KEY);
+      return true;
+    } catch (error) {
+      console.error("Security events list clear failed:", error);
+      return false;
+    }
+  }
+
+  return storeEventsAsJson(redis, []);
+}
+
+/* -------------------- ARGUMENT HANDLING -------------------- */
+
 function extractAppendArgs(arg1, arg2) {
-  // supports both:
-  // appendSecurityEvent(env, event)
-  // appendSecurityEvent(event)
   if (arg2 !== undefined) {
     return {
       env: arg1 && typeof arg1 === "object" ? arg1 : {},
@@ -257,35 +345,30 @@ function extractAppendArgs(arg1, arg2) {
   };
 }
 
+/* -------------------- PUBLIC API -------------------- */
+
 export async function appendSecurityEvent(arg1 = {}, arg2 = undefined) {
   const { env, event: rawEvent } = extractAppendArgs(arg1, arg2);
 
   const event = normalizeStoredEvent({
-    id: createEventId(),
-    timestamp: Date.now(),
-    type: rawEvent.type,
-    severity: rawEvent.severity,
-    action: rawEvent.action,
-    route: rawEvent.route,
-    ip: rawEvent.ip,
-    sessionId: rawEvent.sessionId,
-    userId: rawEvent.userId,
-    actorKey: rawEvent.actorKey,
-    requestId: rawEvent.requestId,
-    mode: rawEvent.mode,
-    reason: rawEvent.reason,
-    message: rawEvent.message,
-    metadata: rawEvent.metadata
+    id: rawEvent?.id || createEventId(),
+    timestamp: rawEvent?.timestamp || Date.now(),
+    type: rawEvent?.type,
+    severity: rawEvent?.severity,
+    action: rawEvent?.action,
+    route: rawEvent?.route,
+    ip: rawEvent?.ip,
+    sessionId: rawEvent?.sessionId,
+    userId: rawEvent?.userId,
+    actorKey: rawEvent?.actorKey,
+    requestId: rawEvent?.requestId,
+    mode: rawEvent?.mode,
+    reason: rawEvent?.reason,
+    message: rawEvent?.message,
+    metadata: rawEvent?.metadata
   });
 
-  const currentEvents = await getStoredEvents(env);
-  const nextEvents = [event, ...currentEvents];
-  const ok = await storeEvents(env, nextEvents);
-
-  return {
-    ok,
-    event
-  };
+  return appendStoredEvent(env, event);
 }
 
 export async function getRecentSecurityEvents(envOrOptions = {}, maybeOptions = undefined) {
@@ -321,7 +404,7 @@ export async function getRecentSecurityEvents(envOrOptions = {}, maybeOptions = 
 }
 
 export async function clearSecurityEvents(env = {}) {
-  const ok = await storeEvents(env, []);
+  const ok = await clearStoredEvents(env);
 
   return {
     ok,
