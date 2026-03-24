@@ -1,6 +1,7 @@
 import { Redis } from "@upstash/redis";
 
 let redisInstance = null;
+let redisInitSignature = "";
 let redisInitAttempted = false;
 
 function safeString(value, maxLength = 500) {
@@ -10,35 +11,27 @@ function safeString(value, maxLength = 500) {
     .slice(0, maxLength);
 }
 
-function hasRedisEnv() {
-  const url = safeString(process.env.UPSTASH_REDIS_REST_URL || "", 2000);
-  const token = safeString(process.env.UPSTASH_REDIS_REST_TOKEN || "", 2000);
-  return Boolean(url && token);
+function getEnvValue(env = {}, key = "") {
+  if (env && typeof env === "object" && env[key] !== undefined) {
+    return safeString(env[key], 2000);
+  }
+
+  if (typeof process !== "undefined" && process?.env?.[key] !== undefined) {
+    return safeString(process.env[key], 2000);
+  }
+
+  return "";
 }
 
-export function getRedis() {
-  if (redisInstance) {
-    return redisInstance;
-  }
+function getRedisConfig(env = {}) {
+  const url = getEnvValue(env, "UPSTASH_REDIS_REST_URL");
+  const token = getEnvValue(env, "UPSTASH_REDIS_REST_TOKEN");
 
-  if (redisInitAttempted) {
-    return null;
-  }
-
-  redisInitAttempted = true;
-
-  if (!hasRedisEnv()) {
-    console.error("Upstash Redis environment variables are missing.");
-    return null;
-  }
-
-  try {
-    redisInstance = Redis.fromEnv();
-    return redisInstance;
-  } catch (error) {
-    console.error("Upstash Redis initialization failed:", error);
-    return null;
-  }
+  return {
+    url,
+    token,
+    hasConfig: Boolean(url && token)
+  };
 }
 
 function createNoopRedisMethod(methodName) {
@@ -64,10 +57,64 @@ function createNoopRedisMethod(methodName) {
       case "lrange":
       case "zrange":
         return [];
+      case "ping":
+        return "NOOP";
       default:
         return null;
     }
   };
+}
+
+function createNoopRedisClient() {
+  return new Proxy(
+    { __isNoopRedis: true, __redisAvailable: false },
+    {
+      get(target, prop) {
+        if (prop in target) {
+          return target[prop];
+        }
+        return createNoopRedisMethod(String(prop));
+      }
+    }
+  );
+}
+
+const noopRedis = createNoopRedisClient();
+
+export function getRedis(env = {}) {
+  const { url, token, hasConfig } = getRedisConfig(env);
+
+  if (!hasConfig) {
+    if (!redisInitAttempted) {
+      console.error("Upstash Redis environment variables are missing.");
+      redisInitAttempted = true;
+    }
+    return noopRedis;
+  }
+
+  const signature = `${url}::${token.slice(0, 12)}`;
+
+  if (redisInstance && redisInitSignature === signature) {
+    return redisInstance;
+  }
+
+  try {
+    redisInstance = new Redis({
+      url,
+      token
+    });
+    redisInitSignature = signature;
+    redisInitAttempted = true;
+    return redisInstance;
+  } catch (error) {
+    console.error("Upstash Redis initialization failed:", error);
+    return noopRedis;
+  }
+}
+
+export function isRedisAvailable(env = {}) {
+  const client = getRedis(env);
+  return client && client.__isNoopRedis !== true;
 }
 
 export const redis = new Proxy(
@@ -75,18 +122,17 @@ export const redis = new Proxy(
   {
     get(_target, prop) {
       const client = getRedis();
-
-      if (!client) {
-        return createNoopRedisMethod(String(prop));
-      }
-
-      const value = client[prop];
+      const value = client?.[prop];
 
       if (typeof value === "function") {
         return value.bind(client);
       }
 
-      return value;
+      if (value !== undefined) {
+        return value;
+      }
+
+      return createNoopRedisMethod(String(prop));
     }
   }
 );
