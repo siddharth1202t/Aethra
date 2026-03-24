@@ -1,4 +1,5 @@
 import { writeSecurityLog } from "./_security-log-writer.js";
+import { evaluateContainment } from "./_security-containment.js";
 import { safeString as baseSafeString } from "./_api-security.js";
 
 const FIREBASE_JWKS_URL =
@@ -108,6 +109,10 @@ function normalizeIp(value = "") {
   return ip || "unknown";
 }
 
+function normalizeSessionId(value = "") {
+  return safeString(value || "", 128).replace(/[^a-zA-Z0-9._:@/-]/g, "");
+}
+
 function getClientIp(req) {
   const cfIp = getHeaderValue(req, "cf-connecting-ip");
   if (cfIp) return normalizeIp(cfIp);
@@ -132,6 +137,15 @@ function getOrigin(req) {
   }
 }
 
+function getSessionId(req, decodedToken = {}) {
+  return normalizeSessionId(
+    getHeaderValue(req, "x-session-id") ||
+    decodedToken?.session_id ||
+    decodedToken?.sid ||
+    ""
+  );
+}
+
 function sanitizeClaims(claims = {}) {
   return {
     admin: claims?.admin === true,
@@ -150,7 +164,9 @@ function buildRoleResult({
   claims = {},
   uid = "",
   emailVerified = false,
-  disabled = false
+  disabled = false,
+  containment = null,
+  sessionRevoked = false
 } = {}) {
   return {
     ok,
@@ -161,7 +177,9 @@ function buildRoleResult({
     claims,
     uid: safeString(uid || "", 128),
     emailVerified: emailVerified === true,
-    disabled: disabled === true
+    disabled: disabled === true,
+    containment,
+    sessionRevoked: sessionRevoked === true
   };
 }
 
@@ -355,7 +373,9 @@ function validateDecodedToken(decodedToken = {}, projectId = "") {
   return {
     ...decodedToken,
     uid,
-    user_id: uid
+    user_id: uid,
+    iat,
+    auth_time: authTime
   };
 }
 
@@ -371,6 +391,84 @@ export function hasDeveloperRole(claims = {}) {
 
 export function hasAdminRole(claims = {}) {
   return claims?.admin === true;
+}
+
+function isSessionRevokedByContainment(decodedToken = {}, containment = null) {
+  const killIssuedAtMs = safeInt(
+    containment?.actorContainment?.killSessionsIssuedAt ||
+      containment?.enforcement?.killSessionsIssuedAt ||
+      0,
+    0,
+    0,
+    Date.now() + 60_000
+  );
+
+  if (!killIssuedAtMs) return false;
+
+  const tokenIatSeconds = safeInt(decodedToken?.iat, 0, 0, 9_999_999_999);
+  const authTimeSeconds = safeInt(decodedToken?.auth_time, 0, 0, 9_999_999_999);
+  const tokenIssuedAtMs = Math.max(tokenIatSeconds, authTimeSeconds) * 1000;
+
+  if (!tokenIssuedAtMs) return true;
+
+  return tokenIssuedAtMs < killIssuedAtMs;
+}
+
+async function evaluateAuthContainment({
+  env = {},
+  req = null,
+  route = "unknown-route",
+  decodedToken = null,
+  uid = ""
+} = {}) {
+  const ip = getClientIp(req);
+  const sessionId = getSessionId(req, decodedToken);
+
+  const userContainment = uid
+    ? await evaluateContainment(env, {
+        route,
+        isAdminRoute: false,
+        isWriteAction: false,
+        actionType: "auth_read",
+        actorType: "user",
+        actorId: uid
+      })
+    : null;
+
+  const sessionContainment = sessionId
+    ? await evaluateContainment(env, {
+        route,
+        isAdminRoute: false,
+        isWriteAction: false,
+        actionType: "session_auth",
+        actorType: "session",
+        actorId: sessionId
+      })
+    : null;
+
+  const ipContainment = ip && ip !== "unknown"
+    ? await evaluateContainment(env, {
+        route,
+        isAdminRoute: false,
+        isWriteAction: false,
+        actionType: "ip_auth",
+        actorType: "ip",
+        actorId: ip
+      })
+    : null;
+
+  const containment = [userContainment, sessionContainment, ipContainment]
+    .filter(Boolean)
+    .sort((a, b) => {
+      const rank = { normal: 0, elevated: 1, defense: 2, lockdown: 3 };
+      return (rank[b?.mode] || 0) - (rank[a?.mode] || 0);
+    })[0] || null;
+
+  return {
+    containment,
+    sessionId,
+    ip
+  };
 }
 
 async function logDeniedAccess({
@@ -398,6 +496,11 @@ async function logDeniedAccess({
         claimsAdmin: tokenResult?.claims?.admin === true,
         emailVerified: tokenResult?.emailVerified === true,
         disabled: tokenResult?.disabled === true,
+        sessionRevoked: tokenResult?.sessionRevoked === true,
+        containmentAction:
+          tokenResult?.containment?.action ||
+          tokenResult?.containment?.enforcement?.action ||
+          "",
         origin: getOrigin(req)
       }
     });
@@ -408,7 +511,7 @@ async function logDeniedAccess({
 
 export async function verifyRequestToken(
   req,
-  { env = {}, requireEmailVerified = false } = {}
+  { env = {}, requireEmailVerified = false, route = "unknown-route" } = {}
 ) {
   try {
     const token = getBearerToken(req);
@@ -440,15 +543,68 @@ export async function verifyRequestToken(
       });
     }
 
+    const { containment, sessionId, ip } = await evaluateAuthContainment({
+      env,
+      req,
+      route: normalizeRoute(route),
+      decodedToken,
+      uid
+    });
+
+    const sessionRevoked = isSessionRevokedByContainment(decodedToken, containment);
+
+    if (containment?.enforcement?.mustBlock === true) {
+      const code =
+        containment?.enforcement?.mustLockAccount === true
+          ? "account_locked"
+          : containment?.enforcement?.mustBlockActor === true
+            ? "actor_blocked"
+            : "auth_contained";
+
+      return buildRoleResult({
+        ok: false,
+        status: 403,
+        code,
+        message: "Access denied by security policy.",
+        decodedToken: null,
+        claims,
+        uid,
+        emailVerified,
+        containment,
+        sessionRevoked
+      });
+    }
+
+    if (sessionRevoked) {
+      return buildRoleResult({
+        ok: false,
+        status: 401,
+        code: "session_revoked",
+        message: "Session has been invalidated.",
+        decodedToken: null,
+        claims,
+        uid,
+        emailVerified,
+        containment,
+        sessionRevoked: true
+      });
+    }
+
     return buildRoleResult({
       ok: true,
       status: 200,
       code: "verified",
       message: "Token verified.",
-      decodedToken,
+      decodedToken: {
+        ...decodedToken,
+        session_id: sessionId || decodedToken?.session_id || "",
+        ip: ip || ""
+      },
       claims,
       uid,
-      emailVerified
+      emailVerified,
+      containment,
+      sessionRevoked: false
     });
   } catch (error) {
     const message = safeString(error?.message || "", 200);
@@ -482,7 +638,8 @@ export async function requireDeveloperAccess(
   const normalizedRoute = normalizeRoute(route);
   const tokenResult = await verifyRequestToken(req, {
     env,
-    requireEmailVerified
+    requireEmailVerified,
+    route: normalizedRoute
   });
 
   if (!tokenResult.ok) {
@@ -502,7 +659,8 @@ export async function requireDeveloperAccess(
       ok: false,
       status: tokenResult.status,
       code: tokenResult.code,
-      message: tokenResult.message
+      message: tokenResult.message,
+      containment: tokenResult.containment || null
     };
   }
 
@@ -523,7 +681,8 @@ export async function requireDeveloperAccess(
       ok: false,
       status: 403,
       code: "insufficient_role",
-      message: "Developer access required."
+      message: "Developer access required.",
+      containment: tokenResult.containment || null
     };
   }
 
@@ -535,7 +694,8 @@ export async function requireDeveloperAccess(
     uid: safeString(tokenResult.uid || "", 128),
     decodedToken: tokenResult.decodedToken,
     claims: tokenResult.claims,
-    emailVerified: tokenResult.emailVerified
+    emailVerified: tokenResult.emailVerified,
+    containment: tokenResult.containment || null
   };
 }
 
@@ -551,7 +711,8 @@ export async function requireAdminAccess(
   const normalizedRoute = normalizeRoute(route);
   const tokenResult = await verifyRequestToken(req, {
     env,
-    requireEmailVerified
+    requireEmailVerified,
+    route: normalizedRoute
   });
 
   if (!tokenResult.ok) {
@@ -571,7 +732,8 @@ export async function requireAdminAccess(
       ok: false,
       status: tokenResult.status,
       code: tokenResult.code,
-      message: tokenResult.message
+      message: tokenResult.message,
+      containment: tokenResult.containment || null
     };
   }
 
@@ -592,7 +754,8 @@ export async function requireAdminAccess(
       ok: false,
       status: 403,
       code: "insufficient_role",
-      message: "Admin access required."
+      message: "Admin access required.",
+      containment: tokenResult.containment || null
     };
   }
 
@@ -604,6 +767,7 @@ export async function requireAdminAccess(
     uid: safeString(tokenResult.uid || "", 128),
     decodedToken: tokenResult.decodedToken,
     claims: tokenResult.claims,
-    emailVerified: tokenResult.emailVerified
+    emailVerified: tokenResult.emailVerified,
+    containment: tokenResult.containment || null
   };
 }
