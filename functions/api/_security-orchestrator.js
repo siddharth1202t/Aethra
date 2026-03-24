@@ -22,6 +22,8 @@ let tokenCache = {
   expiresAt: 0
 };
 
+/* -------------------- SAFETY -------------------- */
+
 function safeString(value, maxLength = 200) {
   return String(value ?? "")
     .replace(/[\u0000-\u001F\u007F]/g, "")
@@ -41,6 +43,7 @@ function safeInt(value, fallback = 0, min = 0, max = 1_000_000) {
 
 function normalizeAction(value = "allow") {
   const normalized = safeString(value || "allow", 20).toLowerCase();
+
   if (
     normalized === "block" ||
     normalized === "challenge" ||
@@ -48,11 +51,13 @@ function normalizeAction(value = "allow") {
   ) {
     return normalized;
   }
+
   return "allow";
 }
 
 function normalizeRouteSensitivity(value = "normal") {
   const normalized = safeString(value || "normal", 20).toLowerCase();
+
   if (
     normalized === "critical" ||
     normalized === "high" ||
@@ -60,6 +65,7 @@ function normalizeRouteSensitivity(value = "normal") {
   ) {
     return normalized;
   }
+
   return "normal";
 }
 
@@ -76,11 +82,13 @@ function getRequestTimestamp(body = {}) {
   return 0;
 }
 
+/* -------------------- FIRESTORE AUTH -------------------- */
+
 function hasFirestoreEnv(env = {}) {
   return Boolean(
     safeString(env?.FIREBASE_PROJECT_ID || "", 200) &&
-    safeString(env?.FIREBASE_CLIENT_EMAIL || "", 500) &&
-    safeString(env?.FIREBASE_PRIVATE_KEY || "", 20000)
+      safeString(env?.FIREBASE_CLIENT_EMAIL || "", 500) &&
+      safeString(env?.FIREBASE_PRIVATE_KEY || "", 20000)
   );
 }
 
@@ -198,6 +206,8 @@ async function getAccessToken(env) {
   return accessToken;
 }
 
+/* -------------------- HASHING -------------------- */
+
 async function sha256Hex(input = "") {
   const bytes = new TextEncoder().encode(String(input || ""));
   const digest = await crypto.subtle.digest("SHA-256", bytes);
@@ -224,6 +234,8 @@ async function deriveEmailHash(email = "") {
 
   return (await sha256Hex(normalizedEmail)).slice(0, 64);
 }
+
+/* -------------------- HELPERS -------------------- */
 
 function buildSafeSignalBundle({
   botResult = null,
@@ -281,6 +293,8 @@ function inferRouteSensitivity(route = "", config = {}) {
 
   return "normal";
 }
+
+/* -------------------- FIRESTORE STATE READING -------------------- */
 
 function fromFirestoreValue(value) {
   if (!value || typeof value !== "object") return null;
@@ -381,7 +395,9 @@ async function getSecurityStateSummary({
     return null;
   }
 
-  const docs = await Promise.all(targets.map((docId) => readSecurityStateDoc(env, docId)));
+  const docs = await Promise.all(
+    targets.map((docId) => readSecurityStateDoc(env, docId))
+  );
 
   const merged = {
     currentRiskScore: 0,
@@ -395,13 +411,13 @@ async function getSecurityStateSummary({
     lockoutCount: 0,
     successfulAuthCount: 0,
     exploitFlagCount: 0,
-    breachFlagCount: 0
+    breachFlagCount: 0,
+    replayFlagCount: 0,
+    coordinatedFlagCount: 0
   };
 
   for (const doc of docs) {
-    if (!doc || typeof doc !== "object") {
-      continue;
-    }
+    if (!doc || typeof doc !== "object") continue;
 
     merged.currentRiskScore = Math.max(
       merged.currentRiskScore,
@@ -412,10 +428,7 @@ async function getSecurityStateSummary({
 
     if (docRiskLevel === "critical") {
       merged.currentRiskLevel = "critical";
-    } else if (
-      merged.currentRiskLevel !== "critical" &&
-      docRiskLevel === "high"
-    ) {
+    } else if (merged.currentRiskLevel !== "critical" && docRiskLevel === "high") {
       merged.currentRiskLevel = "high";
     } else if (
       !["critical", "high"].includes(merged.currentRiskLevel) &&
@@ -434,6 +447,8 @@ async function getSecurityStateSummary({
     merged.successfulAuthCount += safeInt(doc.successfulAuthCount, 0, 0, 100000);
     merged.exploitFlagCount += safeInt(doc.exploitFlagCount, 0, 0, 100000);
     merged.breachFlagCount += safeInt(doc.breachFlagCount, 0, 0, 100000);
+    merged.replayFlagCount += safeInt(doc.replayFlagCount, 0, 0, 100000);
+    merged.coordinatedFlagCount += safeInt(doc.coordinatedFlagCount, 0, 0, 100000);
   }
 
   return merged;
@@ -466,7 +481,9 @@ function mergeSecuritySummaries(baseState = null, persistentStates = []) {
     lockoutCount: 0,
     successfulAuthCount: 0,
     exploitFlagCount: 0,
-    breachFlagCount: 0
+    breachFlagCount: 0,
+    replayFlagCount: 0,
+    coordinatedFlagCount: 0
   };
 
   if (baseState && typeof baseState === "object") {
@@ -488,12 +505,12 @@ function mergeSecuritySummaries(baseState = null, persistentStates = []) {
     merged.successfulAuthCount += safeInt(baseState.successfulAuthCount, 0, 0, 100000);
     merged.exploitFlagCount += safeInt(baseState.exploitFlagCount, 0, 0, 100000);
     merged.breachFlagCount += safeInt(baseState.breachFlagCount, 0, 0, 100000);
+    merged.replayFlagCount += safeInt(baseState.replayFlagCount, 0, 0, 100000);
+    merged.coordinatedFlagCount += safeInt(baseState.coordinatedFlagCount, 0, 0, 100000);
   }
 
   for (const state of Array.isArray(persistentStates) ? persistentStates : []) {
-    if (!state || typeof state !== "object") {
-      continue;
-    }
+    if (!state || typeof state !== "object") continue;
 
     merged.currentRiskScore = Math.max(
       merged.currentRiskScore,
@@ -514,12 +531,15 @@ function mergeSecuritySummaries(baseState = null, persistentStates = []) {
     merged.successfulAuthCount += safeInt(state.successfulAuthCount, 0, 0, 100000);
     merged.exploitFlagCount += safeInt(state.exploitFlagCount, 0, 0, 100000);
     merged.breachFlagCount += safeInt(state.breachFlagCount, 0, 0, 100000);
+    merged.replayFlagCount += safeInt(state.replayFlagCount, 0, 0, 100000);
+    merged.coordinatedFlagCount += safeInt(state.coordinatedFlagCount, 0, 0, 100000);
   }
 
   return merged;
 }
 
 async function getPersistentRiskStates({
+  env = {},
   userId = "",
   ip = "",
   sessionId = ""
@@ -533,6 +553,7 @@ async function getPersistentRiskStates({
   if (safeSessionId) {
     requests.push(
       getRiskState({
+        env,
         actorType: "session",
         actorId: safeSessionId
       })
@@ -542,6 +563,7 @@ async function getPersistentRiskStates({
   if (safeUserId) {
     requests.push(
       getRiskState({
+        env,
         actorType: "user",
         actorId: safeUserId
       })
@@ -551,6 +573,7 @@ async function getPersistentRiskStates({
   if (safeIp && safeIp !== "unknown") {
     requests.push(
       getRiskState({
+        env,
         actorType: "ip",
         actorId: safeIp
       })
@@ -612,31 +635,69 @@ function buildInlineSecurityStatus({
   };
 }
 
+function buildEnforcementFlags({
+  containmentResult = null,
+  adaptiveModeResult = null,
+  risk = null,
+  anomalyResult = null
+} = {}) {
+  const flags = containmentResult?.flags || {};
+  const adaptiveMode = safeString(adaptiveModeResult?.mode || "normal", 30).toLowerCase();
+  const riskScore = safeInt(risk?.riskScore, 0, 0, 100);
+  const hardBlockSignals =
+    safeInt(risk?.hardBlockSignals, 0, 0, 100) +
+    safeInt(anomalyResult?.events?.hardBlockSignals, 0, 0, 100);
+  const exploitSignals =
+    safeInt(risk?.events?.exploitSignals, 0, 0, 100) +
+    safeInt(anomalyResult?.events?.exploitSignals, 0, 0, 100);
+  const breachSignals =
+    safeInt(risk?.events?.breachSignals, 0, 0, 100) +
+    safeInt(anomalyResult?.events?.breachSignals, 0, 0, 100);
+
+  const criticalAttack =
+    adaptiveMode === "lockdown" ||
+    safeBoolean(risk?.criticalAttackLikely) ||
+    breachSignals > 0 ||
+    exploitSignals > 0 ||
+    hardBlockSignals >= 2;
+
+  return {
+    shouldBlockActor: flags.blockActor === true,
+    shouldLockAccount: flags.lockAccount === true,
+    shouldKillSessions: flags.killSessions === true,
+    forceCaptcha: flags.forceCaptcha === true,
+    isGlobalLockdown: flags.lockdown === true || adaptiveMode === "lockdown",
+    criticalAttack,
+    highRisk: riskScore >= 70
+  };
+}
+
 function pickFinalAction({
   containment,
   risk,
   rateLimitResult,
-  adaptiveModeResult
+  adaptiveModeResult,
+  anomalyResult,
+  enforcementFlags
 }) {
   const riskAction = normalizeAction(risk?.action || "allow");
   const containmentAction = normalizeAction(containment?.action || "allow");
   const rateLimitAction = normalizeAction(
     rateLimitResult?.recommendedAction || "allow"
   );
+  const anomalyAction = normalizeAction(anomalyResult?.action || "allow");
   const adaptiveMode = safeString(
     adaptiveModeResult?.mode || "normal",
     20
   ).toLowerCase();
 
-  if (containment?.blocked) {
-    return "block";
-  }
+  if (enforcementFlags?.shouldBlockActor) return "block";
+  if (enforcementFlags?.shouldLockAccount) return "block";
+  if (containment?.blocked) return "block";
+  if (enforcementFlags?.isGlobalLockdown) return "block";
+  if (enforcementFlags?.criticalAttack) return "block";
 
-  if (adaptiveMode === "lockdown") {
-    return "block";
-  }
-
-  if (riskAction === "block") {
+  if (riskAction === "block" || anomalyAction === "block") {
     return "block";
   }
 
@@ -646,9 +707,8 @@ function pickFinalAction({
     if (rateLimitAction === "throttle") return "throttle";
   }
 
-  if (containmentAction === "challenge" && riskAction === "allow") {
-    return "challenge";
-  }
+  if (containmentAction === "challenge") return "challenge";
+  if (enforcementFlags?.forceCaptcha) return "challenge";
 
   if (adaptiveMode === "defense" && riskAction === "allow") {
     return "challenge";
@@ -658,11 +718,11 @@ function pickFinalAction({
     return "throttle";
   }
 
-  if (riskAction === "challenge") {
+  if (anomalyAction === "challenge" || riskAction === "challenge") {
     return "challenge";
   }
 
-  if (riskAction === "throttle") {
+  if (anomalyAction === "throttle" || riskAction === "throttle") {
     return "throttle";
   }
 
@@ -672,23 +732,16 @@ function pickFinalAction({
 function pickFinalContainmentAction({
   containment,
   risk,
-  adaptiveModeResult
+  adaptiveModeResult,
+  enforcementFlags
 }) {
-  if (containment?.blocked) {
-    return "temporary_containment";
-  }
-
-  if (containment?.action === "challenge") {
-    return "step_up_verification";
-  }
-
-  if (adaptiveModeResult?.mode === "lockdown") {
-    return "temporary_containment";
-  }
-
-  if (adaptiveModeResult?.mode === "defense") {
-    return "step_up_verification";
-  }
+  if (enforcementFlags?.shouldKillSessions) return "kill_sessions";
+  if (enforcementFlags?.shouldLockAccount) return "lock_account";
+  if (enforcementFlags?.shouldBlockActor) return "block_actor";
+  if (containment?.blocked) return "temporary_containment";
+  if (containment?.action === "challenge") return "step_up_verification";
+  if (adaptiveModeResult?.mode === "lockdown") return "temporary_containment";
+  if (adaptiveModeResult?.mode === "defense") return "step_up_verification";
 
   if (
     adaptiveModeResult?.mode === "elevated" &&
@@ -704,10 +757,29 @@ function buildRiskStateIncrements({
   risk = null,
   rateLimitResult = null,
   freshnessResult = null,
-  abuseSuccess = true
+  abuseSuccess = true,
+  threatResult = null,
+  anomalyResult = null
 } = {}) {
   const finalAction = normalizeAction(risk?.finalAction || risk?.action || "allow");
   const riskScore = safeInt(risk?.riskScore, 0, 0, 100);
+
+  const exploitSignals =
+    safeInt(threatResult?.events?.exploitSignals, 0, 0, 100) +
+    safeInt(anomalyResult?.events?.exploitSignals, 0, 0, 100);
+
+  const breachSignals =
+    safeInt(threatResult?.events?.breachSignals, 0, 0, 100) +
+    safeInt(anomalyResult?.events?.breachSignals, 0, 0, 100);
+
+  const replaySignals =
+    safeInt(threatResult?.signals?.replayPressure, 0, 0, 100) > 0 ||
+    safeInt(freshnessResult?.events?.replaySignals, 0, 0, 100) > 0
+      ? 1
+      : 0;
+
+  const coordinatedSignals =
+    safeInt(anomalyResult?.events?.coordinatedSignals, 0, 0, 100) > 0 ? 1 : 0;
 
   return {
     suspiciousEventCount: riskScore >= 45 ? 1 : 0,
@@ -718,29 +790,37 @@ function buildRiskStateIncrements({
     captchaFailureCount: freshnessResult && !freshnessResult.ok ? 1 : 0,
     trustedEventCount:
       finalAction === "allow" && riskScore <= 20 && safeBoolean(abuseSuccess) ? 1 : 0,
-    exploitFlagCount: safeInt(risk?.criticalSignals, 0, 0, 100) > 0 ? 1 : 0,
-    breachFlagCount: safeBoolean(risk?.criticalAttackLikely) ? 1 : 0
+    exploitFlagCount: exploitSignals > 0 ? 1 : 0,
+    breachFlagCount: breachSignals > 0 ? 1 : 0,
+    replayFlagCount: replaySignals,
+    coordinatedFlagCount: coordinatedSignals
   };
 }
 
 async function persistActorRiskStates({
+  env = {},
   actor,
   risk,
   rateLimitResult,
   freshnessResult,
-  abuseSuccess
+  abuseSuccess,
+  threatResult,
+  anomalyResult
 }) {
   const updates = [];
   const increments = buildRiskStateIncrements({
     risk,
     rateLimitResult,
     freshnessResult,
-    abuseSuccess
+    abuseSuccess,
+    threatResult,
+    anomalyResult
   });
 
   if (actor?.sessionId) {
     updates.push(
       updateRiskState({
+        env,
         actorType: "session",
         actorId: actor.sessionId,
         riskResult: risk,
@@ -753,6 +833,7 @@ async function persistActorRiskStates({
   if (actor?.userId) {
     updates.push(
       updateRiskState({
+        env,
         actorType: "user",
         actorId: actor.userId,
         riskResult: risk,
@@ -765,6 +846,7 @@ async function persistActorRiskStates({
   if (actor?.ip && actor.ip !== "unknown") {
     updates.push(
       updateRiskState({
+        env,
         actorType: "ip",
         actorId: actor.ip,
         riskResult: risk,
@@ -785,6 +867,8 @@ async function persistActorRiskStates({
     return [];
   }
 }
+
+/* -------------------- MAIN -------------------- */
 
 export async function runSecurityOrchestrator({
   env = {},
@@ -881,6 +965,7 @@ export async function runSecurityOrchestrator({
     });
 
     const persistentRiskStates = await getPersistentRiskStates({
+      env,
       userId: actor.userId,
       ip: actor.ip,
       sessionId: actor.sessionId
@@ -918,7 +1003,13 @@ export async function runSecurityOrchestrator({
     hardBlockSignals: 0,
     criticalSignals: 0,
     criticalAttackLikely: false,
-    reasons: []
+    reasons: [],
+    events: {
+      exploitSignals: 0,
+      breachSignals: 0,
+      replaySignals: 0,
+      coordinatedSignals: 0
+    }
   };
 
   try {
@@ -933,7 +1024,16 @@ export async function runSecurityOrchestrator({
     });
 
     if (evaluated && typeof evaluated === "object") {
-      risk = evaluated;
+      risk = {
+        ...risk,
+        ...evaluated,
+        events: {
+          ...risk.events,
+          ...(evaluated.events && typeof evaluated.events === "object"
+            ? evaluated.events
+            : {})
+        }
+      };
     }
   } catch (error) {
     console.error("Risk evaluation failed:", error);
@@ -981,7 +1081,10 @@ export async function runSecurityOrchestrator({
 
     risk = {
       ...risk,
-      riskScore: Math.min(100, safeInt(risk.riskScore, 0, 0, 100) + Math.min(25, Math.floor(anomalyScore / 2))),
+      riskScore: Math.min(
+        100,
+        safeInt(risk.riskScore, 0, 0, 100) + Math.min(25, Math.floor(anomalyScore / 2))
+      ),
       action:
         anomalyAction === "block"
           ? "block"
@@ -993,9 +1096,28 @@ export async function runSecurityOrchestrator({
               : risk.action,
       criticalAttackLikely:
         safeBoolean(risk.criticalAttackLikely) ||
-        safeBoolean(anomalyResult?.events?.breachSignals > 0) ||
-        safeBoolean(anomalyResult?.events?.exploitSignals > 0),
-      reasons: [...new Set([...(risk.reasons || []), ...anomalyReasons])].slice(0, 50)
+        safeInt(anomalyResult?.events?.breachSignals, 0, 0, 100) > 0 ||
+        safeInt(anomalyResult?.events?.exploitSignals, 0, 0, 100) > 0,
+      reasons: [...new Set([...(risk.reasons || []), ...anomalyReasons])].slice(0, 50),
+      events: {
+        ...risk.events,
+        exploitSignals: Math.max(
+          safeInt(risk?.events?.exploitSignals, 0, 0, 100),
+          safeInt(anomalyResult?.events?.exploitSignals, 0, 0, 100)
+        ),
+        breachSignals: Math.max(
+          safeInt(risk?.events?.breachSignals, 0, 0, 100),
+          safeInt(anomalyResult?.events?.breachSignals, 0, 0, 100)
+        ),
+        replaySignals: Math.max(
+          safeInt(risk?.events?.replaySignals, 0, 0, 100),
+          safeInt(anomalyResult?.events?.replaySignals, 0, 0, 100)
+        ),
+        coordinatedSignals: Math.max(
+          safeInt(risk?.events?.coordinatedSignals, 0, 0, 100),
+          safeInt(anomalyResult?.events?.coordinatedSignals, 0, 0, 100)
+        )
+      }
     };
   }
 
@@ -1028,32 +1150,47 @@ export async function runSecurityOrchestrator({
     console.error("Adaptive threat mode evaluation failed:", error);
   }
 
+  const enforcement = buildEnforcementFlags({
+    containmentResult,
+    adaptiveModeResult,
+    risk,
+    anomalyResult
+  });
+
   const finalAction = pickFinalAction({
     containment: containmentResult,
     risk,
     rateLimitResult,
-    adaptiveModeResult
+    adaptiveModeResult,
+    anomalyResult,
+    enforcementFlags: enforcement
   });
 
   const finalContainmentAction = pickFinalContainmentAction({
     containment: containmentResult,
     risk,
-    adaptiveModeResult
+    adaptiveModeResult,
+    enforcementFlags: enforcement
   });
 
   const finalRisk = {
     ...risk,
     routeSensitivity,
     finalAction,
-    finalContainmentAction
+    finalContainmentAction,
+    criticalAttackLikely:
+      safeBoolean(risk.criticalAttackLikely) || safeBoolean(enforcement.criticalAttack)
   };
 
   const persistentRiskState = await persistActorRiskStates({
+    env,
     actor,
     risk: finalRisk,
     rateLimitResult,
     freshnessResult,
-    abuseSuccess
+    abuseSuccess,
+    threatResult,
+    anomalyResult
   });
 
   let alertsResult = null;
@@ -1093,6 +1230,7 @@ export async function runSecurityOrchestrator({
   return {
     actor,
     risk: finalRisk,
+    enforcement,
     signals: buildSafeSignalBundle({
       botResult,
       abuseResult,
