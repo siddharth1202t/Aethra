@@ -64,10 +64,11 @@ function getLevel(score) {
   return "low";
 }
 
-function getAction(score, hardBlockSignals = 0) {
-  const signals = safeInt(hardBlockSignals, 0, 0, 100);
+function getAction(score, hardBlockSignals = 0, criticalSignals = 0) {
+  const hardSignals = safeInt(hardBlockSignals, 0, 0, 100);
+  const severeSignals = safeInt(criticalSignals, 0, 0, 100);
 
-  if (signals >= 2 || score >= 95) return "block";
+  if (hardSignals >= 2 || severeSignals >= 2 || score >= 95) return "block";
   if (score >= 75) return "challenge";
   if (score >= 45) return "throttle";
   return "allow";
@@ -100,7 +101,8 @@ function normalizeBotResult(botResult = null) {
       sameRouteRecent: safeInt(botResult?.distributed?.sameRouteRecent, 0),
       recentChallenges: safeInt(botResult?.distributed?.recentChallenges, 0),
       recentHardBlocks: safeInt(botResult?.distributed?.recentHardBlocks, 0),
-      sensitiveRouteHits: safeInt(botResult?.distributed?.sensitiveRouteHits, 0)
+      sensitiveRouteHits: safeInt(botResult?.distributed?.sensitiveRouteHits, 0),
+      uniqueRecentRoutes: safeInt(botResult?.distributed?.uniqueRecentRoutes, 0)
     },
 
     reasons: normalizeArrayReasons(botResult.reasons)
@@ -126,8 +128,23 @@ function normalizeAbuseResult(abuseResult = null) {
         abuseResult?.snapshot?.criticalRouteTouchesRecent,
         0
       ),
+      uniqueCriticalRoutesRecent: safeInt(
+        abuseResult?.snapshot?.uniqueCriticalRoutesRecent,
+        0
+      ),
       suspiciousEvents: safeInt(abuseResult?.snapshot?.suspiciousEvents, 0),
-      penaltyCount: safeInt(abuseResult?.snapshot?.penaltyCount, 0)
+      penaltyCount: safeInt(abuseResult?.snapshot?.penaltyCount, 0),
+      coordinatedProbe: abuseResult?.snapshot?.coordinatedProbe === true,
+      breachLikePattern: abuseResult?.snapshot?.breachLikePattern === true
+    },
+
+    events: {
+      burstEvents: safeInt(abuseResult?.events?.burstEvents, 0),
+      probeEvents: safeInt(abuseResult?.events?.probeEvents, 0),
+      criticalRouteHits: safeInt(abuseResult?.events?.criticalRouteHits, 0),
+      breachSignals: safeInt(abuseResult?.events?.breachSignals, 0),
+      hardBlockSignals: safeInt(abuseResult?.events?.hardBlockSignals, 0),
+      endpointSpread: safeInt(abuseResult?.events?.endpointSpread, 0)
     },
 
     reasons: normalizeArrayReasons(abuseResult.reasons)
@@ -149,7 +166,16 @@ function normalizeRateLimitResult(rateLimitResult = null) {
     routeSensitivity: normalizeRouteSensitivity(
       rateLimitResult.routeSensitivity
     ),
-    highestCountSeen: safeInt(rateLimitResult.highestCountSeen, 0)
+    highestCountSeen: safeInt(rateLimitResult.highestCountSeen, 0),
+
+    events: {
+      blockEvents: safeInt(rateLimitResult?.events?.blockEvents, 0),
+      challengeEvents: safeInt(rateLimitResult?.events?.challengeEvents, 0),
+      throttleEvents: safeInt(rateLimitResult?.events?.throttleEvents, 0),
+      hardBlockSignals: safeInt(rateLimitResult?.events?.hardBlockSignals, 0),
+      burstSignals: safeInt(rateLimitResult?.events?.burstSignals, 0),
+      criticalRouteHits: safeInt(rateLimitResult?.events?.criticalRouteHits, 0)
+    }
   };
 }
 
@@ -159,7 +185,11 @@ function normalizeFreshnessResult(freshnessResult = null) {
   return {
     ok: Boolean(freshnessResult.ok),
     code: safeString(freshnessResult.code || "", 100),
-    ageMs: safeNumber(freshnessResult.ageMs, 0)
+    ageMs: safeNumber(freshnessResult.ageMs, 0),
+    events: {
+      freshnessSignals: safeInt(freshnessResult?.events?.freshnessSignals, 0),
+      replaySignals: safeInt(freshnessResult?.events?.replaySignals, 0)
+    }
   };
 }
 
@@ -178,7 +208,25 @@ function normalizeThreatResult(threatResult = null) {
       freshnessFailures: safeInt(threatResult?.events?.freshnessFailures, 0),
       blockEvents: safeInt(threatResult?.events?.blockEvents, 0),
       hardBlockSignals: safeInt(threatResult?.events?.hardBlockSignals, 0),
-      criticalRouteHits: safeInt(threatResult?.events?.criticalRouteHits, 0)
+      criticalRouteHits: safeInt(threatResult?.events?.criticalRouteHits, 0),
+      exploitSignals: safeInt(threatResult?.events?.exploitSignals, 0),
+      breachSignals: safeInt(threatResult?.events?.breachSignals, 0),
+      endpointSpread: safeInt(threatResult?.events?.endpointSpread, 0)
+    }
+  };
+}
+
+function normalizePayloadThreatResult(payloadThreatResult = null) {
+  if (!payloadThreatResult || typeof payloadThreatResult !== "object") return null;
+
+  return {
+    threatScore: safeInt(payloadThreatResult.threatScore, 0, 0, 100),
+    reasons: normalizeArrayReasons(payloadThreatResult.reasons),
+    events: {
+      exploitSignals: safeInt(payloadThreatResult?.events?.exploitSignals, 0),
+      breachSignals: safeInt(payloadThreatResult?.events?.breachSignals, 0),
+      malformedSignals: safeInt(payloadThreatResult?.events?.malformedSignals, 0),
+      methodSignals: safeInt(payloadThreatResult?.events?.methodSignals, 0)
     }
   };
 }
@@ -199,7 +247,9 @@ function normalizeSecurityState(securityState = null) {
     suspiciousEventCount: safeInt(securityState.suspiciousEventCount, 0),
     rateLimitHitCount: safeInt(securityState.rateLimitHitCount, 0),
     lockoutCount: safeInt(securityState.lockoutCount, 0),
-    successfulAuthCount: safeInt(securityState.successfulAuthCount, 0)
+    successfulAuthCount: safeInt(securityState.successfulAuthCount, 0),
+    exploitFlagCount: safeInt(securityState.exploitFlagCount, 0),
+    breachFlagCount: safeInt(securityState.breachFlagCount, 0)
   };
 }
 
@@ -209,6 +259,7 @@ export function evaluateRisk(inputs = {}) {
   const rateLimitResult = normalizeRateLimitResult(inputs.rateLimitResult);
   const freshnessResult = normalizeFreshnessResult(inputs.freshnessResult);
   const threatResult = normalizeThreatResult(inputs.threatResult);
+  const payloadThreatResult = normalizePayloadThreatResult(inputs.payloadThreatResult);
   const securityState = normalizeSecurityState(inputs.securityState);
   const routeSensitivity = normalizeRouteSensitivity(
     inputs.routeSensitivity || "normal"
@@ -217,16 +268,15 @@ export function evaluateRisk(inputs = {}) {
   const state = {
     score: 0,
     reasons: [],
-    hardBlockSignals: 0
+    hardBlockSignals: 0,
+    criticalSignals: 0
   };
 
   /* ROUTE SENSITIVITY */
-
   if (routeSensitivity === "critical") addWeightedScore(state, 8, "route:critical");
   if (routeSensitivity === "high") addWeightedScore(state, 4, "route:high");
 
   /* BOT SIGNALS */
-
   if (botResult) {
     if (botResult.riskScore >= 70) addWeightedScore(state, 20, "bot:high_risk");
     else if (botResult.riskScore >= 40) addWeightedScore(state, 10, "bot:medium_risk");
@@ -242,7 +292,6 @@ export function evaluateRisk(inputs = {}) {
 
     if (botResult.distributed.suspicionScore >= 120)
       addWeightedScore(state, 25, "bot:distributed_suspicion_high");
-
     else if (botResult.distributed.suspicionScore >= 60)
       addWeightedScore(state, 12, "bot:distributed_suspicion_medium");
 
@@ -254,6 +303,9 @@ export function evaluateRisk(inputs = {}) {
 
     if (botResult.distributed.sensitiveRouteHits >= 5)
       addWeightedScore(state, 10, "bot:sensitive_route_targeting");
+
+    if (botResult.distributed.uniqueRecentRoutes >= 4)
+      addWeightedScore(state, 10, "bot:route_spread");
 
     if (botResult.hardBlockSignals > 0) {
       state.hardBlockSignals += botResult.hardBlockSignals;
@@ -271,11 +323,9 @@ export function evaluateRisk(inputs = {}) {
   }
 
   /* ABUSE */
-
   if (abuseResult) {
     if (abuseResult.abuseScore >= 70)
       addWeightedScore(state, 22, "abuse:high_score");
-
     else if (abuseResult.abuseScore >= 40)
       addWeightedScore(state, 10, "abuse:medium_score");
 
@@ -291,13 +341,34 @@ export function evaluateRisk(inputs = {}) {
     if (abuseResult.snapshot.criticalRouteTouchesRecent >= 2)
       addWeightedScore(state, 20, "abuse:critical_route_targeting");
 
+    if (abuseResult.snapshot.coordinatedProbe)
+      addWeightedScore(state, 15, "abuse:coordinated_probe");
+
+    if (abuseResult.snapshot.breachLikePattern) {
+      state.criticalSignals += 1;
+      addWeightedScore(state, 25, "abuse:breach_like_pattern");
+    }
+
+    if (abuseResult.events.breachSignals > 0) {
+      state.criticalSignals += 1;
+      state.hardBlockSignals += 1;
+      addWeightedScore(state, 30, "abuse:breach_signal");
+    }
+
+    if (abuseResult.events.hardBlockSignals > 0) {
+      state.hardBlockSignals += 1;
+      addWeightedScore(state, 15, "abuse:hard_block_signal");
+    }
+
+    if (abuseResult.events.endpointSpread >= 4)
+      addWeightedScore(state, 12, "abuse:endpoint_spread");
+
     for (const reason of abuseResult.reasons) {
       pushReason(state.reasons, `abuse:${reason}`);
     }
   }
 
   /* RATE LIMIT */
-
   if (rateLimitResult) {
     if (!rateLimitResult.allowed)
       addWeightedScore(state, 15, "rate:limit_exceeded");
@@ -313,10 +384,14 @@ export function evaluateRisk(inputs = {}) {
 
     if (rateLimitResult.routeSensitivity === "critical")
       addWeightedScore(state, 10, "rate:critical_route_pressure");
+
+    if (rateLimitResult.events.hardBlockSignals > 0) {
+      state.hardBlockSignals += 1;
+      addWeightedScore(state, 12, "rate:hard_block_signal");
+    }
   }
 
   /* REQUEST FRESHNESS */
-
   if (freshnessResult && !freshnessResult.ok) {
     addWeightedScore(
       state,
@@ -329,15 +404,45 @@ export function evaluateRisk(inputs = {}) {
       freshnessResult.code === "future_request_timestamp"
     ) {
       state.hardBlockSignals += 1;
+      state.criticalSignals += routeSensitivity === "critical" ? 1 : 0;
+    }
+
+    if (freshnessResult.events.replaySignals > 0) {
+      state.hardBlockSignals += 1;
+      addWeightedScore(state, 15, "freshness:replay_signal");
+    }
+  }
+
+  /* PAYLOAD THREATS */
+  if (payloadThreatResult) {
+    if (payloadThreatResult.threatScore >= 70)
+      addWeightedScore(state, 25, "payload:high_threat");
+    else if (payloadThreatResult.threatScore >= 40)
+      addWeightedScore(state, 12, "payload:medium_threat");
+
+    if (payloadThreatResult.events.exploitSignals > 0) {
+      state.criticalSignals += 1;
+      addWeightedScore(state, 28, "payload:exploit_signal");
+    }
+
+    if (payloadThreatResult.events.breachSignals > 0) {
+      state.hardBlockSignals += 1;
+      state.criticalSignals += 1;
+      addWeightedScore(state, 35, "payload:breach_signal");
+    }
+
+    if (payloadThreatResult.events.methodSignals > 0)
+      addWeightedScore(state, 10, "payload:invalid_method_pressure");
+
+    for (const reason of payloadThreatResult.reasons) {
+      pushReason(state.reasons, `payload:${reason}`);
     }
   }
 
   /* THREAT MEMORY */
-
   if (threatResult) {
     if (threatResult.threatScore >= 80)
       addWeightedScore(state, 25, "memory:high");
-
     else if (threatResult.threatScore >= 50)
       addWeightedScore(state, 12, "memory:medium");
 
@@ -348,10 +453,23 @@ export function evaluateRisk(inputs = {}) {
       state.hardBlockSignals += 1;
       addWeightedScore(state, 15, "memory:hard_block_signals");
     }
+
+    if (threatResult.events.exploitSignals > 0) {
+      state.criticalSignals += 1;
+      addWeightedScore(state, 18, "memory:exploit_signals");
+    }
+
+    if (threatResult.events.breachSignals > 0) {
+      state.criticalSignals += 1;
+      state.hardBlockSignals += 1;
+      addWeightedScore(state, 22, "memory:breach_signals");
+    }
+
+    if (threatResult.events.endpointSpread >= 4)
+      addWeightedScore(state, 10, "memory:endpoint_spread");
   }
 
   /* SECURITY STATE */
-
   if (securityState) {
     if (securityState.currentRiskScore >= 75)
       addWeightedScore(state, 20, "state:high_risk_score");
@@ -363,15 +481,25 @@ export function evaluateRisk(inputs = {}) {
       state.hardBlockSignals += 1;
       addWeightedScore(state, 15, "state:critical_risk_level");
     }
+
+    if (securityState.exploitFlagCount >= 1) {
+      state.criticalSignals += 1;
+      addWeightedScore(state, 20, "state:exploit_flag_history");
+    }
+
+    if (securityState.breachFlagCount >= 1) {
+      state.criticalSignals += 1;
+      state.hardBlockSignals += 1;
+      addWeightedScore(state, 25, "state:breach_flag_history");
+    }
   }
 
   /* FINALIZE */
-
   state.score = Math.min(100, safeInt(state.score, 0, 0, 100));
   state.reasons = state.reasons.slice(0, MAX_REASONS);
 
   const level = getLevel(state.score);
-  const action = getAction(state.score, state.hardBlockSignals);
+  const action = getAction(state.score, state.hardBlockSignals, state.criticalSignals);
 
   let containmentAction = "none";
 
@@ -392,6 +520,11 @@ export function evaluateRisk(inputs = {}) {
     action,
     containmentAction,
     hardBlockSignals: safeInt(state.hardBlockSignals, 0, 0, 100),
+    criticalSignals: safeInt(state.criticalSignals, 0, 0, 100),
+    criticalAttackLikely:
+      level === "critical" ||
+      state.criticalSignals >= 2 ||
+      state.hardBlockSignals >= 2,
     reasons: state.reasons
   };
 }
