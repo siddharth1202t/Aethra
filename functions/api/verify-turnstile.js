@@ -4,7 +4,6 @@ import { runSecurityOrchestrator } from "./_security-orchestrator.js";
 import {
   safeString,
   sanitizeBody,
-  sanitizeMetadata,
   buildBlockedResponse,
   buildMethodNotAllowedResponse
 } from "./_api-security.js";
@@ -17,11 +16,7 @@ const TURNSTILE_TIMEOUT_MS = 8000;
 const MAX_BODY_KEYS = 25;
 const MAX_CONTENT_LENGTH_BYTES = 12 * 1024;
 const MAX_TOKEN_LENGTH = 5000;
-const MAX_SESSION_ID_LENGTH = 120;
 
-/* ---------------- CORE DOMAIN CONFIG ---------------- */
-
-// 🔐 Your primary production domain
 const PRIMARY_DOMAIN = "aethra-c46.pages.dev";
 
 /* ---------------- SMART VALIDATION ---------------- */
@@ -38,6 +33,12 @@ function normalizeHostname(hostname = "") {
   return safeString(hostname, 200).trim().toLowerCase();
 }
 
+function normalizeIp(ip = "") {
+  return safeString(ip || "0.0.0.0", 100)
+    .replace(/[^a-fA-F0-9:.,]/g, "")
+    .slice(0, 100) || "0.0.0.0";
+}
+
 function isLocal(origin) {
   return (
     origin.startsWith("http://localhost") ||
@@ -46,7 +47,7 @@ function isLocal(origin) {
 }
 
 function isPagesDev(originOrHost) {
-  return originOrHost.endsWith(".pages.dev");
+  return safeString(originOrHost || "", 300).toLowerCase().endsWith(".pages.dev");
 }
 
 function isOriginAllowed(origin = "") {
@@ -74,10 +75,11 @@ function isExpectedHostname(hostname = "") {
 /* ---------------- HELPERS ---------------- */
 
 function getClientIp(request) {
-  return (
+  return normalizeIp(
     request.headers.get("cf-connecting-ip") ||
-    request.headers.get("x-forwarded-for")?.split(",")[0] ||
-    "0.0.0.0"
+      request.headers.get("x-forwarded-for")?.split(",")[0] ||
+      request.headers.get("x-real-ip") ||
+      "0.0.0.0"
   );
 }
 
@@ -116,6 +118,16 @@ function buildJsonError(origin, status, message) {
   return jsonResponse(origin, { success: false, message }, status);
 }
 
+function extractTurnstileToken(body = {}) {
+  return safeString(
+    body.token ||
+      body.turnstileToken ||
+      body["cf-turnstile-response"] ||
+      "",
+    MAX_TOKEN_LENGTH
+  );
+}
+
 /* ---------------- HANDLERS ---------------- */
 
 export async function onRequestOptions(context) {
@@ -127,12 +139,17 @@ export async function onRequestOptions(context) {
 }
 
 export async function onRequestPost(context) {
-  const request = context.request;
+  const { request, env } = context;
   const origin = request.headers.get("origin") || "";
   const host = getRequestHost(request);
 
   if (!isJsonContentType(request)) {
     return buildJsonError(origin, 415, "Invalid content type.");
+  }
+
+  const contentLength = Number(request.headers.get("content-length") || 0);
+  if (contentLength > MAX_CONTENT_LENGTH_BYTES) {
+    return buildJsonError(origin, 413, "Request body too large.");
   }
 
   if (!isOriginAllowed(origin)) {
@@ -158,20 +175,72 @@ export async function onRequestPost(context) {
     return buildJsonError(origin, 400, "Invalid JSON.");
   }
 
-  const token = safeString(body.token || "", MAX_TOKEN_LENGTH);
+  const actor = createActorContext({
+    req: request,
+    body,
+    route: ROUTE
+  });
+
+  const security = await runSecurityOrchestrator({
+    env,
+    req: request,
+    body,
+    route: ROUTE,
+    context: {
+      ip: actor.ip,
+      sessionId: actor.sessionId,
+      userId: actor.userId
+    },
+    rateLimitConfig: {
+      key: `turnstile:${actor.actorKey}`,
+      limit: 20,
+      windowMs: 60 * 1000
+    },
+    abuseSuccess: true,
+    containmentConfig: {
+      isWriteAction: true,
+      actionType: "captcha_verify",
+      routeSensitivity: "critical"
+    }
+  });
+
+  if (security?.risk?.finalAction === "block") {
+    await writeSecurityLog({
+      env,
+      type: "turnstile_request_blocked",
+      level: "warning",
+      message: "Turnstile verification request blocked by security system",
+      ip: actor.ip,
+      route: ROUTE,
+      metadata: {
+        riskScore: security?.risk?.riskScore || 0
+      }
+    });
+
+    return jsonResponse(
+      origin,
+      buildBlockedResponse("Suspicious request blocked.", { action: "block" }),
+      403
+    );
+  }
+
+  const token = extractTurnstileToken(body);
   if (!token) {
     return buildJsonError(origin, 400, "Missing captcha token.");
   }
 
-  const ip = getClientIp(request);
-  const secret = safeString(context.env.TURNSTILE_SECRET_KEY || "");
-
+  const secret = safeString(env.TURNSTILE_SECRET_KEY || "");
   if (!secret) {
     return buildJsonError(origin, 500, "Server misconfiguration.");
   }
 
+  const ip = getClientIp(request);
+
   let data;
   try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), TURNSTILE_TIMEOUT_MS);
+
     const res = await fetch(TURNSTILE_VERIFY_URL, {
       method: "POST",
       headers: {
@@ -181,15 +250,39 @@ export async function onRequestPost(context) {
         secret,
         response: token,
         remoteip: ip
-      })
+      }),
+      signal: controller.signal
     });
+
+    clearTimeout(timeout);
+
+    if (!res.ok) {
+      const errorText = await res.text().catch(() => "");
+      await writeSecurityLog({
+        env,
+        type: "turnstile_upstream_failed",
+        level: "error",
+        message: "Turnstile upstream verification request failed",
+        ip,
+        route: ROUTE,
+        metadata: {
+          status: res.status,
+          response: safeString(errorText, 300)
+        }
+      });
+
+      return buildJsonError(origin, 502, "Verification failed.");
+    }
 
     data = await res.json();
   } catch (err) {
     await writeSecurityLog({
+      env,
       type: "turnstile_error",
       level: "error",
-      message: err.message
+      message: safeString(err?.message || "Turnstile request failed", 300),
+      ip,
+      route: ROUTE
     });
 
     return buildJsonError(origin, 502, "Verification failed.");
@@ -197,11 +290,14 @@ export async function onRequestPost(context) {
 
   if (!data.success) {
     await writeSecurityLog({
+      env,
       type: "turnstile_failed",
       level: "warning",
       message: "Captcha failed",
+      ip,
+      route: ROUTE,
       metadata: {
-        errors: data["error-codes"]
+        errors: Array.isArray(data["error-codes"]) ? data["error-codes"] : []
       }
     });
 
@@ -209,6 +305,18 @@ export async function onRequestPost(context) {
   }
 
   if (data.hostname && !isExpectedHostname(data.hostname)) {
+    await writeSecurityLog({
+      env,
+      type: "turnstile_hostname_mismatch",
+      level: "warning",
+      message: "Turnstile hostname mismatch",
+      ip,
+      route: ROUTE,
+      metadata: {
+        hostname: safeString(data.hostname, 200)
+      }
+    });
+
     return buildJsonError(origin, 400, "Hostname mismatch.");
   }
 
