@@ -2,7 +2,6 @@ import { writeSecurityLog } from "./_security-log-writer.js";
 import {
   safeString,
   safeNumber,
-  isPlainObject,
   sanitizeBody,
   sanitizeMetadata,
   buildBlockedResponse,
@@ -58,7 +57,7 @@ function buildTelemetryNonceScope(type = "") {
 }
 
 export async function onRequest(context) {
-  const { request } = context;
+  const { request, env } = context;
 
   if (request.method === "OPTIONS") {
     return new Response(null, { status: 204 });
@@ -68,41 +67,41 @@ export async function onRequest(context) {
     return jsonResponse(buildMethodNotAllowedResponse(), 405);
   }
 
-  const contentType = request.headers
-    .get("content-type") || "";
+  const contentType = request.headers.get("content-type") || "";
 
   if (!contentType.startsWith("application/json")) {
-    return jsonResponse({
-      success: false,
-      message: "Unsupported content type."
-    }, 415);
+    return jsonResponse(
+      {
+        success: false,
+        message: "Unsupported content type."
+      },
+      415
+    );
   }
 
-  const contentLength = Number(
-    request.headers.get("content-length") || 0
-  );
+  const contentLength = Number(request.headers.get("content-length") || 0);
 
   if (contentLength > MAX_CONTENT_LENGTH_BYTES) {
-    return jsonResponse({
-      success: false,
-      message: "Request body too large."
-    }, 413);
+    return jsonResponse(
+      {
+        success: false,
+        message: "Request body too large."
+      },
+      413
+    );
   }
 
   let ip = "unknown";
 
   try {
-
     const bodyRaw = await request.json();
-
     const body = sanitizeBody(bodyRaw, MAX_BODY_KEYS);
 
-    const origin = normalizeOrigin(
-      request.headers.get("origin") || ""
-    );
+    const origin = normalizeOrigin(request.headers.get("origin") || "");
 
     if (!isOriginAllowed(origin)) {
       await writeSecurityLog({
+        env,
         type: "client_security_event",
         level: "warning",
         message: "Blocked telemetry request from forbidden origin",
@@ -120,31 +119,57 @@ export async function onRequest(context) {
     }
 
     const security = await runRouteSecurity({
-      request,
+      req: request,
       route: ROUTE,
       allowedOrigins: ALLOWED_ORIGINS,
-      body
+      body,
+      sessionId: safeString(body.sessionId || "", 120),
+      behavior: {
+        userAgent: safeString(body.userAgent || "", 500),
+        route: ROUTE
+      },
+      abuseSuccess: true
     });
 
-    ip = security.ip;
+    ip = security.ip || "unknown";
 
     if (security.rateLimitResult && !security.rateLimitResult.allowed) {
-
       await writeSecurityLog({
+        env,
         type: "client_security_event",
         level: "warning",
         message: "Security log endpoint rate limited",
         ip,
-        route: ROUTE
+        route: ROUTE,
+        metadata: {
+          action: security.rateLimitResult.recommendedAction || "throttle"
+        }
       });
 
-      return jsonResponse({
-        success: false,
-        message: "Too many requests."
-      }, 429);
+      return jsonResponse(
+        {
+          success: false,
+          message: "Too many requests."
+        },
+        429
+      );
     }
 
     if (security.finalAction === "block") {
+      await writeSecurityLog({
+        env,
+        type: "client_security_event",
+        level: "warning",
+        message: "Suspicious telemetry request blocked",
+        ip,
+        route: ROUTE,
+        metadata: {
+          finalAction: security.finalAction,
+          containmentAction: security.containmentAction,
+          combinedRisk: safeNumber(security.combinedRisk, 0)
+        }
+      });
+
       return jsonResponse(
         buildBlockedResponse("Suspicious request blocked.", {
           action: "block"
@@ -154,6 +179,20 @@ export async function onRequest(context) {
     }
 
     if (security.finalAction === "challenge") {
+      await writeSecurityLog({
+        env,
+        type: "client_security_event",
+        level: "warning",
+        message: "Telemetry request requires verification",
+        ip,
+        route: ROUTE,
+        metadata: {
+          finalAction: security.finalAction,
+          containmentAction: security.containmentAction,
+          combinedRisk: safeNumber(security.combinedRisk, 0)
+        }
+      });
+
       return jsonResponse(
         buildBlockedResponse("Verification required.", {
           action: "challenge"
@@ -166,21 +205,23 @@ export async function onRequest(context) {
     const message = safeString(body.message, 500);
 
     const freshRequestResult = await validateFreshRequest({
+      env,
       requestAt: body.eventAt,
       nonce: safeString(body.nonce, 200),
       scope: buildTelemetryNonceScope(type),
       requireNonce: Boolean(body.nonce),
+      requireNonceStorage: true,
       maxAgeMs: MAX_EVENT_AGE_MS,
       futureToleranceMs: EVENT_FUTURE_TOLERANCE_MS,
       nonceTtlMs: 10 * 60 * 1000
     });
 
     if (!freshRequestResult.ok) {
-
       await writeSecurityLog({
+        env,
         type: "client_security_event",
         level: "warning",
-        message: "Rejected replayed telemetry request",
+        message: "Rejected replayed or stale telemetry request",
         ip,
         route: ROUTE,
         metadata: {
@@ -188,14 +229,18 @@ export async function onRequest(context) {
         }
       });
 
-      return jsonResponse({
-        success: false,
-        message: "Invalid telemetry request."
-      }, 400);
+      return jsonResponse(
+        {
+          success: false,
+          message: "Invalid telemetry request."
+        },
+        400
+      );
     }
 
     await writeSecurityLog({
-      type,
+      env,
+      type: type || "client_security_event",
       level: "info",
       message: message || "Client telemetry received",
       ip,
@@ -204,7 +249,8 @@ export async function onRequest(context) {
         source: "client_untrusted",
         eventAt: safeNumber(body.eventAt, 0),
         receivedAt: Date.now(),
-        ageMs: safeNumber(freshRequestResult.ageMs, 0)
+        ageMs: safeNumber(freshRequestResult.ageMs, 0),
+        sessionId: safeString(body.sessionId || "", 120)
       })
     });
 
@@ -215,13 +261,12 @@ export async function onRequest(context) {
           ? "allow"
           : security.finalAction
     });
-
   } catch (error) {
-
     console.error("Security log API error:", error);
 
     try {
       await writeSecurityLog({
+        env,
         type: "client_security_event",
         level: "error",
         message: "Unhandled error in security-log API",
@@ -233,9 +278,12 @@ export async function onRequest(context) {
       });
     } catch {}
 
-    return jsonResponse({
-      success: false,
-      message: "Internal server error."
-    }, 500);
+    return jsonResponse(
+      {
+        success: false,
+        message: "Internal server error."
+      },
+      500
+    );
   }
 }
