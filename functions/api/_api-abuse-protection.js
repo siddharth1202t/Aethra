@@ -124,6 +124,8 @@ function createEmptyRecord(now) {
     burstHits: [],
     lastSuspiciousAt: 0,
     criticalRouteTouches: 0,
+    highRouteTouches: 0,
+    uniqueCriticalRoutes: [],
     lastPenaltyAppliedAt: 0
   };
 }
@@ -135,7 +137,10 @@ function getRouteClass(route = "") {
     normalized.includes("admin") ||
     normalized.includes("developer") ||
     normalized.includes("role") ||
-    normalized.includes("claims")
+    normalized.includes("claims") ||
+    normalized.includes("security") ||
+    normalized.includes("metrics") ||
+    normalized.includes("containment")
   ) {
     return "critical";
   }
@@ -144,7 +149,9 @@ function getRouteClass(route = "") {
     normalized.includes("login") ||
     normalized.includes("signup") ||
     normalized.includes("verify") ||
-    normalized.includes("security-log")
+    normalized.includes("auth") ||
+    normalized.includes("password") ||
+    normalized.includes("session")
   ) {
     return "high";
   }
@@ -200,6 +207,10 @@ function normalizeRecord(raw, now) {
       : [],
     lastSuspiciousAt: safeTimestamp(record.lastSuspiciousAt, 0),
     criticalRouteTouches: safePositiveInt(record.criticalRouteTouches, 0),
+    highRouteTouches: safePositiveInt(record.highRouteTouches, 0),
+    uniqueCriticalRoutes: Array.isArray(record.uniqueCriticalRoutes)
+      ? record.uniqueCriticalRoutes.map((route) => normalizeRoute(route)).slice(-25)
+      : [],
     lastPenaltyAppliedAt: safeTimestamp(record.lastPenaltyAppliedAt, 0)
   };
 }
@@ -208,15 +219,11 @@ async function getStoredRecord(redis, redisKey, now) {
   try {
     const raw = await redis.get(redisKey);
 
-    if (!raw) {
-      return null;
-    }
+    if (!raw) return null;
 
     if (typeof raw === "string") {
       const parsed = safeJsonParse(raw, null);
-      if (!parsed || typeof parsed !== "object") {
-        return null;
-      }
+      if (!parsed || typeof parsed !== "object") return null;
       return normalizeRecord(parsed, now);
     }
 
@@ -268,10 +275,12 @@ function decaySuspiciousHistory(record, now) {
     const decaySteps = Math.floor(
       (now - lastSuspiciousAt) / SUSPICIOUS_HISTORY_DECAY_MS
     );
+
     record.suspiciousEvents = Math.max(
       0,
       suspiciousEvents - Math.max(1, decaySteps)
     );
+
     record.lastSuspiciousAt = now;
   }
 }
@@ -296,7 +305,8 @@ function applyPenalty(record, now, reason, abuseScore, routeClass = "normal") {
         PENALTY_BASE_MS,
         activePenaltyRemaining > 0
           ? activePenaltyRemaining * 1.35
-          : PENALTY_BASE_MS + safePositiveInt(record.penaltyCount) * 10 * 60 * 1000
+          : PENALTY_BASE_MS +
+              safePositiveInt(record.penaltyCount) * 10 * 60 * 1000
       ) * classMultiplier
     )
   );
@@ -305,13 +315,8 @@ function applyPenalty(record, now, reason, abuseScore, routeClass = "normal") {
   record.penaltyCount = safePositiveInt(record.penaltyCount) + 1;
   record.lastPenaltyReason = safeString(reason, MAX_REASON_LENGTH);
   record.lastSuspiciousAt = now;
-
-  if (abuseScore >= 85) {
-    record.suspiciousEvents = safePositiveInt(record.suspiciousEvents) + 2;
-  } else {
-    record.suspiciousEvents = safePositiveInt(record.suspiciousEvents) + 1;
-  }
-
+  record.suspiciousEvents =
+    safePositiveInt(record.suspiciousEvents) + (abuseScore >= 85 ? 2 : 1);
   record.lastPenaltyAppliedAt = now;
 }
 
@@ -322,11 +327,14 @@ function getRecommendedAction({
   totalRequests,
   routeClass,
   burstCount,
-  suspiciousEvents
+  suspiciousEvents,
+  coordinatedProbe,
+  breachLikePattern
 }) {
   if (
     penaltyActive ||
     abuseScore >= 90 ||
+    breachLikePattern ||
     (routeClass === "critical" && abuseScore >= 75)
   ) {
     return "block";
@@ -336,7 +344,8 @@ function getRecommendedAction({
     abuseScore >= 65 ||
     failedRecent >= 10 ||
     burstCount >= 10 ||
-    suspiciousEvents >= 4
+    suspiciousEvents >= 4 ||
+    coordinatedProbe
   ) {
     return "challenge";
   }
@@ -352,8 +361,13 @@ function getRecommendedAction({
   return "allow";
 }
 
-function getContainmentAction({ recommendedAction, routeClass }) {
+function getContainmentAction({
+  recommendedAction,
+  routeClass,
+  breachLikePattern
+}) {
   if (recommendedAction === "block") {
+    if (breachLikePattern) return "critical_containment";
     return routeClass === "critical"
       ? "freeze_sensitive_route"
       : "temporary_containment";
@@ -440,7 +454,6 @@ export async function trackApiAbuse({
   const redis = getRedis(env);
 
   let record = await getStoredRecord(redis, redisKey, now);
-
   if (!record) {
     record = createEmptyRecord(now);
   }
@@ -450,6 +463,11 @@ export async function trackApiAbuse({
 
   if (routeClass === "critical") {
     record.criticalRouteTouches = safePositiveInt(record.criticalRouteTouches, 0) + 1;
+    record.uniqueCriticalRoutes = Array.from(
+      new Set([...(record.uniqueCriticalRoutes || []), safeRoute])
+    ).slice(-25);
+  } else if (routeClass === "high") {
+    record.highRouteTouches = safePositiveInt(record.highRouteTouches, 0) + 1;
   }
 
   if (!Array.isArray(record.requests)) {
@@ -469,7 +487,6 @@ export async function trackApiAbuse({
     .slice(-MAX_REQUEST_HISTORY);
 
   const burstCount = updateBurstHits(record, now);
-
   const totalRequests = record.requests.length;
 
   const weightedRequests = record.requests.reduce(
@@ -481,7 +498,10 @@ export async function trackApiAbuse({
 
   const weightedFailures = record.requests
     .filter((item) => item.success === false)
-    .reduce((sum, item) => sum + Math.max(1, safePositiveInt(item.weight, 1, 10)), 0);
+    .reduce(
+      (sum, item) => sum + Math.max(1, safePositiveInt(item.weight, 1, 10)),
+      0
+    );
 
   const uniqueRoutes = new Set(record.requests.map((item) => item.route)).size;
   const sameRouteBurst = record.requests.filter((item) => item.route === safeRoute).length;
@@ -494,10 +514,24 @@ export async function trackApiAbuse({
     (item) => item.routeClass === "critical"
   ).length;
 
+  const uniqueCriticalRoutesRecent = new Set(
+    record.requests
+      .filter((item) => item.routeClass === "critical")
+      .map((item) => item.route)
+  ).size;
+
   const penaltyActive = safeTimestamp(record.penaltyUntil, 0) > now;
 
   let abuseScore = 0;
   const reasons = [];
+  const events = {
+    burstEvents: 0,
+    probeEvents: 0,
+    criticalRouteHits: 0,
+    breachSignals: 0,
+    hardBlockSignals: 0,
+    endpointSpread: 0
+  };
 
   if (weightedRequests >= 20) {
     abuseScore += 20;
@@ -522,16 +556,20 @@ export async function trackApiAbuse({
   if (uniqueRoutes >= 4) {
     abuseScore += 15;
     reasons.push("multi_endpoint_probing");
+    events.probeEvents += 1;
+    events.endpointSpread = uniqueRoutes;
   }
 
   if (sameRouteBurst >= 10) {
     abuseScore += 15;
     reasons.push("same_route_burst");
+    events.burstEvents += 1;
   }
 
   if (burstCount >= 8) {
     abuseScore += 15;
     reasons.push("burst_request_pattern");
+    events.burstEvents += 1;
   }
 
   if (highSensitivityTouches >= 5) {
@@ -542,6 +580,13 @@ export async function trackApiAbuse({
   if (criticalRouteTouchesRecent >= 2) {
     abuseScore += 20;
     reasons.push("critical_route_targeting");
+    events.criticalRouteHits = criticalRouteTouchesRecent;
+  }
+
+  if (uniqueCriticalRoutesRecent >= 2) {
+    abuseScore += 15;
+    reasons.push("critical_endpoint_spread");
+    events.probeEvents += 1;
   }
 
   if (safePositiveInt(record.suspiciousEvents, 0) >= 3) {
@@ -552,6 +597,30 @@ export async function trackApiAbuse({
   if (penaltyActive) {
     abuseScore += 25;
     reasons.push("active_penalty_window");
+    events.hardBlockSignals += 1;
+  }
+
+  const coordinatedProbe =
+    uniqueRoutes >= 5 ||
+    uniqueCriticalRoutesRecent >= 2 ||
+    (criticalRouteTouchesRecent >= 3 && highSensitivityTouches >= 5);
+
+  const breachLikePattern =
+    (routeClass === "critical" && weightedRequests >= 20) ||
+    uniqueCriticalRoutesRecent >= 3 ||
+    (criticalRouteTouchesRecent >= 4 && weightedFailures >= 6);
+
+  if (coordinatedProbe) {
+    abuseScore += 10;
+    reasons.push("coordinated_route_probe");
+    events.probeEvents += 1;
+  }
+
+  if (breachLikePattern) {
+    abuseScore += 20;
+    reasons.push("possible_sensitive_extraction_pattern");
+    events.breachSignals += 1;
+    events.hardBlockSignals += 1;
   }
 
   abuseScore = Math.min(100, abuseScore);
@@ -570,6 +639,7 @@ export async function trackApiAbuse({
 
   const severePattern =
     abuseScore >= 70 ||
+    breachLikePattern ||
     (failedRecent >= 10 && sameRouteBurst >= 8) ||
     (routeClass === "critical" && abuseScore >= 55);
 
@@ -577,7 +647,11 @@ export async function trackApiAbuse({
     applyPenalty(
       record,
       now,
-      abuseScore >= 85 ? "severe_abuse_pattern" : "sustained_abuse_pattern",
+      breachLikePattern
+        ? "possible_sensitive_extraction_pattern"
+        : abuseScore >= 85
+          ? "severe_abuse_pattern"
+          : "sustained_abuse_pattern",
       abuseScore,
       routeClass
     );
@@ -594,12 +668,15 @@ export async function trackApiAbuse({
     totalRequests,
     routeClass,
     burstCount,
-    suspiciousEvents: safePositiveInt(record.suspiciousEvents, 0)
+    suspiciousEvents: safePositiveInt(record.suspiciousEvents, 0),
+    coordinatedProbe,
+    breachLikePattern
   });
 
   const containmentAction = getContainmentAction({
     recommendedAction,
-    routeClass
+    routeClass,
+    breachLikePattern
   });
 
   return {
@@ -610,6 +687,7 @@ export async function trackApiAbuse({
     containmentAction,
     penaltyActive: finalPenaltyActive,
     penaltyUntil: safeTimestamp(record.penaltyUntil, 0),
+    events,
     snapshot: {
       totalRequests: safePositiveInt(totalRequests),
       weightedRequests: safePositiveInt(weightedRequests),
@@ -620,12 +698,15 @@ export async function trackApiAbuse({
       burstCount: safePositiveInt(burstCount),
       highSensitivityTouches: safePositiveInt(highSensitivityTouches),
       criticalRouteTouchesRecent: safePositiveInt(criticalRouteTouchesRecent),
+      uniqueCriticalRoutesRecent: safePositiveInt(uniqueCriticalRoutesRecent),
       suspiciousEvents: safePositiveInt(record.suspiciousEvents),
       penaltyCount: safePositiveInt(record.penaltyCount),
       highestAbuseScore: safePositiveInt(record.highestAbuseScore, 0, 100),
       routeClass: safeString(routeClass, 20),
       clientKeyPreview: safeString(key, 24),
-      lastPenaltyReason: safeString(record.lastPenaltyReason, MAX_REASON_LENGTH)
+      lastPenaltyReason: safeString(record.lastPenaltyReason, MAX_REASON_LENGTH),
+      coordinatedProbe,
+      breachLikePattern
     }
   };
 }
