@@ -10,6 +10,9 @@ const MAX_ROUTE_LENGTH = 150;
 const MAX_REASON_LENGTH = 100;
 const MAX_REASON_HISTORY = 50;
 
+const MAX_SCORE = 100;
+const MAX_COUNTER = 1_000_000;
+
 const ALLOWED_ROUTE_SENSITIVITY = new Set(["normal", "high", "critical"]);
 
 /* ---------- helpers ---------- */
@@ -26,10 +29,14 @@ function safeNumber(value, fallback = 0) {
   return Number.isFinite(num) ? num : fallback;
 }
 
-function safeInt(value, fallback = 0, min = 0, max = 1_000_000) {
+function safeInt(value, fallback = 0, min = 0, max = MAX_COUNTER) {
   const num = Math.floor(safeNumber(value, fallback));
   if (!Number.isFinite(num)) return fallback;
   return Math.min(max, Math.max(min, num));
+}
+
+function clampScore(value) {
+  return safeInt(value, 0, 0, MAX_SCORE);
 }
 
 function safeTimestamp(value, fallback = 0) {
@@ -47,8 +54,7 @@ function safeJsonParse(raw, fallback = null) {
 /* ---------- normalization ---------- */
 
 function sanitizeKeyPart(value = "", maxLength = 120, fallback = "") {
-  const cleaned = safeString(value, maxLength)
-    .replace(/[^a-zA-Z0-9._:@/-]/g, "");
+  const cleaned = safeString(value, maxLength).replace(/[^a-zA-Z0-9._:@/-]/g, "");
   return cleaned || fallback;
 }
 
@@ -60,7 +66,6 @@ function normalizeIp(value = "") {
   }
 
   ip = ip.replace(/[^a-fA-F0-9:.,]/g, "").slice(0, MAX_IP_LENGTH);
-
   return ip || "unknown";
 }
 
@@ -88,9 +93,7 @@ function normalizeRoute(value = "") {
 
 function normalizeRouteSensitivity(value = "normal") {
   const normalized = safeString(value, 20).toLowerCase();
-  return ALLOWED_ROUTE_SENSITIVITY.has(normalized)
-    ? normalized
-    : "normal";
+  return ALLOWED_ROUTE_SENSITIVITY.has(normalized) ? normalized : "normal";
 }
 
 function normalizeReason(value = "") {
@@ -142,8 +145,8 @@ function normalizeThreatRecord(raw, now = Date.now()) {
   return {
     createdAt: safeTimestamp(record.createdAt, base.createdAt),
     updatedAt: safeTimestamp(record.updatedAt, base.updatedAt),
-    threatScore: safeInt(record.threatScore, 0, 0, 100),
-    highestThreatScore: safeInt(record.highestThreatScore, 0, 0, 100),
+    threatScore: clampScore(record.threatScore),
+    highestThreatScore: clampScore(record.highestThreatScore),
     lastRoute: normalizeRoute(record.lastRoute || base.lastRoute),
     reasonHistory: normalizeReasonHistory(record.reasonHistory || []),
 
@@ -184,13 +187,11 @@ async function storeThreatRecord(env, redisKey, record) {
 
   try {
     const ttlSeconds = Math.max(1, Math.ceil(THREAT_STATE_TTL_MS / 1000));
-
     await redis.set(
       redisKey,
       JSON.stringify(normalizeThreatRecord(record, Date.now())),
       { ex: ttlSeconds }
     );
-
     return true;
   } catch (err) {
     console.error("Threat intelligence write failed:", err);
@@ -209,7 +210,7 @@ function applyThreatDecay(record, now = Date.now()) {
   const windows = Math.floor(elapsed / THREAT_DECAY_MS);
   const decayed = { ...record };
 
-  decayed.threatScore = Math.max(0, safeInt(record.threatScore, 0) - windows * 8);
+  decayed.threatScore = clampScore(safeInt(record.threatScore, 0) - windows * 8);
   decayed.blockEvents = Math.max(0, safeInt(record.blockEvents, 0) - windows);
   decayed.hardBlockSignals = Math.max(0, safeInt(record.hardBlockSignals, 0) - windows);
   decayed.criticalRouteHits = Math.max(0, safeInt(record.criticalRouteHits, 0) - windows);
@@ -234,7 +235,7 @@ function pushReasons(record, reasons = []) {
 }
 
 function getLevel(score = 0) {
-  const safeScore = safeInt(score, 0, 0, 100);
+  const safeScore = clampScore(score);
 
   if (safeScore >= 90) return "critical";
   if (safeScore >= 70) return "high";
@@ -242,14 +243,34 @@ function getLevel(score = 0) {
   return "low";
 }
 
-function getAction(score = 0, hardBlockSignals = 0) {
-  const safeScore = safeInt(score, 0, 0, 100);
+function getAction(score = 0, hardBlockSignals = 0, breachSignals = 0) {
+  const safeScore = clampScore(score);
   const safeHardBlockSignals = safeInt(hardBlockSignals, 0, 0, 100);
+  const safeBreachSignals = safeInt(breachSignals, 0, 0, 100);
 
-  if (safeHardBlockSignals >= 2 || safeScore >= 90) return "block";
+  if (safeHardBlockSignals >= 2 || safeBreachSignals >= 2 || safeScore >= 90) {
+    return "block";
+  }
   if (safeScore >= 70) return "challenge";
   if (safeScore >= 40) return "throttle";
   return "allow";
+}
+
+function addScore(total, delta) {
+  return clampScore(clampScore(total) + safeInt(delta, 0, 0, 100));
+}
+
+function buildSignalSummary() {
+  return {
+    botPressure: 0,
+    abusePressure: 0,
+    ratePressure: 0,
+    replayPressure: 0,
+    routePressure: 0,
+    persistentRiskPressure: 0,
+    exploitPressure: 0,
+    breachPressure: 0
+  };
 }
 
 /* ---------- public API ---------- */
@@ -279,13 +300,14 @@ export async function evaluateThreat({
   record.updatedAt = now;
   record.lastRoute = normalizeRoute(route);
 
-  let threatScore = safeInt(record.threatScore, 0, 0, 100);
+  let threatScore = clampScore(record.threatScore);
   const reasons = [];
+  const signals = buildSignalSummary();
 
   const normalizedRouteSensitivity = normalizeRouteSensitivity(routeSensitivity);
 
-  const botRisk = safeInt(botResult?.riskScore, 0, 0, 100);
-  const abuseScore = safeInt(abuseResult?.abuseScore, 0, 0, 100);
+  const botRisk = clampScore(botResult?.riskScore);
+  const abuseScore = clampScore(abuseResult?.abuseScore);
   const rateViolations = safeInt(rateLimitResult?.violations, 0, 0, 100);
   const replaySignals = safeInt(freshnessResult?.events?.replaySignals, 0, 0, 100);
 
@@ -293,90 +315,111 @@ export async function evaluateThreat({
   const abuseHardBlockSignals = safeInt(abuseResult?.events?.hardBlockSignals, 0, 0, 100);
   const abuseEndpointSpread = safeInt(abuseResult?.events?.endpointSpread, 0, 0, 100);
 
+  const persistentRiskScore = clampScore(securityState?.currentRiskScore);
+  const persistentRiskLevel = safeString(
+    securityState?.currentRiskLevel || "",
+    20
+  ).toLowerCase();
+
+  const historicalExploitFlags = safeInt(securityState?.exploitFlagCount, 0, 0, MAX_COUNTER);
+  const historicalBreachFlags = safeInt(securityState?.breachFlagCount, 0, 0, MAX_COUNTER);
+
   if (botRisk >= 70) {
-    threatScore += 18;
+    signals.botPressure += 18;
     reasons.push("bot_high_risk");
   } else if (botRisk >= 40) {
-    threatScore += 8;
+    signals.botPressure += 8;
     reasons.push("bot_medium_risk");
   }
 
   if (abuseScore >= 70) {
-    threatScore += 20;
+    signals.abusePressure += 20;
     reasons.push("abuse_high_score");
   } else if (abuseScore >= 40) {
-    threatScore += 10;
+    signals.abusePressure += 10;
     reasons.push("abuse_medium_score");
   }
 
   if (rateLimitResult && rateLimitResult.allowed === false) {
-    threatScore += 12;
+    signals.ratePressure += 12;
     record.blockEvents += 1;
     reasons.push("rate_limit_exceeded");
   }
 
   if (rateViolations >= 3) {
-    threatScore += 10;
+    signals.ratePressure += 10;
     reasons.push("repeat_rate_limit_violations");
   }
 
   if (replaySignals > 0) {
-    threatScore += 18;
+    signals.replayPressure += 18;
     reasons.push("replay_signal_detected");
   }
 
   if (abuseHardBlockSignals > 0) {
     record.hardBlockSignals += abuseHardBlockSignals;
-    threatScore += 15;
+    signals.abusePressure += 15;
     reasons.push("hard_block_signal");
   }
 
   if (abuseBreachSignals > 0) {
     record.breachSignals += abuseBreachSignals;
-    threatScore += 22;
+    signals.breachPressure += 22;
     reasons.push("breach_signal_detected");
   }
 
   if (abuseEndpointSpread >= 4) {
     record.endpointSpread += 1;
-    threatScore += 12;
+    signals.routePressure += 12;
     reasons.push("endpoint_spread_detected");
   }
 
   if (normalizedRouteSensitivity === "critical") {
     record.criticalRouteHits += 1;
-    threatScore += 10;
+    signals.routePressure += 10;
     reasons.push("critical_route_pressure");
   } else if (normalizedRouteSensitivity === "high") {
-    threatScore += 5;
+    signals.routePressure += 5;
     reasons.push("high_route_pressure");
   }
 
-  if (safeInt(securityState?.currentRiskScore, 0, 0, 100) >= 75) {
-    threatScore += 10;
+  if (persistentRiskScore >= 75) {
+    signals.persistentRiskPressure += 10;
     reasons.push("persistent_high_risk_state");
   }
 
-  if (safeString(securityState?.currentRiskLevel || "", 20).toLowerCase() === "critical") {
-    threatScore += 15;
+  if (persistentRiskLevel === "critical") {
+    signals.persistentRiskPressure += 15;
     reasons.push("critical_risk_state");
   }
 
-  if (safeInt(securityState?.exploitFlagCount, 0, 0, 100000) > 0) {
+  if (historicalExploitFlags > 0) {
     record.exploitSignals += 1;
-    threatScore += 20;
+    signals.exploitPressure += 12;
     reasons.push("exploit_history_present");
   }
 
-  if (safeInt(securityState?.breachFlagCount, 0, 0, 100000) > 0) {
+  if (historicalBreachFlags > 0) {
     record.breachSignals += 1;
-    threatScore += 20;
+    signals.breachPressure += 14;
     reasons.push("breach_history_present");
   }
 
-  record.threatScore = Math.min(100, threatScore);
+  const totalIncrement =
+    signals.botPressure +
+    signals.abusePressure +
+    signals.ratePressure +
+    signals.replayPressure +
+    signals.routePressure +
+    signals.persistentRiskPressure +
+    signals.exploitPressure +
+    signals.breachPressure;
+
+  threatScore = addScore(threatScore, Math.min(60, totalIncrement));
+
+  record.threatScore = clampScore(threatScore);
   record.highestThreatScore = Math.max(
-    safeInt(record.highestThreatScore, 0, 0, 100),
+    clampScore(record.highestThreatScore),
     record.threatScore
   );
 
@@ -384,13 +427,18 @@ export async function evaluateThreat({
   await storeThreatRecord(env, redisKey, record);
 
   const level = getLevel(record.threatScore);
-  const action = getAction(record.threatScore, record.hardBlockSignals);
+  const action = getAction(
+    record.threatScore,
+    record.hardBlockSignals,
+    record.breachSignals
+  );
 
   return {
     threatScore: record.threatScore,
     level,
     action,
     reasons: normalizeReasonHistory(record.reasonHistory).slice(-10),
+    signals,
     events: {
       blockEvents: safeInt(record.blockEvents, 0, 0, 100),
       hardBlockSignals: safeInt(record.hardBlockSignals, 0, 0, 100),
@@ -399,7 +447,10 @@ export async function evaluateThreat({
       breachSignals: safeInt(record.breachSignals, 0, 0, 100),
       endpointSpread: safeInt(record.endpointSpread, 0, 0, 100)
     },
-    clientKeyPreview: safeString(redisKey.replace(/^threat:/, ""), 24)
+    clientKeyPreview: safeString(
+      `${normalizeIp(ip)}:${normalizeSessionId(sessionId).slice(0, 6)}`,
+      24
+    )
   };
 }
 
@@ -415,17 +466,31 @@ export async function getThreatSnapshot({
   if (!record) {
     return {
       found: false,
-      clientKeyPreview: safeString(redisKey.replace(/^threat:/, ""), 24)
+      clientKeyPreview: safeString(
+        `${normalizeIp(ip)}:${normalizeSessionId(sessionId).slice(0, 6)}`,
+        24
+      )
     };
   }
 
   return {
     found: true,
-    threatScore: safeInt(record.threatScore, 0, 0, 100),
-    highestThreatScore: safeInt(record.highestThreatScore, 0, 0, 100),
+    threatScore: clampScore(record.threatScore),
+    highestThreatScore: clampScore(record.highestThreatScore),
     lastRoute: normalizeRoute(record.lastRoute),
     reasonHistory: normalizeReasonHistory(record.reasonHistory).slice(-10),
-    clientKeyPreview: safeString(redisKey.replace(/^threat:/, ""), 24)
+    events: {
+      blockEvents: safeInt(record.blockEvents, 0, 0, 100),
+      hardBlockSignals: safeInt(record.hardBlockSignals, 0, 0, 100),
+      criticalRouteHits: safeInt(record.criticalRouteHits, 0, 0, 100),
+      exploitSignals: safeInt(record.exploitSignals, 0, 0, 100),
+      breachSignals: safeInt(record.breachSignals, 0, 0, 100),
+      endpointSpread: safeInt(record.endpointSpread, 0, 0, 100)
+    },
+    clientKeyPreview: safeString(
+      `${normalizeIp(ip)}:${normalizeSessionId(sessionId).slice(0, 6)}`,
+      24
+    )
   };
 }
 
