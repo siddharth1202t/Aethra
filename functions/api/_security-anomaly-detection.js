@@ -9,6 +9,8 @@ const ANOMALY_STATE_TTL_SECONDS = Math.max(
   Math.ceil(ANOMALY_STATE_TTL_MS / 1000)
 );
 
+const ANOMALY_DECAY_WINDOW_MS = 6 * 60 * 60 * 1000;
+
 const MAX_COUNTER_VALUE = 1_000_000;
 const MAX_REASON_LENGTH = 120;
 const MAX_REASONS = 20;
@@ -79,7 +81,16 @@ function normalizeRoute(value = "") {
 }
 
 function normalizeIp(value = "") {
-  return safeString(value, 100);
+  let ip = safeString(value || "", 100);
+
+  if (!ip) return "";
+
+  if (ip.startsWith("::ffff:")) {
+    ip = ip.slice(7);
+  }
+
+  ip = ip.replace(/[^a-fA-F0-9:.,]/g, "").slice(0, 100);
+  return ip;
 }
 
 function normalizeReason(reason = "") {
@@ -89,6 +100,10 @@ function normalizeReason(reason = "") {
 function normalizeRouteSensitivity(value = "normal") {
   const v = safeString(value, 20).toLowerCase();
   return v === "critical" || v === "high" ? v : "normal";
+}
+
+function normalizeActionType(value = "") {
+  return safeString(value || "", 50).toLowerCase().replace(/[^a-z0-9_:-]/g, "_");
 }
 
 /* ------------------------------------------------ */
@@ -188,6 +203,29 @@ function normalizeState(raw, actorType = "session", actorId = "") {
     replaySignalCount: safeInt(s.replaySignalCount),
     coordinatedSignalCount: safeInt(s.coordinatedSignalCount)
   };
+}
+
+function applyStateDecay(state, now = Date.now()) {
+  const normalized = { ...state };
+  const updatedAt = safeInt(normalized.updatedAt, now, 0, now);
+  const elapsed = Math.max(0, now - updatedAt);
+
+  if (elapsed < ANOMALY_DECAY_WINDOW_MS) {
+    return normalized;
+  }
+
+  const windows = Math.floor(elapsed / ANOMALY_DECAY_WINDOW_MS);
+
+  normalized.ipChangeCount = Math.max(0, normalized.ipChangeCount - windows);
+  normalized.routeSpreadCount = Math.max(0, normalized.routeSpreadCount - windows);
+  normalized.exploitSignalCount = Math.max(0, normalized.exploitSignalCount - windows);
+  normalized.breachSignalCount = Math.max(0, normalized.breachSignalCount - windows);
+  normalized.replaySignalCount = Math.max(0, normalized.replaySignalCount - windows);
+  normalized.coordinatedSignalCount = Math.max(0, normalized.coordinatedSignalCount - windows);
+  normalized.suspiciousBurstCount = Math.max(0, normalized.suspiciousBurstCount - windows);
+  normalized.updatedAt = now;
+
+  return normalized;
 }
 
 /* ------------------------------------------------ */
@@ -323,18 +361,27 @@ export async function evaluateAnomalyDetection({
       level: "low",
       action: "allow",
       reasons: [],
+      signals: {
+        contextualPressure: 0,
+        exploitPressure: 0,
+        breachPressure: 0,
+        replayPressure: 0,
+        coordinatedPressure: 0,
+        historicalPressure: 0
+      },
       events: {
         exploitSignals: 0,
         breachSignals: 0,
         coordinatedSignals: 0,
-        replaySignals: 0
+        replaySignals: 0,
+        criticalSignals: 0
       }
     };
   }
 
   const currentIp = normalizeIp(ip);
   const currentRoute = normalizeRoute(route);
-  const currentActionType = normalizeAction(actionType || "allow");
+  const currentActionType = normalizeActionType(actionType || "unknown");
   const normalizedRouteSensitivity = normalizeRouteSensitivity(routeSensitivity);
   const safeRisk = safeInt(riskScore || risk?.riskScore, 0, 0, 100);
 
@@ -345,47 +392,68 @@ export async function evaluateAnomalyDetection({
   const replaySignals = safeInt(freshnessResult?.events?.replaySignals, 0, 0, 100);
   const rateHardBlockSignals = safeInt(rateLimitResult?.events?.hardBlockSignals, 0, 0, 100);
 
-  const previousState = await getStoredState(env, safeActorType, safeActorId);
+  const previousState = applyStateDecay(
+    await getStoredState(env, safeActorType, safeActorId),
+    Date.now()
+  );
+
   const now = Date.now();
 
-  const nextState = normalizeState({
-    ...previousState,
-    updatedAt: now,
+  const nextState = normalizeState(
+    {
+      ...previousState,
+      updatedAt: now,
 
-    recentIps:
-      currentIp
-        ? [currentIp, ...previousState.recentIps.filter((v) => v !== currentIp)].slice(0, MAX_RECENT_ITEMS)
-        : previousState.recentIps,
+      recentIps:
+        currentIp
+          ? [currentIp, ...previousState.recentIps.filter((v) => v !== currentIp)].slice(0, MAX_RECENT_ITEMS)
+          : previousState.recentIps,
 
-    recentRoutes:
-      currentRoute
-        ? [currentRoute, ...previousState.recentRoutes.filter((v) => v !== currentRoute)].slice(0, MAX_RECENT_ITEMS)
-        : previousState.recentRoutes,
+      recentRoutes:
+        currentRoute
+          ? [currentRoute, ...previousState.recentRoutes.filter((v) => v !== currentRoute)].slice(0, MAX_RECENT_ITEMS)
+          : previousState.recentRoutes,
 
-    recentActions:
-      currentActionType
-        ? [currentActionType, ...previousState.recentActions.filter((v) => v !== currentActionType)].slice(0, MAX_RECENT_ITEMS)
-        : previousState.recentActions,
+      recentActions:
+        currentActionType
+          ? [currentActionType, ...previousState.recentActions.filter((v) => v !== currentActionType)].slice(0, MAX_RECENT_ITEMS)
+          : previousState.recentActions,
 
-    recentRiskScores:
-      [safeRisk, ...previousState.recentRiskScores].slice(0, MAX_RECENT_ITEMS),
+      recentRiskScores:
+        [safeRisk, ...previousState.recentRiskScores].slice(0, MAX_RECENT_ITEMS),
 
-    writeActionCount: safeInt(previousState.writeActionCount, 0) + (isWriteAction ? 1 : 0),
-    exploitSignalCount: safeInt(previousState.exploitSignalCount, 0) + (payloadExploitSignals > 0 ? 1 : 0),
-    breachSignalCount: safeInt(previousState.breachSignalCount, 0) + ((payloadBreachSignals > 0 || abuseBreachSignals > 0) ? 1 : 0),
-    replaySignalCount: safeInt(previousState.replaySignalCount, 0) + (replaySignals > 0 ? 1 : 0),
-    coordinatedSignalCount: safeInt(previousState.coordinatedSignalCount, 0) + (abuseEndpointSpread >= 4 ? 1 : 0)
-  }, safeActorType, safeActorId);
+      writeActionCount: safeInt(previousState.writeActionCount, 0) + (isWriteAction ? 1 : 0),
+      exploitSignalCount: safeInt(previousState.exploitSignalCount, 0) + (payloadExploitSignals > 0 ? 1 : 0),
+      breachSignalCount:
+        safeInt(previousState.breachSignalCount, 0) +
+        (payloadBreachSignals > 0 || abuseBreachSignals > 0 ? 1 : 0),
+      replaySignalCount: safeInt(previousState.replaySignalCount, 0) + (replaySignals > 0 ? 1 : 0),
+      coordinatedSignalCount:
+        safeInt(previousState.coordinatedSignalCount, 0) +
+        (abuseEndpointSpread >= 4 ? 1 : 0)
+    },
+    safeActorType,
+    safeActorId
+  );
 
   let score = 0;
   let criticalSignals = 0;
   const reasons = [];
 
+  const signals = {
+    contextualPressure: 0,
+    exploitPressure: 0,
+    breachPressure: 0,
+    replayPressure: 0,
+    coordinatedPressure: 0,
+    historicalPressure: 0
+  };
+
   if (safeRisk >= 80) {
-    score += 25;
+    signals.contextualPressure += 25;
     pushReason(reasons, "anomaly:high_risk_alignment");
   } else if (safeRisk >= 60) {
-    score += 12;
+    signals.contextualPressure += 12;
     pushReason(reasons, "anomaly:medium_risk_alignment");
   }
 
@@ -394,7 +462,7 @@ export async function evaluateAnomalyDetection({
     previousState.recentIps.length > 0 &&
     !previousState.recentIps.includes(currentIp)
   ) {
-    score += 20;
+    signals.contextualPressure += 20;
     nextState.ipChangeCount = safeInt(previousState.ipChangeCount, 0) + 1;
     pushReason(reasons, "anomaly:ip_change_detected");
   }
@@ -404,38 +472,38 @@ export async function evaluateAnomalyDetection({
     !previousState.recentRoutes.includes(currentRoute) &&
     previousState.recentRoutes.length >= 4
   ) {
-    score += 10;
+    signals.coordinatedPressure += 10;
     nextState.routeSpreadCount = safeInt(previousState.routeSpreadCount, 0) + 1;
     pushReason(reasons, "anomaly:new_route_after_wide_spread");
   }
 
   if (isWriteAction) {
-    score += 8;
+    signals.contextualPressure += 8;
     pushReason(reasons, "anomaly:write_action_pressure");
   }
 
   if (normalizedRouteSensitivity === "critical") {
-    score += 10;
+    signals.contextualPressure += 10;
     pushReason(reasons, "anomaly:critical_route_context");
   } else if (normalizedRouteSensitivity === "high") {
-    score += 5;
+    signals.contextualPressure += 5;
     pushReason(reasons, "anomaly:high_route_context");
   }
 
   if (payloadExploitSignals > 0) {
-    score += 28;
+    signals.exploitPressure += 28;
     criticalSignals += 1;
     pushReason(reasons, "anomaly:exploit_signal_detected");
   }
 
   if (payloadBreachSignals > 0 || abuseBreachSignals > 0) {
-    score += 35;
+    signals.breachPressure += 35;
     criticalSignals += 1;
     pushReason(reasons, "anomaly:breach_signal_detected");
   }
 
   if (replaySignals > 0) {
-    score += 18;
+    signals.replayPressure += 18;
     pushReason(reasons, "anomaly:replay_signal_detected");
     if (normalizedRouteSensitivity === "critical") {
       criticalSignals += 1;
@@ -443,46 +511,54 @@ export async function evaluateAnomalyDetection({
   }
 
   if (abuseEndpointSpread >= 4) {
-    score += 18;
+    signals.coordinatedPressure += 18;
     pushReason(reasons, "anomaly:coordinated_route_spread");
   }
 
   if (rateHardBlockSignals > 0) {
-    score += 12;
+    signals.contextualPressure += 12;
     pushReason(reasons, "anomaly:rate_limit_hard_block_signal");
   }
 
   if (safeInt(previousState.ipChangeCount, 0) >= 2) {
-    score += 10;
+    signals.historicalPressure += 10;
     pushReason(reasons, "anomaly:repeated_ip_change_history");
   }
 
   if (safeInt(previousState.routeSpreadCount, 0) >= 2) {
-    score += 10;
+    signals.historicalPressure += 10;
     pushReason(reasons, "anomaly:route_spread_history");
   }
 
   if (safeInt(previousState.exploitSignalCount, 0) >= 1) {
-    score += 15;
+    signals.historicalPressure += 15;
     criticalSignals += 1;
     pushReason(reasons, "anomaly:exploit_history");
   }
 
   if (safeInt(previousState.breachSignalCount, 0) >= 1) {
-    score += 20;
+    signals.historicalPressure += 20;
     criticalSignals += 1;
     pushReason(reasons, "anomaly:breach_history");
   }
 
   if (safeInt(previousState.replaySignalCount, 0) >= 2) {
-    score += 12;
+    signals.historicalPressure += 12;
     pushReason(reasons, "anomaly:replay_history");
   }
 
   if (safeInt(previousState.coordinatedSignalCount, 0) >= 1) {
-    score += 15;
+    signals.historicalPressure += 15;
     pushReason(reasons, "anomaly:coordinated_history");
   }
+
+  score =
+    signals.contextualPressure +
+    signals.exploitPressure +
+    signals.breachPressure +
+    signals.replayPressure +
+    signals.coordinatedPressure +
+    signals.historicalPressure;
 
   const anomalyScore = Math.min(100, Math.max(0, score));
 
@@ -491,6 +567,7 @@ export async function evaluateAnomalyDetection({
     level: getLevel(anomalyScore),
     action: getAction(anomalyScore, criticalSignals),
     reasons: reasons.slice(0, MAX_REASONS),
+    signals,
     events: {
       exploitSignals: payloadExploitSignals > 0 ? 1 : 0,
       breachSignals: payloadBreachSignals > 0 || abuseBreachSignals > 0 ? 1 : 0,
@@ -526,6 +603,12 @@ export async function evaluateAnomalyDetection({
           actorType: safeActorType,
           actorId: safeActorId,
           anomalyScore: result.anomalyScore,
+          contextualPressure: result.signals.contextualPressure,
+          exploitPressure: result.signals.exploitPressure,
+          breachPressure: result.signals.breachPressure,
+          replayPressure: result.signals.replayPressure,
+          coordinatedPressure: result.signals.coordinatedPressure,
+          historicalPressure: result.signals.historicalPressure,
           exploitSignals: result.events.exploitSignals,
           breachSignals: result.events.breachSignals,
           coordinatedSignals: result.events.coordinatedSignals,
