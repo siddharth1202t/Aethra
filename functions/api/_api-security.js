@@ -19,6 +19,16 @@ const ACTOR_MEMORY_TTL_MS = 24 * 60 * 60 * 1000;
 const ACTOR_CLEANUP_INTERVAL_MS = 60 * 1000;
 let lastActorCleanupAt = 0;
 
+const ALLOWED_METHODS = new Set([
+  "GET",
+  "POST",
+  "PUT",
+  "PATCH",
+  "DELETE",
+  "OPTIONS",
+  "HEAD"
+]);
+
 export function safeString(value, maxLength = 300) {
   return String(value ?? "")
     .replace(/[\u0000-\u001F\u007F]/g, "")
@@ -48,19 +58,15 @@ export function isPlainObject(value) {
 function getHeaderValue(headers, name) {
   if (!headers) return "";
 
+  const target = String(name).toLowerCase();
+
   if (typeof headers.get === "function") {
-    return safeString(headers.get(name) || "", 1000);
+    return safeString(headers.get(name) || headers.get(target) || "", 1000);
   }
 
   if (isPlainObject(headers)) {
-    const direct = headers[name];
-    if (direct !== undefined && direct !== null) {
-      return safeString(direct, 1000);
-    }
-
-    const lowerName = String(name).toLowerCase();
     for (const [key, value] of Object.entries(headers)) {
-      if (String(key).toLowerCase() === lowerName) {
+      if (String(key).toLowerCase() === target) {
         return safeString(value, 1000);
       }
     }
@@ -84,11 +90,6 @@ function normalizeIp(value = "") {
 
 export function getClientIp(req) {
   const headers = req?.headers;
-  const forwarded = getHeaderValue(headers, "x-forwarded-for");
-
-  if (forwarded) {
-    return normalizeIp(forwarded.split(",")[0]?.trim());
-  }
 
   const cfIp = getHeaderValue(headers, "cf-connecting-ip");
   if (cfIp) {
@@ -98,6 +99,11 @@ export function getClientIp(req) {
   const realIp = getHeaderValue(headers, "x-real-ip");
   if (realIp) {
     return normalizeIp(realIp);
+  }
+
+  const forwarded = getHeaderValue(headers, "x-forwarded-for");
+  if (forwarded) {
+    return normalizeIp(forwarded.split(",")[0]?.trim());
   }
 
   return normalizeIp(req?.ip || req?.socket?.remoteAddress || "unknown");
@@ -113,6 +119,16 @@ export function normalizeOrigin(origin = "") {
   } catch {
     return "";
   }
+}
+
+function normalizeMethod(method = "") {
+  const normalized = safeString(method || "", 20).toUpperCase();
+  if (!normalized) return "INVALID";
+  return ALLOWED_METHODS.has(normalized) ? normalized : "INVALID";
+}
+
+function normalizeContentType(value = "") {
+  return safeString(value || "", 120).toLowerCase();
 }
 
 export function isAllowedOrigin(origin, allowedOrigins = []) {
@@ -248,7 +264,10 @@ function getRouteSensitivity(route = "") {
     normalized.includes("admin") ||
     normalized.includes("developer") ||
     normalized.includes("role") ||
-    normalized.includes("claims")
+    normalized.includes("claims") ||
+    normalized.includes("containment") ||
+    normalized.includes("security") ||
+    normalized.includes("metrics")
   ) {
     return "critical";
   }
@@ -257,7 +276,9 @@ function getRouteSensitivity(route = "") {
     normalized.includes("login") ||
     normalized.includes("signup") ||
     normalized.includes("verify") ||
-    normalized.includes("security-log")
+    normalized.includes("auth") ||
+    normalized.includes("password") ||
+    normalized.includes("session")
   ) {
     return "high";
   }
@@ -330,7 +351,9 @@ function recordSuspiciousEvent({
   ip = "unknown",
   finalAction = "allow",
   combinedRisk = 0,
-  reason = ""
+  reason = "",
+  exploitSignals = 0,
+  breachSignals = 0
 } = {}) {
   const now = Date.now();
 
@@ -340,7 +363,9 @@ function recordSuspiciousEvent({
     ip: normalizeIp(ip),
     finalAction: safeString(finalAction, 30).toLowerCase(),
     combinedRisk: safePositiveInt(combinedRisk, 0, 100),
-    reason: safeString(reason, 120)
+    reason: safeString(reason, 120),
+    exploitSignals: safePositiveInt(exploitSignals, 0, 20),
+    breachSignals: safePositiveInt(breachSignals, 0, 20)
   });
 
   securityStateStore.suspiciousEvents = securityStateStore.suspiciousEvents
@@ -372,13 +397,33 @@ function updateSecurityMode() {
     (item) => safePositiveInt(item.combinedRisk, 0, 100) >= 70
   ).length;
 
+  const recentExploitSignals = securityStateStore.suspiciousEvents.reduce(
+    (sum, item) => sum + safePositiveInt(item.exploitSignals, 0, 20),
+    0
+  );
+
+  const recentBreachSignals = securityStateStore.suspiciousEvents.reduce(
+    (sum, item) => sum + safePositiveInt(item.breachSignals, 0, 20),
+    0
+  );
+
   let mode = "normal";
   let reason = "stable_activity";
 
-  if (recentBlocks >= 10 || recentHighRisk >= 20) {
+  if (
+    recentBreachSignals >= 2 ||
+    recentExploitSignals >= 3 ||
+    recentBlocks >= 10 ||
+    recentHighRisk >= 20
+  ) {
     mode = "lockdown";
-    reason = "high_block_or_high_risk_volume";
-  } else if (recentBlocks >= 4 || recentChallenges >= 12 || recentHighRisk >= 10) {
+    reason = "critical_attack_pressure";
+  } else if (
+    recentBlocks >= 4 ||
+    recentChallenges >= 12 ||
+    recentHighRisk >= 10 ||
+    recentExploitSignals >= 1
+  ) {
     mode = "attack";
     reason = "elevated_suspicious_activity";
   } else if (recentChallenges >= 5 || recentHighRisk >= 5) {
@@ -443,6 +488,8 @@ function getOrCreateActorMemory(ip, sessionId = "") {
       suspiciousCount: 0,
       blockedCount: 0,
       challengedCount: 0,
+      exploitFlags: 0,
+      breachFlags: 0,
       highestRisk: 0,
       lastRoute: "unknown-route",
       lastAction: "allow"
@@ -457,7 +504,9 @@ function updateActorMemory({
   sessionId = "",
   route = "",
   combinedRisk = 0,
-  finalAction = "allow"
+  finalAction = "allow",
+  exploitSignals = 0,
+  breachSignals = 0
 } = {}) {
   const now = Date.now();
   const { key, record } = getOrCreateActorMemory(ip, sessionId);
@@ -469,6 +518,8 @@ function updateActorMemory({
   );
   record.lastRoute = normalizeRoute(route);
   record.lastAction = safeString(finalAction, 30).toLowerCase();
+  record.exploitFlags = safePositiveInt(record.exploitFlags, 0) + safePositiveInt(exploitSignals, 0, 5);
+  record.breachFlags = safePositiveInt(record.breachFlags, 0) + safePositiveInt(breachSignals, 0, 5);
 
   if (finalAction === "block") {
     record.blockedCount = safePositiveInt(record.blockedCount, 0) + 1;
@@ -488,6 +539,8 @@ function updateActorMemory({
       suspiciousCount: safePositiveInt(record.suspiciousCount, 0),
       blockedCount: safePositiveInt(record.blockedCount, 0),
       challengedCount: safePositiveInt(record.challengedCount, 0),
+      exploitFlags: safePositiveInt(record.exploitFlags, 0),
+      breachFlags: safePositiveInt(record.breachFlags, 0),
       highestRisk: safePositiveInt(record.highestRisk, 0, 100),
       lastRoute: safeString(record.lastRoute, 150),
       lastAction: safeString(record.lastAction, 30)
@@ -495,11 +548,126 @@ function updateActorMemory({
   };
 }
 
-export function getCombinedRisk(botAnalysis, abuseAnalysis, extra = {}) {
+function analyzePayloadThreats({
+  req,
+  body,
+  route,
+  originAllowed
+} = {}) {
+  const method = normalizeMethod(req?.method || "");
+  const contentType = normalizeContentType(getHeaderValue(req?.headers, "content-type"));
+  const normalizedRoute = normalizeRoute(route);
+
+  let threatScore = 0;
+  const reasons = [];
+  const events = {
+    exploitSignals: 0,
+    breachSignals: 0,
+    malformedSignals: 0,
+    methodSignals: 0
+  };
+
+  if (method === "INVALID") {
+    threatScore += 30;
+    reasons.push("invalid_method");
+    events.methodSignals += 1;
+    events.exploitSignals += 1;
+  }
+
+  const bodyIsObject = isPlainObject(body);
+  const bodyKeys = bodyIsObject ? Object.keys(body).slice(0, 50) : [];
+  const bodyString = safeString(
+    bodyIsObject ? JSON.stringify(sanitizeMetadata(body, 0, 3, 20, 10)) : String(body ?? ""),
+    3000
+  ).toLowerCase();
+
+  const suspiciousPatterns = [
+    "<script",
+    "javascript:",
+    "onerror=",
+    "onload=",
+    "union select",
+    "drop table",
+    " or 1=1",
+    "../",
+    "..\\",
+    "/etc/passwd",
+    "cmd.exe",
+    "powershell",
+    "wget ",
+    "curl ",
+    "${jndi:",
+    "<iframe",
+    "document.cookie"
+  ];
+
+  const matchedPatterns = suspiciousPatterns.filter((pattern) =>
+    bodyString.includes(pattern)
+  );
+
+  if (matchedPatterns.length > 0) {
+    threatScore += Math.min(50, matchedPatterns.length * 12);
+    reasons.push("suspicious_payload_patterns");
+    events.exploitSignals += matchedPatterns.length >= 2 ? 2 : 1;
+  }
+
+  if (
+    ["post", "put", "patch"].includes((method || "").toLowerCase()) &&
+    !contentType.includes("application/json") &&
+    !contentType.includes("application/x-www-form-urlencoded") &&
+    !contentType.includes("multipart/form-data") &&
+    body &&
+    Object.keys(body || {}).length > 0
+  ) {
+    threatScore += 15;
+    reasons.push("unexpected_content_type");
+    events.malformedSignals += 1;
+  }
+
+  if (!originAllowed && normalizedRoute !== "unknown-route") {
+    threatScore += 10;
+    reasons.push("untrusted_origin");
+    events.malformedSignals += 1;
+  }
+
+  if (bodyKeys.length > 20) {
+    threatScore += 10;
+    reasons.push("oversized_body_key_count");
+    events.malformedSignals += 1;
+  }
+
+  const sensitiveRoute =
+    getRouteSensitivity(normalizedRoute) === "critical" ||
+    getRouteSensitivity(normalizedRoute) === "high";
+
+  if (
+    sensitiveRoute &&
+    (matchedPatterns.length > 0 || method === "INVALID")
+  ) {
+    threatScore += 20;
+    reasons.push("sensitive_route_exploit_pressure");
+    events.breachSignals += 1;
+  }
+
+  return {
+    threatScore: Math.min(100, threatScore),
+    reasons,
+    matchedPatterns: matchedPatterns.slice(0, 10),
+    events
+  };
+}
+
+export function getCombinedRisk(
+  botAnalysis,
+  abuseAnalysis,
+  payloadThreatAnalysis = null,
+  extra = {}
+) {
   let score = 0;
 
   score += safePositiveInt(botAnalysis?.riskScore, 0, 100);
   score += safePositiveInt(abuseAnalysis?.abuseScore, 0, 100);
+  score += safePositiveInt(payloadThreatAnalysis?.threatScore, 0, 100);
   score += safePositiveInt(extra.modeRiskBonus, 0, 100);
   score += safePositiveInt(extra.actorRiskBonus, 0, 100);
   score += safePositiveInt(extra.routeRiskBonus, 0, 100);
@@ -516,6 +684,14 @@ export function getCombinedRisk(botAnalysis, abuseAnalysis, extra = {}) {
     score += 15;
   }
 
+  if (payloadThreatAnalysis?.events?.exploitSignals > 0) {
+    score += 20;
+  }
+
+  if (payloadThreatAnalysis?.events?.breachSignals > 0) {
+    score += 25;
+  }
+
   if (safePositiveInt(abuseAnalysis?.snapshot?.suspiciousEvents, 0) >= 3) {
     score += 10;
   }
@@ -527,11 +703,14 @@ export function getFinalSecurityAction({
   rateLimitResult = null,
   botAnalysis = null,
   abuseAnalysis = null,
+  payloadThreatAnalysis = null,
   combinedRisk = 0,
   securityMode = "normal",
   route = ""
 } = {}) {
   const sensitivity = getRouteSensitivity(route);
+  const exploitSignals = safePositiveInt(payloadThreatAnalysis?.events?.exploitSignals, 0);
+  const breachSignals = safePositiveInt(payloadThreatAnalysis?.events?.breachSignals, 0);
 
   if (rateLimitResult && !rateLimitResult.allowed) {
     if (
@@ -550,8 +729,9 @@ export function getFinalSecurityAction({
   }
 
   if (
-    securityMode === "lockdown" &&
-    (sensitivity === "critical" || combinedRisk >= 50)
+    breachSignals > 0 ||
+    exploitSignals >= 2 ||
+    (securityMode === "lockdown" && sensitivity !== "normal")
   ) {
     return "block";
   }
@@ -573,6 +753,7 @@ export function getFinalSecurityAction({
   }
 
   if (
+    exploitSignals > 0 ||
     botAnalysis?.recommendedAction === "challenge" ||
     abuseAnalysis?.recommendedAction === "challenge" ||
     combinedRisk >= 60
@@ -594,9 +775,15 @@ export function getFinalSecurityAction({
 function getContainmentAction({
   finalAction = "allow",
   securityMode = "normal",
-  route = ""
+  route = "",
+  payloadThreatAnalysis = null
 } = {}) {
   const sensitivity = getRouteSensitivity(route);
+  const breachSignals = safePositiveInt(payloadThreatAnalysis?.events?.breachSignals, 0);
+
+  if (breachSignals > 0) {
+    return "critical_containment";
+  }
 
   if (securityMode === "lockdown" && sensitivity === "critical") {
     return "freeze_sensitive_route";
@@ -621,6 +808,7 @@ export function buildRiskPayload({
   rateLimitResult = null,
   botAnalysis = null,
   abuseAnalysis = null,
+  payloadThreatAnalysis = null,
   combinedRisk = 0,
   finalAction = "allow",
   securityMode = "normal",
@@ -635,6 +823,10 @@ export function buildRiskPayload({
     botRecommendedAction: botAnalysis?.recommendedAction || "allow",
     abuseLevel: abuseAnalysis?.level || "low",
     abuseRecommendedAction: abuseAnalysis?.recommendedAction || "allow",
+    payloadThreatScore: safePositiveInt(payloadThreatAnalysis?.threatScore, 0, 100),
+    payloadThreatReasons: Array.isArray(payloadThreatAnalysis?.reasons)
+      ? payloadThreatAnalysis.reasons.slice(0, 10).map((item) => safeString(item, 80))
+      : [],
     combinedRisk: safePositiveInt(combinedRisk, 0, 100),
     finalAction: safeString(finalAction, 30),
     securityMode: safeString(securityMode, 30),
@@ -645,6 +837,8 @@ export function buildRiskPayload({
           suspiciousCount: safePositiveInt(actorMemory.suspiciousCount, 0),
           blockedCount: safePositiveInt(actorMemory.blockedCount, 0),
           challengedCount: safePositiveInt(actorMemory.challengedCount, 0),
+          exploitFlags: safePositiveInt(actorMemory.exploitFlags, 0),
+          breachFlags: safePositiveInt(actorMemory.breachFlags, 0),
           highestRisk: safePositiveInt(actorMemory.highestRisk, 0, 100)
         }
       : null
@@ -655,8 +849,14 @@ export function getSecurityModeSnapshot() {
   return {
     mode: safeString(securityStateStore.mode || "normal", 30),
     updatedAt: safePositiveInt(securityStateStore.updatedAt, Date.now()),
-    lastEscalationReason: safeString(securityStateStore.lastEscalationReason || "", 120),
-    recentSuspiciousEvents: safePositiveInt(securityStateStore.suspiciousEvents.length, 0)
+    lastEscalationReason: safeString(
+      securityStateStore.lastEscalationReason || "",
+      120
+    ),
+    recentSuspiciousEvents: safePositiveInt(
+      securityStateStore.suspiciousEvents.length,
+      0
+    )
   };
 }
 
@@ -675,6 +875,8 @@ export async function runRouteSecurity({
   const ip = getClientIp(req);
   const origin = normalizeOrigin(getHeaderValue(req?.headers, "origin"));
   const requestUserAgent = safeString(getHeaderValue(req?.headers, "user-agent"), 500);
+  const method = normalizeMethod(req?.method || "");
+  const contentType = normalizeContentType(getHeaderValue(req?.headers, "content-type"));
 
   const originAllowed = isAllowedOrigin(origin, allowedOrigins);
   const securityModeBefore = updateSecurityMode();
@@ -732,21 +934,34 @@ export async function runRouteSecurity({
     botAnalysis = null;
   }
 
+  const payloadThreatAnalysis = analyzePayloadThreats({
+    req,
+    body,
+    route: normalizedRoute,
+    originAllowed
+  });
+
   const actorBaseline = getOrCreateActorMemory(ip, sessionId).record;
   const actorRiskBonus = getActorRiskBonus(actorBaseline);
   const modeRiskBonus = getSecurityModeRiskBonus(securityModeBefore.mode);
   const routeRiskBonus = getRouteRiskWeight(normalizedRoute) * 5;
 
-  const combinedRisk = getCombinedRisk(botAnalysis, abuseAnalysis, {
-    modeRiskBonus,
-    actorRiskBonus,
-    routeRiskBonus
-  });
+  const combinedRisk = getCombinedRisk(
+    botAnalysis,
+    abuseAnalysis,
+    payloadThreatAnalysis,
+    {
+      modeRiskBonus,
+      actorRiskBonus,
+      routeRiskBonus
+    }
+  );
 
   const finalAction = getFinalSecurityAction({
     rateLimitResult,
     botAnalysis,
     abuseAnalysis,
+    payloadThreatAnalysis,
     combinedRisk,
     securityMode: securityModeBefore.mode,
     route: normalizedRoute
@@ -757,16 +972,25 @@ export async function runRouteSecurity({
     sessionId,
     route: normalizedRoute,
     combinedRisk,
-    finalAction
+    finalAction,
+    exploitSignals: payloadThreatAnalysis?.events?.exploitSignals || 0,
+    breachSignals: payloadThreatAnalysis?.events?.breachSignals || 0
   });
 
-  if (finalAction !== "allow" || combinedRisk >= 60) {
+  if (
+    finalAction !== "allow" ||
+    combinedRisk >= 60 ||
+    safePositiveInt(payloadThreatAnalysis?.events?.exploitSignals, 0) > 0 ||
+    safePositiveInt(payloadThreatAnalysis?.events?.breachSignals, 0) > 0
+  ) {
     recordSuspiciousEvent({
       route: normalizedRoute,
       ip,
       finalAction,
       combinedRisk,
-      reason: `${securityModeBefore.mode}:${finalAction}`
+      reason: `${securityModeBefore.mode}:${finalAction}`,
+      exploitSignals: payloadThreatAnalysis?.events?.exploitSignals || 0,
+      breachSignals: payloadThreatAnalysis?.events?.breachSignals || 0
     });
   }
 
@@ -774,7 +998,8 @@ export async function runRouteSecurity({
   const containmentAction = getContainmentAction({
     finalAction,
     securityMode: securityModeAfter.mode,
-    route: normalizedRoute
+    route: normalizedRoute,
+    payloadThreatAnalysis
   });
 
   return {
@@ -782,9 +1007,12 @@ export async function runRouteSecurity({
     origin,
     originAllowed,
     requestUserAgent,
+    method,
+    contentType,
     rateLimitResult,
     abuseAnalysis,
     botAnalysis,
+    payloadThreatAnalysis,
     combinedRisk,
     finalAction,
     containmentAction,
@@ -797,6 +1025,7 @@ export async function runRouteSecurity({
       rateLimitResult,
       botAnalysis,
       abuseAnalysis,
+      payloadThreatAnalysis,
       combinedRisk,
       finalAction,
       securityMode: securityModeAfter.mode,
