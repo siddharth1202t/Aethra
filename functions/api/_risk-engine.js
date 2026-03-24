@@ -49,8 +49,35 @@ function pushReason(reasons, reason) {
   }
 }
 
-function addWeightedScore(state, amount, reason) {
-  state.score += safeInt(amount, 0, 0, 1000);
+function createPressureBreakdown() {
+  return {
+    routePressure: 0,
+    botPressure: 0,
+    abusePressure: 0,
+    ratePressure: 0,
+    freshnessPressure: 0,
+    payloadPressure: 0,
+    memoryPressure: 0,
+    statePressure: 0
+  };
+}
+
+function createEventSignals() {
+  return {
+    exploitSignals: 0,
+    breachSignals: 0,
+    replaySignals: 0,
+    coordinatedSignals: 0
+  };
+}
+
+function addWeightedScore(state, amount, reason, pressureKey = "") {
+  const safeAmount = safeInt(amount, 0, 0, 1000);
+  state.score += safeAmount;
+
+  if (pressureKey && state.pressures[pressureKey] !== undefined) {
+    state.pressures[pressureKey] += safeAmount;
+  }
 
   if (reason) {
     pushReason(state.reasons, reason);
@@ -64,10 +91,14 @@ function getLevel(score) {
   return "low";
 }
 
-function getAction(score, hardBlockSignals = 0, criticalSignals = 0) {
+function getAction(score, hardBlockSignals = 0, criticalSignals = 0, eventSignals = {}) {
   const hardSignals = safeInt(hardBlockSignals, 0, 0, 100);
   const severeSignals = safeInt(criticalSignals, 0, 0, 100);
+  const exploitSignals = safeInt(eventSignals.exploitSignals, 0, 0, 100);
+  const breachSignals = safeInt(eventSignals.breachSignals, 0, 0, 100);
 
+  if (breachSignals > 0) return "block";
+  if (exploitSignals > 0 && (hardSignals > 0 || severeSignals > 0)) return "block";
   if (hardSignals >= 2 || severeSignals >= 2 || score >= 95) return "block";
   if (score >= 75) return "challenge";
   if (score >= 45) return "throttle";
@@ -200,7 +231,12 @@ function normalizeThreatResult(threatResult = null) {
     threatScore: safeInt(threatResult.threatScore, 0, 0, 100),
     level: normalizeLevel(threatResult.level),
     action: normalizeAction(threatResult.action),
-
+    signals: {
+      replayPressure: safeInt(threatResult?.signals?.replayPressure, 0, 0, 100),
+      coordinatedPressure: safeInt(threatResult?.signals?.coordinatedPressure, 0, 0, 100),
+      exploitPressure: safeInt(threatResult?.signals?.exploitPressure, 0, 0, 100),
+      breachPressure: safeInt(threatResult?.signals?.breachPressure, 0, 0, 100)
+    },
     events: {
       botEvents: safeInt(threatResult?.events?.botEvents, 0),
       abuseEvents: safeInt(threatResult?.events?.abuseEvents, 0),
@@ -249,7 +285,9 @@ function normalizeSecurityState(securityState = null) {
     lockoutCount: safeInt(securityState.lockoutCount, 0),
     successfulAuthCount: safeInt(securityState.successfulAuthCount, 0),
     exploitFlagCount: safeInt(securityState.exploitFlagCount, 0),
-    breachFlagCount: safeInt(securityState.breachFlagCount, 0)
+    breachFlagCount: safeInt(securityState.breachFlagCount, 0),
+    replayFlagCount: safeInt(securityState.replayFlagCount, 0),
+    coordinatedFlagCount: safeInt(securityState.coordinatedFlagCount, 0)
   };
 }
 
@@ -269,52 +307,60 @@ export function evaluateRisk(inputs = {}) {
     score: 0,
     reasons: [],
     hardBlockSignals: 0,
-    criticalSignals: 0
+    criticalSignals: 0,
+    pressures: createPressureBreakdown(),
+    events: createEventSignals()
   };
 
   /* ROUTE SENSITIVITY */
-  if (routeSensitivity === "critical") addWeightedScore(state, 8, "route:critical");
-  if (routeSensitivity === "high") addWeightedScore(state, 4, "route:high");
+  if (routeSensitivity === "critical") {
+    addWeightedScore(state, 8, "route:critical", "routePressure");
+  }
+  if (routeSensitivity === "high") {
+    addWeightedScore(state, 4, "route:high", "routePressure");
+  }
 
   /* BOT SIGNALS */
   if (botResult) {
-    if (botResult.riskScore >= 70) addWeightedScore(state, 20, "bot:high_risk");
-    else if (botResult.riskScore >= 40) addWeightedScore(state, 10, "bot:medium_risk");
+    if (botResult.riskScore >= 70) addWeightedScore(state, 20, "bot:high_risk", "botPressure");
+    else if (botResult.riskScore >= 40) addWeightedScore(state, 10, "bot:medium_risk", "botPressure");
 
     if (botResult.escalatedAction === "block")
-      addWeightedScore(state, 20, "bot:escalated_block");
+      addWeightedScore(state, 20, "bot:escalated_block", "botPressure");
 
     if (botResult.escalatedAction === "challenge")
-      addWeightedScore(state, 10, "bot:escalated_challenge");
+      addWeightedScore(state, 10, "bot:escalated_challenge", "botPressure");
 
     if (botResult.telemetryQualityScore <= 30)
-      addWeightedScore(state, 10, "bot:low_telemetry_quality");
+      addWeightedScore(state, 10, "bot:low_telemetry_quality", "botPressure");
 
     if (botResult.distributed.suspicionScore >= 120)
-      addWeightedScore(state, 25, "bot:distributed_suspicion_high");
+      addWeightedScore(state, 25, "bot:distributed_suspicion_high", "botPressure");
     else if (botResult.distributed.suspicionScore >= 60)
-      addWeightedScore(state, 12, "bot:distributed_suspicion_medium");
+      addWeightedScore(state, 12, "bot:distributed_suspicion_medium", "botPressure");
 
     if (botResult.distributed.recentHardBlocks >= 2)
-      addWeightedScore(state, 15, "bot:recent_hard_blocks");
+      addWeightedScore(state, 15, "bot:recent_hard_blocks", "botPressure");
 
     if (botResult.distributed.recentChallenges >= 3)
-      addWeightedScore(state, 8, "bot:recent_challenges");
+      addWeightedScore(state, 8, "bot:recent_challenges", "botPressure");
 
     if (botResult.distributed.sensitiveRouteHits >= 5)
-      addWeightedScore(state, 10, "bot:sensitive_route_targeting");
+      addWeightedScore(state, 10, "bot:sensitive_route_targeting", "botPressure");
 
-    if (botResult.distributed.uniqueRecentRoutes >= 4)
-      addWeightedScore(state, 10, "bot:route_spread");
+    if (botResult.distributed.uniqueRecentRoutes >= 4) {
+      addWeightedScore(state, 10, "bot:route_spread", "botPressure");
+      state.events.coordinatedSignals += 1;
+    }
 
     if (botResult.hardBlockSignals > 0) {
       state.hardBlockSignals += botResult.hardBlockSignals;
-      addWeightedScore(state, 35, "bot:hard_block_signal");
+      addWeightedScore(state, 35, "bot:hard_block_signal", "botPressure");
     }
 
     if (botResult.distributed.hardBlockCount >= 2) {
       state.hardBlockSignals += 1;
-      addWeightedScore(state, 20, "bot:distributed_hard_block_history");
+      addWeightedScore(state, 20, "bot:distributed_hard_block_history", "botPressure");
     }
 
     for (const reason of botResult.reasons) {
@@ -325,43 +371,51 @@ export function evaluateRisk(inputs = {}) {
   /* ABUSE */
   if (abuseResult) {
     if (abuseResult.abuseScore >= 70)
-      addWeightedScore(state, 22, "abuse:high_score");
+      addWeightedScore(state, 22, "abuse:high_score", "abusePressure");
     else if (abuseResult.abuseScore >= 40)
-      addWeightedScore(state, 10, "abuse:medium_score");
+      addWeightedScore(state, 10, "abuse:medium_score", "abusePressure");
 
     if (abuseResult.penaltyActive)
-      addWeightedScore(state, 18, "abuse:penalty_active");
+      addWeightedScore(state, 18, "abuse:penalty_active", "abusePressure");
 
     if (abuseResult.snapshot.weightedFailures >= 12)
-      addWeightedScore(state, 15, "abuse:heavy_failures");
+      addWeightedScore(state, 15, "abuse:heavy_failures", "abusePressure");
 
-    if (abuseResult.snapshot.uniqueRoutes >= 4)
-      addWeightedScore(state, 10, "abuse:multi_route_probing");
+    if (abuseResult.snapshot.uniqueRoutes >= 4) {
+      addWeightedScore(state, 10, "abuse:multi_route_probing", "abusePressure");
+      state.events.coordinatedSignals += 1;
+    }
 
     if (abuseResult.snapshot.criticalRouteTouchesRecent >= 2)
-      addWeightedScore(state, 20, "abuse:critical_route_targeting");
+      addWeightedScore(state, 20, "abuse:critical_route_targeting", "abusePressure");
 
-    if (abuseResult.snapshot.coordinatedProbe)
-      addWeightedScore(state, 15, "abuse:coordinated_probe");
+    if (abuseResult.snapshot.coordinatedProbe) {
+      addWeightedScore(state, 15, "abuse:coordinated_probe", "abusePressure");
+      state.events.coordinatedSignals += 1;
+    }
 
     if (abuseResult.snapshot.breachLikePattern) {
       state.criticalSignals += 1;
-      addWeightedScore(state, 25, "abuse:breach_like_pattern");
+      state.events.breachSignals += 1;
+      addWeightedScore(state, 25, "abuse:breach_like_pattern", "abusePressure");
     }
 
     if (abuseResult.events.breachSignals > 0) {
       state.criticalSignals += 1;
       state.hardBlockSignals += 1;
-      addWeightedScore(state, 30, "abuse:breach_signal");
+      state.events.breachSignals += 1;
+      addWeightedScore(state, 30, "abuse:breach_signal", "abusePressure");
     }
 
     if (abuseResult.events.hardBlockSignals > 0) {
       state.hardBlockSignals += 1;
-      addWeightedScore(state, 15, "abuse:hard_block_signal");
+      addWeightedScore(state, 15, "abuse:hard_block_signal", "abusePressure");
     }
 
-    if (abuseResult.events.endpointSpread >= 4)
-      addWeightedScore(state, 12, "abuse:endpoint_spread");
+    if (abuseResult.events.endpointSpread >= 4) {
+      addWeightedScore(state, 12, "abuse:endpoint_spread", "abusePressure");
+      state.events.coordinatedSignals += 1;
+    }
 
     for (const reason of abuseResult.reasons) {
       pushReason(state.reasons, `abuse:${reason}`);
@@ -371,23 +425,28 @@ export function evaluateRisk(inputs = {}) {
   /* RATE LIMIT */
   if (rateLimitResult) {
     if (!rateLimitResult.allowed)
-      addWeightedScore(state, 15, "rate:limit_exceeded");
+      addWeightedScore(state, 15, "rate:limit_exceeded", "ratePressure");
 
     if (rateLimitResult.penaltyActive)
-      addWeightedScore(state, 15, "rate:penalty_active");
+      addWeightedScore(state, 15, "rate:penalty_active", "ratePressure");
 
     if (rateLimitResult.violations >= 4)
-      addWeightedScore(state, 18, "rate:repeat_violations");
+      addWeightedScore(state, 18, "rate:repeat_violations", "ratePressure");
 
     if (rateLimitResult.burstCount >= 10)
-      addWeightedScore(state, 15, "rate:burst_pattern");
+      addWeightedScore(state, 15, "rate:burst_pattern", "ratePressure");
 
     if (rateLimitResult.routeSensitivity === "critical")
-      addWeightedScore(state, 10, "rate:critical_route_pressure");
+      addWeightedScore(state, 10, "rate:critical_route_pressure", "ratePressure");
+
+    if (rateLimitResult.events.burstSignals > 0) {
+      addWeightedScore(state, 10, "rate:burst_signal", "ratePressure");
+      state.events.coordinatedSignals += 1;
+    }
 
     if (rateLimitResult.events.hardBlockSignals > 0) {
       state.hardBlockSignals += 1;
-      addWeightedScore(state, 12, "rate:hard_block_signal");
+      addWeightedScore(state, 12, "rate:hard_block_signal", "ratePressure");
     }
   }
 
@@ -396,7 +455,8 @@ export function evaluateRisk(inputs = {}) {
     addWeightedScore(
       state,
       20,
-      `freshness:${freshnessResult.code || "failed"}`
+      `freshness:${freshnessResult.code || "failed"}`,
+      "freshnessPressure"
     );
 
     if (
@@ -404,35 +464,39 @@ export function evaluateRisk(inputs = {}) {
       freshnessResult.code === "future_request_timestamp"
     ) {
       state.hardBlockSignals += 1;
+      state.events.replaySignals += 1;
       state.criticalSignals += routeSensitivity === "critical" ? 1 : 0;
     }
 
     if (freshnessResult.events.replaySignals > 0) {
       state.hardBlockSignals += 1;
-      addWeightedScore(state, 15, "freshness:replay_signal");
+      state.events.replaySignals += 1;
+      addWeightedScore(state, 15, "freshness:replay_signal", "freshnessPressure");
     }
   }
 
   /* PAYLOAD THREATS */
   if (payloadThreatResult) {
     if (payloadThreatResult.threatScore >= 70)
-      addWeightedScore(state, 25, "payload:high_threat");
+      addWeightedScore(state, 25, "payload:high_threat", "payloadPressure");
     else if (payloadThreatResult.threatScore >= 40)
-      addWeightedScore(state, 12, "payload:medium_threat");
+      addWeightedScore(state, 12, "payload:medium_threat", "payloadPressure");
 
     if (payloadThreatResult.events.exploitSignals > 0) {
       state.criticalSignals += 1;
-      addWeightedScore(state, 28, "payload:exploit_signal");
+      state.events.exploitSignals += 1;
+      addWeightedScore(state, 28, "payload:exploit_signal", "payloadPressure");
     }
 
     if (payloadThreatResult.events.breachSignals > 0) {
       state.hardBlockSignals += 1;
       state.criticalSignals += 1;
-      addWeightedScore(state, 35, "payload:breach_signal");
+      state.events.breachSignals += 1;
+      addWeightedScore(state, 35, "payload:breach_signal", "payloadPressure");
     }
 
     if (payloadThreatResult.events.methodSignals > 0)
-      addWeightedScore(state, 10, "payload:invalid_method_pressure");
+      addWeightedScore(state, 10, "payload:invalid_method_pressure", "payloadPressure");
 
     for (const reason of payloadThreatResult.reasons) {
       pushReason(state.reasons, `payload:${reason}`);
@@ -442,55 +506,78 @@ export function evaluateRisk(inputs = {}) {
   /* THREAT MEMORY */
   if (threatResult) {
     if (threatResult.threatScore >= 80)
-      addWeightedScore(state, 25, "memory:high");
+      addWeightedScore(state, 25, "memory:high", "memoryPressure");
     else if (threatResult.threatScore >= 50)
-      addWeightedScore(state, 12, "memory:medium");
+      addWeightedScore(state, 12, "memory:medium", "memoryPressure");
 
     if (threatResult.events.blockEvents >= 3)
-      addWeightedScore(state, 12, "memory:repeat_block_events");
+      addWeightedScore(state, 12, "memory:repeat_block_events", "memoryPressure");
 
     if (threatResult.events.hardBlockSignals >= 2) {
       state.hardBlockSignals += 1;
-      addWeightedScore(state, 15, "memory:hard_block_signals");
+      addWeightedScore(state, 15, "memory:hard_block_signals", "memoryPressure");
     }
 
     if (threatResult.events.exploitSignals > 0) {
       state.criticalSignals += 1;
-      addWeightedScore(state, 18, "memory:exploit_signals");
+      state.events.exploitSignals += 1;
+      addWeightedScore(state, 18, "memory:exploit_signals", "memoryPressure");
     }
 
     if (threatResult.events.breachSignals > 0) {
       state.criticalSignals += 1;
       state.hardBlockSignals += 1;
-      addWeightedScore(state, 22, "memory:breach_signals");
+      state.events.breachSignals += 1;
+      addWeightedScore(state, 22, "memory:breach_signals", "memoryPressure");
     }
 
-    if (threatResult.events.endpointSpread >= 4)
-      addWeightedScore(state, 10, "memory:endpoint_spread");
+    if (
+      threatResult.events.endpointSpread >= 4 ||
+      safeInt(threatResult?.signals?.coordinatedPressure, 0, 0, 100) > 0
+    ) {
+      addWeightedScore(state, 10, "memory:endpoint_spread", "memoryPressure");
+      state.events.coordinatedSignals += 1;
+    }
+
+    if (safeInt(threatResult?.signals?.replayPressure, 0, 0, 100) > 0) {
+      state.events.replaySignals += 1;
+    }
   }
 
   /* SECURITY STATE */
   if (securityState) {
     if (securityState.currentRiskScore >= 75)
-      addWeightedScore(state, 20, "state:high_risk_score");
+      addWeightedScore(state, 20, "state:high_risk_score", "statePressure");
 
     if (securityState.lockoutCount >= 2)
-      addWeightedScore(state, 18, "state:lockout_history");
+      addWeightedScore(state, 18, "state:lockout_history", "statePressure");
 
     if (securityState.currentRiskLevel === "critical") {
       state.hardBlockSignals += 1;
-      addWeightedScore(state, 15, "state:critical_risk_level");
+      addWeightedScore(state, 15, "state:critical_risk_level", "statePressure");
     }
 
     if (securityState.exploitFlagCount >= 1) {
       state.criticalSignals += 1;
-      addWeightedScore(state, 20, "state:exploit_flag_history");
+      state.events.exploitSignals += 1;
+      addWeightedScore(state, 20, "state:exploit_flag_history", "statePressure");
     }
 
     if (securityState.breachFlagCount >= 1) {
       state.criticalSignals += 1;
       state.hardBlockSignals += 1;
-      addWeightedScore(state, 25, "state:breach_flag_history");
+      state.events.breachSignals += 1;
+      addWeightedScore(state, 25, "state:breach_flag_history", "statePressure");
+    }
+
+    if (securityState.replayFlagCount >= 1) {
+      state.events.replaySignals += 1;
+      addWeightedScore(state, 10, "state:replay_flag_history", "statePressure");
+    }
+
+    if (securityState.coordinatedFlagCount >= 1) {
+      state.events.coordinatedSignals += 1;
+      addWeightedScore(state, 12, "state:coordinated_flag_history", "statePressure");
     }
   }
 
@@ -498,16 +585,41 @@ export function evaluateRisk(inputs = {}) {
   state.score = Math.min(100, safeInt(state.score, 0, 0, 100));
   state.reasons = state.reasons.slice(0, MAX_REASONS);
 
+  state.events.exploitSignals = safeInt(state.events.exploitSignals, 0, 0, 100);
+  state.events.breachSignals = safeInt(state.events.breachSignals, 0, 0, 100);
+  state.events.replaySignals = safeInt(state.events.replaySignals, 0, 0, 100);
+  state.events.coordinatedSignals = safeInt(state.events.coordinatedSignals, 0, 0, 100);
+
   const level = getLevel(state.score);
-  const action = getAction(state.score, state.hardBlockSignals, state.criticalSignals);
+  const action = getAction(
+    state.score,
+    state.hardBlockSignals,
+    state.criticalSignals,
+    state.events
+  );
+
+  const criticalAttackLikely =
+    level === "critical" ||
+    state.events.breachSignals > 0 ||
+    (state.events.exploitSignals > 0 && state.hardBlockSignals > 0) ||
+    state.criticalSignals >= 2 ||
+    state.hardBlockSignals >= 2;
 
   let containmentAction = "none";
 
   if (action === "block") {
-    containmentAction =
-      level === "critical"
+    if (state.events.breachSignals > 0) {
+      containmentAction = "temporary_containment";
+    } else if (
+      state.events.exploitSignals > 0 ||
+      criticalAttackLikely
+    ) {
+      containmentAction = "freeze_sensitive_route";
+    } else {
+      containmentAction = level === "critical"
         ? "freeze_sensitive_route"
         : "temporary_containment";
+    }
   } else if (action === "challenge") {
     containmentAction = "step_up_verification";
   } else if (action === "throttle") {
@@ -521,10 +633,18 @@ export function evaluateRisk(inputs = {}) {
     containmentAction,
     hardBlockSignals: safeInt(state.hardBlockSignals, 0, 0, 100),
     criticalSignals: safeInt(state.criticalSignals, 0, 0, 100),
-    criticalAttackLikely:
-      level === "critical" ||
-      state.criticalSignals >= 2 ||
-      state.hardBlockSignals >= 2,
-    reasons: state.reasons
+    criticalAttackLikely,
+    reasons: state.reasons,
+    pressures: {
+      routePressure: safeInt(state.pressures.routePressure, 0, 0, 100),
+      botPressure: safeInt(state.pressures.botPressure, 0, 0, 100),
+      abusePressure: safeInt(state.pressures.abusePressure, 0, 0, 100),
+      ratePressure: safeInt(state.pressures.ratePressure, 0, 0, 100),
+      freshnessPressure: safeInt(state.pressures.freshnessPressure, 0, 0, 100),
+      payloadPressure: safeInt(state.pressures.payloadPressure, 0, 0, 100),
+      memoryPressure: safeInt(state.pressures.memoryPressure, 0, 0, 100),
+      statePressure: safeInt(state.pressures.statePressure, 0, 0, 100)
+    },
+    events: state.events
   };
 }
