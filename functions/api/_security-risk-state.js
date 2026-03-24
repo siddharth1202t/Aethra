@@ -8,25 +8,11 @@ const RISK_STATE_DECAY_WINDOW_MS = 6 * 60 * 60 * 1000;
 const MAX_FUTURE_TIME_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_COUNTER_VALUE = 1_000_000;
 
-const ALLOWED_ACTOR_TYPES = new Set([
-  "session",
-  "user",
-  "ip"
-]);
+const ALLOWED_ACTOR_TYPES = new Set(["session", "user", "ip"]);
+const ALLOWED_LEVELS = new Set(["low", "medium", "high", "critical"]);
+const ALLOWED_ACTIONS = new Set(["allow", "throttle", "challenge", "block"]);
 
-const ALLOWED_LEVELS = new Set([
-  "low",
-  "medium",
-  "high",
-  "critical"
-]);
-
-const ALLOWED_ACTIONS = new Set([
-  "allow",
-  "throttle",
-  "challenge",
-  "block"
-]);
+/* -------------------- SAFETY -------------------- */
 
 function safeString(value, maxLength = 200) {
   return String(value ?? "")
@@ -58,6 +44,8 @@ function safeJsonParse(raw, fallback = null) {
   }
 }
 
+/* -------------------- NORMALIZATION -------------------- */
+
 function normalizeActorType(value = "session") {
   const normalized = safeString(value || "session", 20).toLowerCase();
   return ALLOWED_ACTOR_TYPES.has(normalized) ? normalized : "session";
@@ -75,6 +63,15 @@ function normalizeAction(value = "allow") {
 
 function normalizeActorId(value = "") {
   return safeString(value || "", 160).replace(/[^a-zA-Z0-9:_-]/g, "_");
+}
+
+function normalizeReasonList(reasons = []) {
+  if (!Array.isArray(reasons)) return [];
+
+  return reasons
+    .slice(0, 20)
+    .map((reason) => safeString(reason, 120))
+    .filter(Boolean);
 }
 
 function buildRiskStateKey(actorType, actorId) {
@@ -126,15 +123,6 @@ function createDefaultRiskState(actorType = "session", actorId = "") {
   };
 }
 
-function normalizeReasonList(reasons = []) {
-  if (!Array.isArray(reasons)) return [];
-
-  return reasons
-    .slice(0, 20)
-    .map((reason) => safeString(reason, 120))
-    .filter(Boolean);
-}
-
 function normalizeRiskState(raw, actorType = "session", actorId = "") {
   const base = createDefaultRiskState(actorType, actorId);
   const nowMax = getNowMax();
@@ -172,6 +160,80 @@ function normalizeRiskState(raw, actorType = "session", actorId = "") {
     lastReasonSummary: normalizeReasonList(state.lastReasonSummary || [])
   };
 }
+
+function normalizeIncrements(input = {}) {
+  const increments = input && typeof input === "object" ? input : {};
+
+  return {
+    suspiciousEventCount: safeInt(increments.suspiciousEventCount, 0),
+    challengeCount: safeInt(increments.challengeCount, 0),
+    throttleCount: safeInt(increments.throttleCount, 0),
+    blockCount: safeInt(increments.blockCount, 0),
+    hardBlockSignalCount: safeInt(increments.hardBlockSignalCount, 0),
+
+    exploitFlagCount: safeInt(increments.exploitFlagCount, 0),
+    breachFlagCount: safeInt(increments.breachFlagCount, 0),
+    replayFlagCount: safeInt(increments.replayFlagCount, 0),
+    coordinatedFlagCount: safeInt(increments.coordinatedFlagCount, 0),
+
+    trustedEventCount: safeInt(increments.trustedEventCount, 0),
+    successfulAuthCount: safeInt(increments.successfulAuthCount, 0),
+    failedLoginCount: safeInt(increments.failedLoginCount, 0),
+    failedSignupCount: safeInt(increments.failedSignupCount, 0),
+    failedPasswordResetCount: safeInt(increments.failedPasswordResetCount, 0),
+    captchaFailureCount: safeInt(increments.captchaFailureCount, 0),
+    rateLimitHitCount: safeInt(increments.rateLimitHitCount, 0),
+    lockoutCount: safeInt(increments.lockoutCount, 0)
+  };
+}
+
+function normalizeRiskResult(riskResult = {}) {
+  const result = riskResult && typeof riskResult === "object" ? riskResult : {};
+  const signals = result.signals && typeof result.signals === "object" ? result.signals : {};
+  const events = result.events && typeof result.events === "object" ? result.events : {};
+
+  return {
+    riskScore: safeInt(result.riskScore, 0, 0, 100),
+    level: normalizeLevel(result.level || getLevelFromScore(result.riskScore)),
+    finalAction: normalizeAction(result.finalAction || result.action || "allow"),
+    reasons: normalizeReasonList(Array.isArray(result.reasons) ? result.reasons : []),
+    criticalAttackLikely: result.criticalAttackLikely === true,
+
+    hardBlockSignals:
+      safeInt(result.hardBlockSignals, 0) +
+      safeInt(events.hardBlockSignals, 0),
+
+    exploitSignals:
+      safeInt(result.exploitSignals, 0) +
+      safeInt(events.exploitSignals, 0) +
+      safeInt(signals.exploitPressure, 0, 0, 100) > 0
+        ? 1
+        : 0,
+
+    breachSignals:
+      safeInt(result.breachSignals, 0) +
+      safeInt(events.breachSignals, 0) +
+      safeInt(signals.breachPressure, 0, 0, 100) > 0
+        ? 1
+        : 0,
+
+    replaySignals:
+      safeInt(result.replaySignals, 0) +
+      safeInt(events.replaySignals, 0) +
+      safeInt(signals.replayPressure, 0, 0, 100) > 0
+        ? 1
+        : 0,
+
+    coordinatedSignals:
+      safeInt(result.coordinatedSignals, 0) +
+      safeInt(events.coordinatedSignals, 0) +
+      safeInt(signals.routePressure, 0, 0, 100) >= 12
+        ? 1
+        : 0
+  };
+}
+
+/* -------------------- STORAGE -------------------- */
 
 function applyTimeDecay(state, now = Date.now()) {
   const normalized = { ...state };
@@ -271,6 +333,8 @@ async function storeRiskState(env, state) {
   }
 }
 
+/* -------------------- EVENTING -------------------- */
+
 function buildMergedReasons(existing = [], incoming = []) {
   const merged = [...normalizeReasonList(existing)];
 
@@ -291,22 +355,33 @@ function shouldRecordRiskChange(previousState, nextState) {
   );
 }
 
+function getRiskEventSeverity(state) {
+  if (state.currentRiskLevel === "critical" || state.lastAction === "block") {
+    return "critical";
+  }
+  if (state.currentRiskLevel === "high" || state.lastAction === "challenge") {
+    return "warning";
+  }
+  return "info";
+}
+
+function getRiskEventAction(state) {
+  if (
+    state.lastAction === "block" ||
+    state.lastAction === "challenge" ||
+    state.lastAction === "throttle"
+  ) {
+    return state.lastAction;
+  }
+  return "observe";
+}
+
 async function recordRiskStateEvent(env, previousState, nextState, reason = "risk_state_updated") {
   try {
     await appendSecurityEvent(env, {
       type: "risk_state_updated",
-      severity:
-        nextState.currentRiskLevel === "critical"
-          ? "critical"
-          : nextState.currentRiskLevel === "high"
-            ? "warning"
-            : "info",
-      action:
-        nextState.lastAction === "block" ||
-        nextState.lastAction === "challenge" ||
-        nextState.lastAction === "throttle"
-          ? nextState.lastAction
-          : "observe",
+      severity: getRiskEventSeverity(nextState),
+      action: getRiskEventAction(nextState),
       mode: "",
       reason: safeString(reason, 120),
       message: "Persistent actor risk state updated.",
@@ -334,6 +409,8 @@ async function recordRiskStateEvent(env, previousState, nextState, reason = "ris
   }
 }
 
+/* -------------------- PUBLIC API -------------------- */
+
 export async function getRiskState({
   env = {},
   actorType = "session",
@@ -342,7 +419,18 @@ export async function getRiskState({
   const rawState = await getStoredRiskState(env, actorType, actorId);
   const decayedState = applyTimeDecay(rawState, Date.now());
 
-  if (decayedState.actorId && decayedState.currentRiskScore !== rawState.currentRiskScore) {
+  const shouldPersistDecay =
+    decayedState.actorId &&
+    (
+      decayedState.currentRiskScore !== rawState.currentRiskScore ||
+      decayedState.suspiciousEventCount !== rawState.suspiciousEventCount ||
+      decayedState.blockCount !== rawState.blockCount ||
+      decayedState.challengeCount !== rawState.challengeCount ||
+      decayedState.throttleCount !== rawState.throttleCount ||
+      decayedState.trustedEventCount !== rawState.trustedEventCount
+    );
+
+  if (shouldPersistDecay) {
     decayedState.lastEvaluatedAt = Date.now();
     await storeRiskState(env, decayedState);
   }
@@ -374,12 +462,20 @@ export async function updateRiskState({
     now
   );
 
-  const nextRiskScore = safeInt(riskResult?.riskScore, currentState.currentRiskScore, 0, 100);
+  const normalizedRiskResult = normalizeRiskResult(riskResult);
+  const normalizedIncrements = normalizeIncrements(increments);
+
+  const nextRiskScore = safeInt(
+    normalizedRiskResult.riskScore,
+    currentState.currentRiskScore,
+    0,
+    100
+  );
   const nextRiskLevel = normalizeLevel(
-    riskResult?.level || getLevelFromScore(nextRiskScore)
+    normalizedRiskResult.level || getLevelFromScore(nextRiskScore)
   );
   const nextAction = normalizeAction(
-    riskResult?.finalAction || riskResult?.action || currentState.lastAction || "allow"
+    normalizedRiskResult.finalAction || currentState.lastAction || "allow"
   );
 
   const nextState = normalizeRiskState(
@@ -394,78 +490,82 @@ export async function updateRiskState({
 
       suspiciousEventCount:
         currentState.suspiciousEventCount +
-        safeInt(increments.suspiciousEventCount, 0),
+        normalizedIncrements.suspiciousEventCount,
 
       challengeCount:
         currentState.challengeCount +
-        safeInt(increments.challengeCount, 0),
+        normalizedIncrements.challengeCount,
 
       throttleCount:
         currentState.throttleCount +
-        safeInt(increments.throttleCount, 0),
+        normalizedIncrements.throttleCount,
 
       blockCount:
         currentState.blockCount +
-        safeInt(increments.blockCount, 0),
+        normalizedIncrements.blockCount,
 
       hardBlockSignalCount:
         currentState.hardBlockSignalCount +
-        safeInt(riskResult?.hardBlockSignals, 0, 0, 100) +
-        safeInt(increments.hardBlockSignalCount, 0),
+        normalizedRiskResult.hardBlockSignals +
+        normalizedIncrements.hardBlockSignalCount,
 
       exploitFlagCount:
         currentState.exploitFlagCount +
-        safeInt(increments.exploitFlagCount, 0) +
-        (safeInt(riskResult?.criticalSignals, 0, 0, 100) > 0 ? 1 : 0),
+        normalizedIncrements.exploitFlagCount +
+        normalizedRiskResult.exploitSignals,
 
       breachFlagCount:
         currentState.breachFlagCount +
-        safeInt(increments.breachFlagCount, 0) +
-        (riskResult?.criticalAttackLikely === true ? 1 : 0),
+        normalizedIncrements.breachFlagCount +
+        normalizedRiskResult.breachSignals,
 
       replayFlagCount:
         currentState.replayFlagCount +
-        safeInt(increments.replayFlagCount, 0),
+        normalizedIncrements.replayFlagCount +
+        normalizedRiskResult.replaySignals,
 
       coordinatedFlagCount:
         currentState.coordinatedFlagCount +
-        safeInt(increments.coordinatedFlagCount, 0),
+        normalizedIncrements.coordinatedFlagCount +
+        normalizedRiskResult.coordinatedSignals,
 
       trustedEventCount:
         currentState.trustedEventCount +
-        safeInt(increments.trustedEventCount, 0),
+        normalizedIncrements.trustedEventCount,
 
       successfulAuthCount:
         currentState.successfulAuthCount +
-        safeInt(increments.successfulAuthCount, 0),
+        normalizedIncrements.successfulAuthCount,
 
       failedLoginCount:
         currentState.failedLoginCount +
-        safeInt(increments.failedLoginCount, 0),
+        normalizedIncrements.failedLoginCount,
 
       failedSignupCount:
         currentState.failedSignupCount +
-        safeInt(increments.failedSignupCount, 0),
+        normalizedIncrements.failedSignupCount,
 
       failedPasswordResetCount:
         currentState.failedPasswordResetCount +
-        safeInt(increments.failedPasswordResetCount, 0),
+        normalizedIncrements.failedPasswordResetCount,
 
       captchaFailureCount:
         currentState.captchaFailureCount +
-        safeInt(increments.captchaFailureCount, 0),
+        normalizedIncrements.captchaFailureCount,
 
       rateLimitHitCount:
         currentState.rateLimitHitCount +
-        safeInt(increments.rateLimitHitCount, 0),
+        normalizedIncrements.rateLimitHitCount,
 
       lockoutCount:
         currentState.lockoutCount +
-        safeInt(increments.lockoutCount, 0),
+        normalizedIncrements.lockoutCount,
 
       lastReasonSummary: buildMergedReasons(
         currentState.lastReasonSummary,
-        Array.isArray(riskResult?.reasons) ? riskResult.reasons : [reason]
+        normalizedRiskResult.reasons.length
+          ? normalizedRiskResult.reasons
+          : [reason]
       )
     },
     safeActorType,
@@ -475,7 +575,12 @@ export async function updateRiskState({
   const ok = await storeRiskState(env, nextState);
 
   if (ok && shouldRecordRiskChange(currentState, nextState)) {
-    await recordRiskStateEvent(env, currentState, nextState, reason || "risk_state_updated");
+    await recordRiskStateEvent(
+      env,
+      currentState,
+      nextState,
+      reason || "risk_state_updated"
+    );
   }
 
   return {
