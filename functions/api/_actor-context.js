@@ -34,7 +34,9 @@ function sanitizeKeyPart(value = "", maxLength = 120) {
 }
 
 function isPlainObject(value) {
-  return Object.prototype.toString.call(value) === "[object Object]";
+  if (Object.prototype.toString.call(value) !== "[object Object]") return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === null || proto === Object.prototype;
 }
 
 function getHeaderValue(req, name) {
@@ -44,7 +46,10 @@ function getHeaderValue(req, name) {
   const target = String(name).toLowerCase();
 
   if (typeof headers.get === "function") {
-    return safeString(headers.get(name) || headers.get(target) || "", MAX_HEADER_VALUE_LENGTH);
+    return safeString(
+      headers.get(name) || headers.get(target) || "",
+      MAX_HEADER_VALUE_LENGTH
+    );
   }
 
   if (Array.isArray(headers)) {
@@ -158,10 +163,15 @@ function normalizeEmail(value = "") {
   return email;
 }
 
+function normalizeAuthTimestamp(value = 0) {
+  const num = Number(value);
+  if (!Number.isFinite(num) || num <= 0) return 0;
+  return Math.floor(num);
+}
+
 function extractClientIp(req = null, fallback = "", options = {}) {
   const { trustForwardedFor = false } = options;
 
-  // Prefer Cloudflare-provided client IP first
   const cfIp = getHeaderValue(req, "cf-connecting-ip");
   if (cfIp) {
     return normalizeIp(cfIp);
@@ -211,7 +221,6 @@ function extractRoute(req = null, fallback = "") {
   }
 
   try {
-    // supports relative URLs too
     const parsed = new URL(rawUrl, "https://local.aethra.internal");
     return normalizeRoute(parsed.pathname || fallback);
   } catch {
@@ -227,12 +236,14 @@ function extractSessionId({
   body = {},
   behavior = {},
   context = {},
+  req = null,
   fallback = ""
 } = {}) {
   return normalizeSessionId(
     context?.sessionId ||
       body?.sessionId ||
       behavior?.sessionId ||
+      getHeaderValue(req, "x-session-id") ||
       fallback
   );
 }
@@ -245,9 +256,12 @@ function extractUserId({
 } = {}) {
   return normalizeUserId(
     context?.userId ||
+      context?.uid ||
       body?.userId ||
       req?.user?.uid ||
+      req?.user?.id ||
       req?.auth?.uid ||
+      req?.auth?.userId ||
       fallback
   );
 }
@@ -259,6 +273,23 @@ function extractRequestId(req = null, context = {}) {
       getHeaderValue(req, "x-request-id") ||
       getHeaderValue(req, "x-correlation-id")
   );
+}
+
+function extractAuthTimestamps(req = null, context = {}) {
+  return {
+    tokenIssuedAt: normalizeAuthTimestamp(
+      context?.tokenIssuedAt ||
+      req?.auth?.iat ||
+      req?.user?.iat ||
+      0
+    ),
+    authTime: normalizeAuthTimestamp(
+      context?.authTime ||
+      req?.auth?.auth_time ||
+      req?.user?.auth_time ||
+      0
+    )
+  };
 }
 
 function buildActorKey({
@@ -309,6 +340,7 @@ export function createActorContext({
     body,
     behavior,
     context,
+    req,
     fallback: fallbackSessionId
   });
   const userId = extractUserId({
@@ -328,6 +360,7 @@ export function createActorContext({
   );
   const email = normalizeEmail(body?.email || context?.email || "");
   const requestId = extractRequestId(req, context);
+  const authTimestamps = extractAuthTimestamps(req, context);
   const actorKey = buildActorKey({ ip, sessionId, userId });
   const routeActorKey = buildRouteScopedKey({
     ip,
@@ -349,8 +382,11 @@ export function createActorContext({
     userAgent,
     email,
     requestId,
+    tokenIssuedAt: authTimestamps.tokenIssuedAt,
+    authTime: authTimestamps.authTime,
     actorKey,
     routeActorKey,
+    routeKey: routeActorKey,
     deviceKey
   });
 }
