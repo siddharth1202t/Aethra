@@ -920,7 +920,7 @@ export async function runRouteSecurity({
 
   let botAnalysis = null;
   try {
-    botAnalysis = await analyzeBotBehavior(
+    botAnalysis = await trackBotBehavior(
       {
         ...(isPlainObject(behavior) ? behavior : {}),
         route: normalizedRoute,
