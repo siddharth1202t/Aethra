@@ -44,6 +44,17 @@ function buildNonceKey(scope, nonce) {
   return `nonce:${normalizeScope(scope)}:${normalizeNonce(nonce)}`;
 }
 
+function isNonceFormatValid(nonce = "") {
+  const value = normalizeNonce(nonce);
+
+  if (!value) return false;
+  if (value.length < MIN_NONCE_LENGTH || value.length > MAX_NONCE_LENGTH) {
+    return false;
+  }
+
+  return /^[A-Za-z0-9._:@/-]+$/.test(value);
+}
+
 function isWeakNonce(nonce = "") {
   const value = normalizeNonce(nonce);
 
@@ -51,14 +62,23 @@ function isWeakNonce(nonce = "") {
     return true;
   }
 
-  // very low-complexity nonce detection
   const uniqueChars = new Set(value.split("")).size;
   if (uniqueChars < 4) {
     return true;
   }
 
-  // repeated same-char strings like aaaaaaaa1111
   if (/^(.)\1{7,}$/.test(value)) {
+    return true;
+  }
+
+  // repeated short pattern like abcabcabcabc
+  if (/^(.{1,4})\1{2,}$/.test(value)) {
+    return true;
+  }
+
+  // mostly numeric nonce is weaker
+  const digitCount = (value.match(/\d/g) || []).length;
+  if (digitCount / value.length > 0.9) {
     return true;
   }
 
@@ -170,6 +190,18 @@ export async function checkAndStoreNonce({
     };
   }
 
+  if (!isNonceFormatValid(normalizedNonce)) {
+    return {
+      ok: false,
+      code: "invalid_nonce_format",
+      scope: normalizedScope,
+      events: {
+        freshnessSignals: 0,
+        replaySignals: 1
+      }
+    };
+  }
+
   if (isWeakNonce(normalizedNonce)) {
     return {
       ok: false,
@@ -185,7 +217,9 @@ export async function checkAndStoreNonce({
   if (!isRedisAvailable(env)) {
     return {
       ok: !requireStorage ? true : false,
-      code: requireStorage ? "nonce_storage_unavailable" : "nonce_storage_skipped",
+      code: requireStorage
+        ? "nonce_storage_unavailable"
+        : "nonce_storage_skipped",
       scope: normalizedScope,
       events: {
         freshnessSignals: 0,
