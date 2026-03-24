@@ -1,4 +1,5 @@
 import { getRedis } from "./_redis.js";
+import { appendSecurityEvent } from "./_security-event-store.js";
 
 const WINDOW_MS = 10 * 60 * 1000;
 const STALE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -16,6 +17,8 @@ const MAX_SESSION_ID_LENGTH = 120;
 const MAX_USER_ID_LENGTH = 120;
 const MAX_ROUTE_LENGTH = 150;
 const MAX_REASON_LENGTH = 120;
+
+/* -------------------- SAFETY -------------------- */
 
 function stripControlChars(value = "") {
   return String(value ?? "").replace(/[\u0000-\u001F\u007F]/g, "");
@@ -52,6 +55,8 @@ function sanitizeKeyPart(value = "", maxLength = 120, fallback = "") {
   const cleaned = safeString(value, maxLength).replace(/[^a-zA-Z0-9._:@/-]/g, "");
   return cleaned || fallback;
 }
+
+/* -------------------- NORMALIZATION -------------------- */
 
 function normalizeRoute(route = "") {
   const raw = safeString(route || "unknown-route", MAX_ROUTE_LENGTH * 2);
@@ -105,6 +110,13 @@ function getClientKey(ip, sessionId = "", userId = "") {
   const safeSessionId = normalizeSessionId(sessionId);
   const safeUserId = normalizeUserId(userId);
   return `${safeIp}::${safeSessionId}::${safeUserId}`;
+}
+
+function buildClientKeyPreview(ip = "", sessionId = "") {
+  return safeString(
+    `${normalizeIp(ip)}:${normalizeSessionId(sessionId).slice(0, 6)}`,
+    24
+  );
 }
 
 function buildAbuseKey(clientKey) {
@@ -215,6 +227,8 @@ function normalizeRecord(raw, now) {
   };
 }
 
+/* -------------------- STORAGE -------------------- */
+
 async function getStoredRecord(redis, redisKey, now) {
   try {
     const raw = await redis.get(redisKey);
@@ -249,6 +263,8 @@ async function storeRecord(redis, redisKey, record) {
     return false;
   }
 }
+
+/* -------------------- LOGIC -------------------- */
 
 function updateBurstHits(record, now) {
   if (!Array.isArray(record.burstHits)) {
@@ -384,6 +400,8 @@ function getContainmentAction({
   return "none";
 }
 
+/* -------------------- PUBLIC HELPERS -------------------- */
+
 export async function getApiAbuseSnapshot({
   env = {},
   ip,
@@ -400,13 +418,13 @@ export async function getApiAbuseSnapshot({
   if (!record) {
     return {
       found: false,
-      clientKeyPreview: safeString(key, 24)
+      clientKeyPreview: buildClientKeyPreview(ip, sessionId)
     };
   }
 
   return {
     found: true,
-    clientKeyPreview: safeString(key, 24),
+    clientKeyPreview: buildClientKeyPreview(ip, sessionId),
     penaltyUntil: safeTimestamp(record.penaltyUntil, 0),
     penaltyActive: safeTimestamp(record.penaltyUntil, 0) > now,
     suspiciousEvents: safePositiveInt(record.suspiciousEvents, 0),
@@ -436,6 +454,8 @@ export async function clearApiAbuse({
     return { ok: false };
   }
 }
+
+/* -------------------- TRACKING -------------------- */
 
 export async function trackApiAbuse({
   env = {},
@@ -530,7 +550,8 @@ export async function trackApiAbuse({
     criticalRouteHits: 0,
     breachSignals: 0,
     hardBlockSignals: 0,
-    endpointSpread: 0
+    endpointSpread: 0,
+    coordinatedSignals: 0
   };
 
   if (weightedRequests >= 20) {
@@ -558,6 +579,7 @@ export async function trackApiAbuse({
     reasons.push("multi_endpoint_probing");
     events.probeEvents += 1;
     events.endpointSpread = uniqueRoutes;
+    events.coordinatedSignals = 1;
   }
 
   if (sameRouteBurst >= 10) {
@@ -587,6 +609,7 @@ export async function trackApiAbuse({
     abuseScore += 15;
     reasons.push("critical_endpoint_spread");
     events.probeEvents += 1;
+    events.coordinatedSignals = 1;
   }
 
   if (safePositiveInt(record.suspiciousEvents, 0) >= 3) {
@@ -614,6 +637,7 @@ export async function trackApiAbuse({
     abuseScore += 10;
     reasons.push("coordinated_route_probe");
     events.probeEvents += 1;
+    events.coordinatedSignals = 1;
   }
 
   if (breachLikePattern) {
@@ -621,6 +645,17 @@ export async function trackApiAbuse({
     reasons.push("possible_sensitive_extraction_pattern");
     events.breachSignals += 1;
     events.hardBlockSignals += 1;
+  }
+
+  if (
+    abuseScore >= 40 ||
+    coordinatedProbe ||
+    breachLikePattern ||
+    weightedFailures >= 6 ||
+    burstCount >= 8
+  ) {
+    record.suspiciousEvents = safePositiveInt(record.suspiciousEvents, 0) + 1;
+    record.lastSuspiciousAt = now;
   }
 
   abuseScore = Math.min(100, abuseScore);
@@ -679,6 +714,47 @@ export async function trackApiAbuse({
     breachLikePattern
   });
 
+  if (
+    recommendedAction === "block" ||
+    breachLikePattern ||
+    coordinatedProbe
+  ) {
+    try {
+      await appendSecurityEvent(env, {
+        type: "api_abuse_detected",
+        severity:
+          breachLikePattern || recommendedAction === "block"
+            ? "critical"
+            : "warning",
+        action:
+          recommendedAction === "block" ||
+          recommendedAction === "challenge" ||
+          recommendedAction === "throttle"
+            ? recommendedAction
+            : "observe",
+        route: safeRoute,
+        ip: normalizeIp(ip || ""),
+        userId: normalizeUserId(userId || ""),
+        reason: safeString(reasons[0] || "api_abuse_detected", 120),
+        message: "API abuse protection detected suspicious behavior.",
+        metadata: {
+          clientKeyPreview: buildClientKeyPreview(ip, sessionId),
+          abuseScore,
+          routeClass,
+          weightedRequests,
+          weightedFailures,
+          uniqueRoutes,
+          criticalRouteTouchesRecent,
+          uniqueCriticalRoutesRecent,
+          coordinatedProbe,
+          breachLikePattern
+        }
+      });
+    } catch (error) {
+      console.error("API abuse event write failed:", error);
+    }
+  }
+
   return {
     abuseScore,
     level,
@@ -687,6 +763,7 @@ export async function trackApiAbuse({
     containmentAction,
     penaltyActive: finalPenaltyActive,
     penaltyUntil: safeTimestamp(record.penaltyUntil, 0),
+    penaltyReason: safeString(record.lastPenaltyReason, MAX_REASON_LENGTH),
     events,
     snapshot: {
       totalRequests: safePositiveInt(totalRequests),
@@ -703,7 +780,7 @@ export async function trackApiAbuse({
       penaltyCount: safePositiveInt(record.penaltyCount),
       highestAbuseScore: safePositiveInt(record.highestAbuseScore, 0, 100),
       routeClass: safeString(routeClass, 20),
-      clientKeyPreview: safeString(key, 24),
+      clientKeyPreview: buildClientKeyPreview(ip, sessionId),
       lastPenaltyReason: safeString(record.lastPenaltyReason, MAX_REASON_LENGTH),
       coordinatedProbe,
       breachLikePattern
