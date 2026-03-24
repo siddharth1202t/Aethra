@@ -1,4 +1,4 @@
-import { getRedis } from "./_redis.js";
+import { getRedis, isRedisAvailable, incrementWithExpiry } from "./_redis.js";
 
 const DEFAULT_LIMIT = 60;
 const DEFAULT_WINDOW_MS = 60 * 1000;
@@ -67,14 +67,19 @@ function normalizeRoute(route) {
   return cleaned || "unknown-route";
 }
 
-function buildRedisKey(key) {
-  return `ratelimit:${normalizeKey(key)}`;
+function buildStateKey(key) {
+  return `ratelimit:state:${normalizeKey(key)}`;
+}
+
+function buildCounterKey(key, windowMs, now) {
+  const normalizedKey = normalizeKey(key);
+  const safeWindowMs = Math.max(1_000, normalizePositiveInteger(windowMs, DEFAULT_WINDOW_MS));
+  const bucket = Math.floor(now / safeWindowMs);
+  return `ratelimit:count:${normalizedKey}:${safeWindowMs}:${bucket}`;
 }
 
 function createEmptyRecord(now) {
   return {
-    count: 0,
-    start: now,
     updatedAt: now,
     violations: 0,
     penaltyUntil: 0,
@@ -90,8 +95,6 @@ function normalizeRecord(raw, now) {
   const record = raw && typeof raw === "object" ? raw : {};
 
   return {
-    count: normalizePositiveInteger(record.count, 0),
-    start: safeTimestamp(record.start, now),
     updatedAt: safeTimestamp(record.updatedAt, now),
     violations: normalizePositiveInteger(record.violations, 0),
     penaltyUntil: safeTimestamp(record.penaltyUntil, 0),
@@ -262,7 +265,7 @@ async function getStoredRecord(redis, redisKey, now) {
 
     return null;
   } catch (error) {
-    console.error("Redis rate-limit read failed:", error);
+    console.error("Redis rate-limit state read failed:", error);
     return null;
   }
 }
@@ -274,9 +277,20 @@ async function storeRecord(redis, redisKey, record) {
     await redis.set(redisKey, JSON.stringify(normalized), { ex: ttlSeconds });
     return true;
   } catch (error) {
-    console.error("Redis rate-limit write failed:", error);
+    console.error("Redis rate-limit state write failed:", error);
     return false;
   }
+}
+
+async function incrementWeightedCounter(env, counterKey, routeWeight, windowMs) {
+  const ttlSeconds = Math.max(1, Math.ceil(windowMs / 1000) + 5);
+
+  let current = 0;
+  for (let i = 0; i < routeWeight; i += 1) {
+    current = await incrementWithExpiry(env, counterKey, ttlSeconds);
+  }
+
+  return normalizePositiveInteger(current, 0);
 }
 
 export async function checkApiRateLimit(options = {}) {
@@ -293,41 +307,84 @@ export async function checkApiRateLimit(options = {}) {
   } else {
     env = options.env || {};
     key = normalizeKey(options.key);
-    limit = Math.max(1, Math.min(MAX_LIMIT, normalizePositiveInteger(options.limit, DEFAULT_LIMIT)));
-    windowMs = Math.max(1_000, Math.min(MAX_WINDOW_MS, normalizePositiveInteger(options.windowMs, DEFAULT_WINDOW_MS)));
+    limit = Math.max(
+      1,
+      Math.min(MAX_LIMIT, normalizePositiveInteger(options.limit, DEFAULT_LIMIT))
+    );
+    windowMs = Math.max(
+      1_000,
+      Math.min(MAX_WINDOW_MS, normalizePositiveInteger(options.windowMs, DEFAULT_WINDOW_MS))
+    );
     route = normalizeRoute(options.route);
   }
 
-  const redis = getRedis(env);
   const routeSensitivity = getRouteSensitivity(route);
   const routeWeight = getRouteWeight(route);
-  const redisKey = buildRedisKey(key);
 
-  let record = await getStoredRecord(redis, redisKey, now);
+  if (!isRedisAvailable(env)) {
+    // Fail safer for critical routes.
+    const recommendedAction = routeSensitivity === "critical" ? "block" : "challenge";
+
+    return {
+      allowed: false,
+      recommendedAction,
+      containmentAction:
+        recommendedAction === "block"
+          ? "temporary_containment"
+          : "step_up_verification",
+      remaining: 0,
+      remainingMs: windowMs,
+      limit,
+      count: limit,
+      overBy: 0,
+      windowMs,
+      resetAt: now + windowMs,
+      penaltyActive: false,
+      penaltyUntil: 0,
+      penaltyApplied: false,
+      penaltyAppliedMs: 0,
+      violations: 0,
+      routeWeight,
+      routeSensitivity,
+      burstCount: 0,
+      highestCountSeen: 0,
+      events: {
+        blockEvents: recommendedAction === "block" ? 1 : 0,
+        challengeEvents: recommendedAction === "challenge" ? 1 : 0,
+        throttleEvents: 0,
+        hardBlockSignals: routeSensitivity === "critical" ? 1 : 0,
+        burstSignals: 0,
+        criticalRouteHits: routeSensitivity === "critical" ? 1 : 0
+      },
+      degraded: true,
+      degradedReason: "redis_unavailable"
+    };
+  }
+
+  const redis = getRedis(env);
+  const stateKey = buildStateKey(key);
+  const counterKey = buildCounterKey(key, windowMs, now);
+
+  let record = await getStoredRecord(redis, stateKey, now);
   if (!record) {
     record = createEmptyRecord(now);
   }
 
   decayViolations(record, now);
 
-  if (now - safeTimestamp(record.start, now) >= windowMs) {
-    record.count = 0;
-    record.start = now;
-  }
+  const count = await incrementWeightedCounter(env, counterKey, routeWeight, windowMs);
 
-  const penaltyActiveBefore = safeTimestamp(record.penaltyUntil, 0) > now;
-
-  record.count = normalizePositiveInteger(record.count, 0) + routeWeight;
   record.updatedAt = now;
   record.lastRoute = route;
   record.highestCountSeen = Math.max(
     normalizePositiveInteger(record.highestCountSeen, 0),
-    normalizePositiveInteger(record.count, 0)
+    count
   );
 
   const burstCount = updateBurstMemory(record, now);
+  const penaltyActiveBefore = safeTimestamp(record.penaltyUntil, 0) > now;
 
-  let allowed = record.count <= limit && !penaltyActiveBefore;
+  let allowed = count <= limit && !penaltyActiveBefore;
   let penaltyApplied = false;
   let penaltyAppliedMs = 0;
 
@@ -348,22 +405,23 @@ export async function checkApiRateLimit(options = {}) {
     }
   }
 
-  await storeRecord(redis, redisKey, record);
+  await storeRecord(redis, stateKey, record);
 
   const penaltyActive = safeTimestamp(record.penaltyUntil, 0) > now;
-  allowed = record.count <= limit && !penaltyActive;
+  allowed = count <= limit && !penaltyActive;
 
-  const overBy = Math.max(0, record.count - limit);
-  const remaining = Math.max(0, limit - record.count);
+  const overBy = Math.max(0, count - limit);
+  const remaining = Math.max(0, limit - count);
   const penaltyRemainingMs = penaltyActive
     ? Math.max(0, safeTimestamp(record.penaltyUntil, 0) - now)
     : 0;
 
+  const windowStart = Math.floor(now / windowMs) * windowMs;
+  const resetAt = windowStart + windowMs;
+
   const remainingMs = penaltyActive
     ? penaltyRemainingMs
-    : allowed
-      ? Math.max(0, windowMs - (now - safeTimestamp(record.start, now)))
-      : Math.max(0, windowMs - (now - safeTimestamp(record.start, now)));
+    : Math.max(0, resetAt - now);
 
   const recommendedAction = getRecommendedAction({
     allowed,
@@ -403,10 +461,10 @@ export async function checkApiRateLimit(options = {}) {
     remaining,
     remainingMs,
     limit,
-    count: normalizePositiveInteger(record.count, 0),
+    count,
     overBy,
     windowMs,
-    resetAt: safeTimestamp(record.start, now) + windowMs,
+    resetAt,
     penaltyActive,
     penaltyUntil: safeTimestamp(record.penaltyUntil, 0),
     penaltyApplied,
