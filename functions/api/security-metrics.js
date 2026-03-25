@@ -343,7 +343,8 @@ export async function onRequest(context) {
             : "Security metrics endpoint challenged by orchestrator.",
         metadata: {
           riskScore: security?.risk?.riskScore || 0,
-          finalAction
+          finalAction,
+          degraded: security?.risk?.degraded === true
         }
       });
 
@@ -396,7 +397,8 @@ export async function onRequest(context) {
         limit,
         mode: payload?.mode || null,
         threatPressure: payload?.threatPressure || null,
-        eventCount: Array.isArray(events) ? events.length : 0
+        eventCount: Array.isArray(events) ? events.length : 0,
+        degraded: payload?.degraded === true
       }
     });
 
