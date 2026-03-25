@@ -1,5 +1,8 @@
 import { safeNumber, safeString } from "./_api-security.js";
-import { getRedis, isRedisAvailable } from "./_redis.js";
+import {
+  isRedisAvailable,
+  setIfNotExistsWithExpiry
+} from "./_redis.js";
 
 const DEFAULT_MAX_AGE_MS = 2 * 60 * 1000;
 const DEFAULT_FUTURE_TOLERANCE_MS = 15 * 1000;
@@ -40,10 +43,6 @@ function normalizeFutureToleranceMs(value, fallback = DEFAULT_FUTURE_TOLERANCE_M
   return Math.max(0, safeNumber(value, fallback));
 }
 
-function buildNonceKey(scope, nonce) {
-  return `nonce:${normalizeScope(scope)}:${normalizeNonce(nonce)}`;
-}
-
 function isNonceFormatValid(nonce = "") {
   const value = normalizeNonce(nonce);
 
@@ -71,18 +70,23 @@ function isWeakNonce(nonce = "") {
     return true;
   }
 
-  // repeated short pattern like abcabcabcabc
   if (/^(.{1,4})\1{2,}$/.test(value)) {
     return true;
   }
 
-  // mostly numeric nonce is weaker
   const digitCount = (value.match(/\d/g) || []).length;
   if (digitCount / value.length > 0.9) {
     return true;
   }
 
   return false;
+}
+
+function buildBaseEvents(freshnessSignals = 0, replaySignals = 0) {
+  return {
+    freshnessSignals,
+    replaySignals
+  };
 }
 
 export function validateRequestFreshness({
@@ -104,10 +108,8 @@ export function validateRequestFreshness({
       code: "missing_request_timestamp",
       ageMs: null,
       now,
-      events: {
-        freshnessSignals: 1,
-        replaySignals: 0
-      }
+      degraded: false,
+      events: buildBaseEvents(1, 0)
     };
   }
 
@@ -120,10 +122,8 @@ export function validateRequestFreshness({
       code: "invalid_request_timestamp",
       ageMs: null,
       now,
-      events: {
-        freshnessSignals: 1,
-        replaySignals: 0
-      }
+      degraded: false,
+      events: buildBaseEvents(1, 0)
     };
   }
 
@@ -135,10 +135,8 @@ export function validateRequestFreshness({
       code: "future_request_timestamp",
       ageMs,
       now,
-      events: {
-        freshnessSignals: 1,
-        replaySignals: 0
-      }
+      degraded: false,
+      events: buildBaseEvents(1, 0)
     };
   }
 
@@ -148,10 +146,8 @@ export function validateRequestFreshness({
       code: "stale_request_timestamp",
       ageMs,
       now,
-      events: {
-        freshnessSignals: 1,
-        replaySignals: 0
-      }
+      degraded: false,
+      events: buildBaseEvents(1, 0)
     };
   }
 
@@ -160,10 +156,8 @@ export function validateRequestFreshness({
     code: "fresh",
     ageMs,
     now,
-    events: {
-      freshnessSignals: 0,
-      replaySignals: 0
-    }
+    degraded: false,
+    events: buildBaseEvents(0, 0)
   };
 }
 
@@ -183,10 +177,8 @@ export async function checkAndStoreNonce({
       ok: false,
       code: "missing_nonce",
       scope: normalizedScope,
-      events: {
-        freshnessSignals: 0,
-        replaySignals: 1
-      }
+      degraded: false,
+      events: buildBaseEvents(0, 1)
     };
   }
 
@@ -195,10 +187,8 @@ export async function checkAndStoreNonce({
       ok: false,
       code: "invalid_nonce_format",
       scope: normalizedScope,
-      events: {
-        freshnessSignals: 0,
-        replaySignals: 1
-      }
+      degraded: false,
+      events: buildBaseEvents(0, 1)
     };
   }
 
@@ -207,46 +197,41 @@ export async function checkAndStoreNonce({
       ok: false,
       code: "weak_nonce",
       scope: normalizedScope,
-      events: {
-        freshnessSignals: 0,
-        replaySignals: 1
-      }
+      degraded: false,
+      events: buildBaseEvents(0, 1)
     };
   }
 
   if (!isRedisAvailable(env)) {
     return {
-      ok: !requireStorage ? true : false,
+      ok: !requireStorage,
       code: requireStorage
         ? "nonce_storage_unavailable"
         : "nonce_storage_skipped",
       scope: normalizedScope,
-      events: {
-        freshnessSignals: 0,
-        replaySignals: requireStorage ? 1 : 0
-      }
+      degraded: true,
+      degradedReason: "redis_unavailable",
+      events: buildBaseEvents(0, requireStorage ? 1 : 0)
     };
   }
 
-  const redis = getRedis(env);
-  const key = buildNonceKey(normalizedScope, normalizedNonce);
   const ttlSeconds = Math.max(1, Math.ceil(safeTtlMs / 1000));
 
   try {
-    const result = await redis.set(key, "1", {
-      nx: true,
-      ex: ttlSeconds
-    });
+    const stored = await setIfNotExistsWithExpiry(
+      env,
+      `nonce:${normalizedScope}:${normalizedNonce}`,
+      "1",
+      ttlSeconds
+    );
 
-    if (result !== "OK") {
+    if (!stored) {
       return {
         ok: false,
         code: "replayed_nonce",
         scope: normalizedScope,
-        events: {
-          freshnessSignals: 0,
-          replaySignals: 1
-        }
+        degraded: false,
+        events: buildBaseEvents(0, 1)
       };
     }
 
@@ -254,10 +239,8 @@ export async function checkAndStoreNonce({
       ok: true,
       code: "stored",
       scope: normalizedScope,
-      events: {
-        freshnessSignals: 0,
-        replaySignals: 0
-      }
+      degraded: false,
+      events: buildBaseEvents(0, 0)
     };
   } catch (error) {
     console.error("Redis nonce store failed:", error);
@@ -266,10 +249,9 @@ export async function checkAndStoreNonce({
       ok: false,
       code: "nonce_store_error",
       scope: normalizedScope,
-      events: {
-        freshnessSignals: 0,
-        replaySignals: 1
-      }
+      degraded: true,
+      degradedReason: "nonce_store_error",
+      events: buildBaseEvents(0, 1)
     };
   }
 }
@@ -297,6 +279,7 @@ export async function validateFreshRequest({
       code: freshness.code,
       ageMs: freshness.ageMs,
       now: freshness.now,
+      degraded: freshness.degraded === true,
       events: freshness.events
     };
   }
@@ -307,6 +290,7 @@ export async function validateFreshRequest({
       code: "fresh",
       ageMs: freshness.ageMs,
       now: freshness.now,
+      degraded: freshness.degraded === true,
       events: freshness.events
     };
   }
@@ -326,10 +310,9 @@ export async function validateFreshRequest({
       ageMs: freshness.ageMs,
       now: freshness.now,
       scope: nonceResult.scope || normalizeScope(scope),
-      events: nonceResult.events || {
-        freshnessSignals: 0,
-        replaySignals: 1
-      }
+      degraded: nonceResult.degraded === true,
+      degradedReason: nonceResult.degradedReason || "",
+      events: nonceResult.events || buildBaseEvents(0, 1)
     };
   }
 
@@ -339,9 +322,8 @@ export async function validateFreshRequest({
     ageMs: freshness.ageMs,
     now: freshness.now,
     scope: nonceResult.scope || normalizeScope(scope),
-    events: {
-      freshnessSignals: 0,
-      replaySignals: 0
-    }
+    degraded: nonceResult.degraded === true,
+    degradedReason: nonceResult.degradedReason || "",
+    events: buildBaseEvents(0, 0)
   };
 }
