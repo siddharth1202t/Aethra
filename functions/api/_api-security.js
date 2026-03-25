@@ -296,26 +296,35 @@ export function sanitizeMetadata(
 export function buildBlockedResponse(message, extra = {}) {
   return {
     success: false,
+    ...extra,
     action: safeString(extra?.action || "block", 30).toLowerCase(),
-    message: safeString(message || "Request blocked.", 300),
-    ...extra
+    message: safeString(message || "Request blocked.", 300)
   };
 }
 
 export function buildSuccessResponse(extra = {}) {
   return {
+    ...extra,
     success: true,
-    action: "allow",
-    ...extra
+    action: "allow"
   };
 }
 
 export function buildDeniedResponse(message = "Request denied.", extra = {}) {
   return {
     success: false,
+    ...extra,
     action: safeString(extra?.action || "deny", 30).toLowerCase(),
-    message: safeString(message, 300),
-    ...extra
+    message: safeString(message, 300)
+  };
+}
+
+export function buildChallengeResponse(message = "Verification required.", extra = {}) {
+  return {
+    success: false,
+    ...extra,
+    action: "challenge",
+    message: safeString(message, 300)
   };
 }
 
