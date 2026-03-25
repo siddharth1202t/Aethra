@@ -272,6 +272,10 @@ export function buildSecurityMetrics({
   const pressureSignals = buildPressureSignals(counters);
   const normalizedTimestamp = normalizeTimestamp(timestamp);
 
+  const degraded =
+    safeAdaptiveState.degraded === true ||
+    safeContainmentState.degraded === true;
+
   const criticalAttackLikely =
     mode === "lockdown" ||
     containmentMode === "lockdown" ||
@@ -288,6 +292,7 @@ export function buildSecurityMetrics({
     timestamp: new Date(normalizedTimestamp).toISOString(),
     mode,
     containmentMode,
+    degraded,
     threatPressure,
     pressureSignals,
     eventWindowSize: safeInt(safeEvents.length, 0, 0, MAX_EVENT_WINDOW_SIZE),
