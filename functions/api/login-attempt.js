@@ -322,6 +322,7 @@ export async function onRequest(context) {
       env,
       req: request,
       body,
+      behavior: body,
       route: `${ROUTE}:${action || "unknown"}`,
       context: {
         ip: actor.ip,
@@ -342,6 +343,61 @@ export async function onRequest(context) {
       }
     });
 
+    try {
+      console.log(
+        "LOGIN_ATTEMPT_SECURITY",
+        JSON.stringify(
+          {
+            route: `${ROUTE}:${action || "unknown"}`,
+            actor: {
+              ip: actor?.ip || null,
+              sessionId: actor?.sessionId || null,
+              userId: actor?.userId || null,
+              actorKey: actor?.actorKey || null,
+              routeKey: actor?.routeKey || null,
+              deviceKey: actor?.deviceKey || null,
+              userAgent: actor?.userAgent || null,
+              origin: actor?.origin || null,
+              referer: actor?.referer || null
+            },
+            risk: {
+              finalAction: security?.risk?.finalAction || null,
+              action: security?.risk?.action || null,
+              containmentAction: security?.risk?.containmentAction || null,
+              finalContainmentAction:
+                security?.risk?.finalContainmentAction || null,
+              riskScore: security?.risk?.riskScore ?? null,
+              level: security?.risk?.level || null,
+              routeSensitivity: security?.risk?.routeSensitivity || null,
+              criticalAttackLikely:
+                security?.risk?.criticalAttackLikely === true,
+              degraded: security?.risk?.degraded === true,
+              degradedReasons: security?.risk?.degradedReasons || [],
+              reasons: Array.isArray(security?.risk?.reasons)
+                ? security.risk.reasons
+                : [],
+              events: security?.risk?.events || {}
+            },
+            enforcement: security?.enforcement || {},
+            botResult: security?.signals?.botResult || null,
+            abuseResult: security?.signals?.abuseResult || null,
+            rateLimitResult: security?.signals?.rateLimitResult || null,
+            freshnessResult: security?.signals?.freshnessResult || null,
+            threatResult: security?.signals?.threatResult || null,
+            containmentResult: security?.signals?.containmentResult || null,
+            adaptiveModeResult: security?.signals?.adaptiveModeResult || null,
+            anomalyResult: security?.signals?.anomalyResult || null,
+            securityState: security?.signals?.securityState || null,
+            persistentRiskState: security?.signals?.persistentRiskState || null,
+            alertsResult: security?.signals?.alertsResult || null
+          },
+          null,
+          2
+        )
+      );
+    } catch (logError) {
+      console.error("LOGIN_ATTEMPT_SECURITY_LOG_ERROR", logError);
+    }
     const finalAction = safeString(
       security?.risk?.finalAction || "allow",
       50
