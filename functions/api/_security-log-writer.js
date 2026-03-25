@@ -615,8 +615,11 @@ export async function writeSecurityLog(data = {}) {
 
     await writeFirestoreDocument(env, "securityLogs", eventId, log);
 
+    let eventStoreOk = true;
+    let stateUpdateOk = true;
+
     try {
-      await appendSecurityEvent(env, {
+      const appended = await appendSecurityEvent(env, {
         type,
         severity: level,
         action: eventAction,
@@ -634,12 +637,15 @@ export async function writeSecurityLog(data = {}) {
           sessionId: sessionId || ""
         }
       });
+
+      eventStoreOk = appended?.ok !== false;
     } catch (eventStoreError) {
+      eventStoreOk = false;
       console.error("appendSecurityEvent failed:", eventStoreError);
     }
 
     try {
-      await updateSecurityState({
+      const updated = await updateSecurityState({
         env,
         event: {
           type,
@@ -652,11 +658,14 @@ export async function writeSecurityLog(data = {}) {
           source
         }
       });
+
+      stateUpdateOk = updated?.ok !== false;
     } catch (stateError) {
+      stateUpdateOk = false;
       console.error("updateSecurityState failed:", stateError);
     }
 
-    return true;
+    return eventStoreOk && stateUpdateOk;
   } catch (error) {
     console.error("writeSecurityLog failed:", error);
     return false;
