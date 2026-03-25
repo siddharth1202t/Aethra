@@ -1,13 +1,18 @@
 import { createActorContext } from "../_actor-context.js";
 import { writeSecurityLog } from "../_security-log-writer.js";
-import { buildDeniedResponse, buildMethodNotAllowedResponse } from "../_api-security.js";
+import {
+  buildDeniedResponse,
+  buildMethodNotAllowedResponse
+} from "../_api-security.js";
 
-// Adjust these imports to match your actual exported function names
 import { clearBotBehaviorSnapshot } from "../_bot-detection.js";
 import { clearApiAbuse } from "../_api-abuse-protection.js";
 import { clearRiskState } from "../_security-risk-state.js";
-import { clearAdaptiveThreatModeState } from "../_adaptive-threat-mode.js";
-import { clearContainmentState } from "../_security-containment.js";
+import { resetAdaptiveThreatMode } from "../_adaptive-threat-mode.js";
+import {
+  clearContainmentState,
+  clearActorContainment
+} from "../_security-containment.js";
 
 const ROUTE = "/api/admin/security-reset";
 
@@ -33,7 +38,11 @@ function safeString(value, maxLength = 300) {
 function normalizeIp(value = "") {
   let ip = safeString(value || "unknown", 100);
   if (!ip) return "unknown";
-  if (ip.startsWith("::ffff:")) ip = ip.slice(7);
+
+  if (ip.startsWith("::ffff:")) {
+    ip = ip.slice(7);
+  }
+
   ip = ip.replace(/[^a-fA-F0-9:.,]/g, "").slice(0, 100);
   return ip || "unknown";
 }
@@ -147,17 +156,17 @@ export async function onRequest(context) {
   try {
     const results = {
       action,
+      target: {
+        ip: targetIp,
+        sessionId: targetSessionId || null,
+        userId: targetUserId || null
+      },
       cleared: {}
     };
 
     if (action === "clear_lockdown") {
-      if (typeof clearAdaptiveThreatModeState === "function") {
-        results.cleared.adaptiveThreatMode = await clearAdaptiveThreatModeState({ env });
-      }
-
-      if (typeof clearContainmentState === "function") {
-        results.cleared.containment = await clearContainmentState({ env });
-      }
+      results.cleared.adaptiveThreatMode = await resetAdaptiveThreatMode(env);
+      results.cleared.globalContainment = await clearContainmentState(env);
 
       await logSecurityReset({
         env,
@@ -182,67 +191,83 @@ export async function onRequest(context) {
     }
 
     if (action === "full_test_reset") {
-      if (typeof clearAdaptiveThreatModeState === "function") {
-        results.cleared.adaptiveThreatMode = await clearAdaptiveThreatModeState({ env });
-      }
+      results.cleared.adaptiveThreatMode = await resetAdaptiveThreatMode(env);
+      results.cleared.globalContainment = await clearContainmentState(env);
 
-      if (typeof clearContainmentState === "function") {
-        results.cleared.containment = await clearContainmentState({ env });
-      }
-
-      if (typeof clearBotBehaviorSnapshot === "function") {
-        results.cleared.bot = await clearBotBehaviorSnapshot({
-          env,
-          ip: targetIp,
-          sessionId: targetSessionId,
-          userId: targetUserId
+      if (targetSessionId) {
+        results.cleared.sessionContainment = await clearActorContainment(env, {
+          actorType: "session",
+          actorId: targetSessionId,
+          reason
         });
       }
 
-      if (typeof clearApiAbuse === "function") {
-        results.cleared.abuse = await clearApiAbuse({
-          env,
-          ip: targetIp,
-          sessionId: targetSessionId,
-          userId: targetUserId
+      if (targetUserId) {
+        results.cleared.userContainment = await clearActorContainment(env, {
+          actorType: "user",
+          actorId: targetUserId,
+          reason
         });
       }
 
-      if (typeof clearRiskState === "function") {
-        const riskResults = [];
-
-        if (targetSessionId) {
-          riskResults.push(
-            await clearRiskState({
-              env,
-              actorType: "session",
-              actorId: targetSessionId
-            })
-          );
-        }
-
-        if (targetUserId) {
-          riskResults.push(
-            await clearRiskState({
-              env,
-              actorType: "user",
-              actorId: targetUserId
-            })
-          );
-        }
-
-        if (targetIp && targetIp !== "unknown") {
-          riskResults.push(
-            await clearRiskState({
-              env,
-              actorType: "ip",
-              actorId: targetIp
-            })
-          );
-        }
-
-        results.cleared.risk = riskResults;
+      if (targetIp && targetIp !== "unknown") {
+        results.cleared.ipContainment = await clearActorContainment(env, {
+          actorType: "ip",
+          actorId: targetIp,
+          reason
+        });
       }
+
+      results.cleared.bot = await clearBotBehaviorSnapshot({
+        env,
+        ip: targetIp,
+        sessionId: targetSessionId,
+        userId: targetUserId
+      });
+
+      results.cleared.abuse = await clearApiAbuse({
+        env,
+        ip: targetIp,
+        sessionId: targetSessionId,
+        userId: targetUserId
+      });
+
+      const riskResults = [];
+
+      if (targetSessionId) {
+        riskResults.push(
+          await clearRiskState({
+            env,
+            actorType: "session",
+            actorId: targetSessionId,
+            reason
+          })
+        );
+      }
+
+      if (targetUserId) {
+        riskResults.push(
+          await clearRiskState({
+            env,
+            actorType: "user",
+            actorId: targetUserId,
+            reason
+          })
+        );
+      }
+
+      if (targetIp && targetIp !== "unknown") {
+        riskResults.push(
+          await clearRiskState({
+            env,
+            actorType: "ip",
+            actorId: targetIp,
+            reason
+          })
+        );
+      }
+
+      results.cleared.risk = riskResults;
 
       await logSecurityReset({
         env,
