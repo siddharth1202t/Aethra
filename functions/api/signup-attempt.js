@@ -1,4 +1,4 @@
-import { getRedis } from "./_redis.js";
+import { getRedis, isRedisAvailable } from "./_redis.js";
 import { writeSecurityLog } from "./_security-log-writer.js";
 import { createActorContext } from "./_actor-context.js";
 import { runSecurityOrchestrator } from "./_security-orchestrator.js";
@@ -6,7 +6,10 @@ import {
   safeString,
   safePositiveInt,
   sanitizeBody,
-  buildMethodNotAllowedResponse
+  buildMethodNotAllowedResponse,
+  buildDeniedResponse,
+  buildChallengeResponse,
+  buildBlockedResponse
 } from "./_api-security.js";
 
 const ROUTE = "/api/signup-attempt";
@@ -31,7 +34,9 @@ function json(data, status = 200) {
     status,
     headers: {
       "content-type": "application/json",
-      "cache-control": "no-store"
+      "cache-control": "no-store",
+      "pragma": "no-cache",
+      "x-content-type-options": "nosniff"
     }
   });
 }
@@ -158,7 +163,8 @@ function buildLockResponse({
   lockType = "none",
   attempts = 0,
   action = "allow",
-  message = null
+  message = null,
+  degraded = false
 }) {
   return {
     success: true,
@@ -167,6 +173,7 @@ function buildLockResponse({
     remainingMs: Math.max(0, safePositiveInt(remainingMs, 0)),
     lockType,
     attempts: safePositiveInt(attempts, 0),
+    degraded: degraded === true,
     ...(message ? { message } : {})
   };
 }
@@ -183,11 +190,9 @@ export async function onRequest(context) {
   const contentType = request.headers.get("content-type") || "";
   if (!contentType.toLowerCase().includes("application/json")) {
     return json(
-      {
-        success: false,
-        action: "deny",
-        message: "Unsupported content type."
-      },
+      buildDeniedResponse("Unsupported content type.", {
+        action: "deny"
+      }),
       415
     );
   }
@@ -195,12 +200,31 @@ export async function onRequest(context) {
   const contentLength = Number(request.headers.get("content-length") || 0);
   if (Number.isFinite(contentLength) && contentLength > MAX_CONTENT_LENGTH_BYTES) {
     return json(
-      {
-        success: false,
-        action: "deny",
-        message: "Request body too large."
-      },
+      buildDeniedResponse("Request body too large.", {
+        action: "deny"
+      }),
       413
+    );
+  }
+
+  if (!isRedisAvailable(env)) {
+    await writeSecurityLog({
+      env,
+      type: "signup_attempt_redis_unavailable",
+      level: "critical",
+      message: "Redis unavailable during signup-attempt processing",
+      route: ROUTE,
+      metadata: {
+        degraded: true
+      }
+    });
+
+    return json(
+      buildDeniedResponse("Service temporarily unavailable.", {
+        action: "deny",
+        degraded: true
+      }),
+      503
     );
   }
 
@@ -220,11 +244,10 @@ export async function onRequest(context) {
     });
 
     return json(
-      {
-        success: false,
+      buildDeniedResponse("Service temporarily unavailable.", {
         action: "deny",
-        message: "Service temporarily unavailable."
-      },
+        degraded: true
+      }),
       503
     );
   }
@@ -238,11 +261,9 @@ export async function onRequest(context) {
 
     if (!ALLOWED_ACTIONS.has(action)) {
       return json(
-        {
-          success: false,
-          action: "deny",
-          message: "Invalid action."
-        },
+        buildDeniedResponse("Invalid action.", {
+          action: "deny"
+        }),
         400
       );
     }
@@ -252,11 +273,9 @@ export async function onRequest(context) {
 
     if (!rawEmail || !emailAllowed) {
       return json(
-        {
-          success: false,
-          action: "deny",
-          message: "Invalid email."
-        },
+        buildDeniedResponse("Invalid email.", {
+          action: "deny"
+        }),
         400
       );
     }
@@ -297,6 +316,7 @@ export async function onRequest(context) {
       50
     ).toLowerCase();
     const riskScore = safePositiveInt(security?.risk?.riskScore, 0);
+    const degraded = security?.risk?.degraded === true;
 
     if (securityAction === "block") {
       await logSignupAttempt({
@@ -310,16 +330,16 @@ export async function onRequest(context) {
         action,
         metadata: {
           riskScore,
-          finalAction: securityAction
+          finalAction: securityAction,
+          degraded
         }
       });
 
       return json(
-        {
-          success: false,
+        buildBlockedResponse("Request blocked.", {
           action: "block",
-          message: "Request blocked."
-        },
+          degraded
+        }),
         403
       );
     }
@@ -336,16 +356,16 @@ export async function onRequest(context) {
         action,
         metadata: {
           riskScore,
-          finalAction: securityAction
+          finalAction: securityAction,
+          degraded
         }
       });
 
       return json(
-        {
-          success: false,
+        buildChallengeResponse("Verification required.", {
           action: "challenge",
-          message: "Verification required."
-        },
+          degraded
+        }),
         403
       );
     }
@@ -386,7 +406,8 @@ export async function onRequest(context) {
           lockType: "ip",
           attempts: ipRecord.count,
           action: "deny",
-          message: "Too many attempts. Please try again later."
+          message: "Too many attempts. Please try again later.",
+          degraded
         }),
         200
       );
@@ -418,7 +439,8 @@ export async function onRequest(context) {
           lockType: "user",
           attempts: record.count,
           action: "deny",
-          message: "Too many attempts. Please try again later."
+          message: "Too many attempts. Please try again later.",
+          degraded
         }),
         200
       );
@@ -450,7 +472,8 @@ export async function onRequest(context) {
           remainingMs,
           lockType: isLocked ? "user" : "none",
           attempts: record.count,
-          action: "allow"
+          action: "allow",
+          degraded
         }),
         200
       );
@@ -483,7 +506,8 @@ export async function onRequest(context) {
           remainingMs: 0,
           lockType: "none",
           attempts: 0,
-          action: "allow"
+          action: "allow",
+          degraded
         }),
         200
       );
@@ -540,7 +564,8 @@ export async function onRequest(context) {
           lockType,
           remainingMs,
           userEscalationCount: record.escalationCount,
-          ipEscalationCount: ipRecord.escalationCount
+          ipEscalationCount: ipRecord.escalationCount,
+          degraded
         }
       });
 
@@ -554,18 +579,17 @@ export async function onRequest(context) {
           message:
             isUserLocked || isIpLocked
               ? "Too many attempts. Please try again later."
-              : null
+              : null,
+          degraded
         }),
         200
       );
     }
 
     return json(
-      {
-        success: false,
-        action: "deny",
-        message: "Invalid request."
-      },
+      buildDeniedResponse("Invalid request.", {
+        action: "deny"
+      }),
       400
     );
   } catch (error) {
@@ -583,11 +607,9 @@ export async function onRequest(context) {
     });
 
     return json(
-      {
-        success: false,
-        action: "deny",
-        message: "Internal server error."
-      },
+      buildDeniedResponse("Internal server error.", {
+        action: "deny"
+      }),
       500
     );
   }
