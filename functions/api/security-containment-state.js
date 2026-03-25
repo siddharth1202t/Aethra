@@ -5,6 +5,8 @@ import { runSecurityOrchestrator } from "./_security-orchestrator.js";
 import {
   buildMethodNotAllowedResponse,
   buildBlockedResponse,
+  buildChallengeResponse,
+  buildDeniedResponse,
   safeString
 } from "./_api-security.js";
 
@@ -286,23 +288,36 @@ export async function onRequestGet(context) {
       50
     ).toLowerCase();
 
-    if (finalAction === "block" || finalAction === "challenge") {
+    if (finalAction === "block") {
       await logContainmentState({
         env,
-        type:
-          finalAction === "block"
-            ? "containment_state_blocked"
-            : "containment_state_challenged",
+        type: "containment_state_blocked",
         level: "warning",
         request,
         actor,
-        message:
-          finalAction === "block"
-            ? "Containment state endpoint blocked by orchestrator."
-            : "Containment state endpoint challenged by orchestrator.",
+        message: "Containment state endpoint blocked by orchestrator.",
         metadata: {
           finalAction,
-          riskScore: security?.risk?.riskScore || 0
+          riskScore: security?.risk?.riskScore || 0,
+          degraded: security?.risk?.degraded === true
+        }
+      });
+
+      return unauthorizedResponse(origin);
+    }
+
+    if (finalAction === "challenge") {
+      await logContainmentState({
+        env,
+        type: "containment_state_challenged",
+        level: "warning",
+        request,
+        actor,
+        message: "Containment state endpoint challenged by orchestrator.",
+        metadata: {
+          finalAction,
+          riskScore: security?.risk?.riskScore || 0,
+          degraded: security?.risk?.degraded === true
         }
       });
 
@@ -362,10 +377,9 @@ export async function onRequestGet(context) {
 
     return jsonResponse(
       origin,
-      {
-        success: false,
-        message: "Internal server error."
-      },
+      buildDeniedResponse("Internal server error.", {
+        action: "deny"
+      }),
       500
     );
   }
