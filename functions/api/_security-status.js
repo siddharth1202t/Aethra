@@ -86,6 +86,7 @@ function normalizeContainment(containment = {}) {
 
   return {
     mode: normalizeMode(safeContainment.mode),
+    degraded: safeContainment.degraded === true,
     freezeRegistrations: flags.freezeRegistrations === true,
     disableProfileEdits: flags.disableProfileEdits === true,
     lockAdminWrites: flags.lockAdminWrites === true,
@@ -185,7 +186,8 @@ function calculateThreatPressure(mode, counters, timestamp) {
   return clampNumber(pressure);
 }
 
-function normalizeHealth(mode, threatPressure) {
+function normalizeHealth(mode, threatPressure, degraded = false) {
+  if (degraded && threatPressure < 85) return "guarded";
   if (mode === "lockdown" || threatPressure >= 85) return "critical";
   if (mode === "defense" || threatPressure >= 60) return "stressed";
   if (mode === "elevated" || threatPressure >= 30) return "guarded";
@@ -243,6 +245,9 @@ export function buildSecurityStatus({
 
   const normalizedTimestamp = normalizeTimestamp(timestamp);
   const normalizedContainment = normalizeContainment(containment);
+  const degraded =
+    safeAdaptiveState.degraded === true ||
+    normalizedContainment.degraded === true;
 
   if (normalizedContainment.lockdown) {
     mode = "lockdown";
@@ -273,6 +278,7 @@ export function buildSecurityStatus({
     mode === "lockdown" ||
     counters.breachAttemptSignals > 0 ||
     counters.exploitAttemptSignals > 0 ||
+    counters.coordinatedAttackSignals > 0 ||
     normalizedThreatSnapshot.breachSignals > 0 ||
     normalizedThreatSnapshot.exploitSignals > 0 ||
     normalizedThreatSnapshot.coordinatedSignals > 0;
@@ -283,10 +289,11 @@ export function buildSecurityStatus({
     ok: true,
     timestamp: new Date(normalizedTimestamp).toISOString(),
     mode,
+    degraded,
     threatPressure,
     activeThreats,
     criticalAttackLikely,
-    systemHealth: normalizeHealth(mode, threatPressure),
+    systemHealth: normalizeHealth(mode, threatPressure, degraded),
     timing: {
       driftMs: safeInt(driftMs, 0, 0, MAX_COUNTER_VALUE),
       stale: driftMs > 30_000
