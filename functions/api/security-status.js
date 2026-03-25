@@ -290,7 +290,8 @@ export async function onRequest(context) {
         message: "Security status endpoint blocked by orchestrator.",
         metadata: {
           riskScore: security?.risk?.riskScore || 0,
-          finalAction
+          finalAction,
+          degraded: security?.risk?.degraded === true
         }
       });
 
@@ -307,7 +308,8 @@ export async function onRequest(context) {
         message: "Security status endpoint challenged by orchestrator.",
         metadata: {
           riskScore: security?.risk?.riskScore || 0,
-          finalAction
+          finalAction,
+          degraded: security?.risk?.degraded === true
         }
       });
 
@@ -348,7 +350,8 @@ export async function onRequest(context) {
       message: "Security status endpoint accessed successfully.",
       metadata: {
         mode: payload?.mode || null,
-        systemHealth: payload?.systemHealth || null
+        systemHealth: payload?.systemHealth || null,
+        degraded: payload?.degraded === true
       }
     });
 
