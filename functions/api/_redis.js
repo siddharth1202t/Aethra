@@ -11,6 +11,12 @@ function safeString(value, maxLength = 500) {
     .slice(0, maxLength);
 }
 
+function safePositiveInt(value, fallback = 0, max = 1_000_000) {
+  const num = Math.floor(Number(value));
+  if (!Number.isFinite(num) || num < 0) return fallback;
+  return Math.min(num, max);
+}
+
 function getEnvValue(env = {}, key = "") {
   if (env && typeof env === "object" && env[key] !== undefined) {
     return safeString(env[key], 2000);
@@ -150,17 +156,26 @@ export function getRedisCapabilities(env = {}) {
         typeof client.get === "function" &&
         typeof client.set === "function" &&
         typeof client.del === "function"
+    ),
+    incrementOps: Boolean(
+      client &&
+        (typeof client.incr === "function" || typeof client.incrby === "function")
     )
   };
 }
 
 /* -------------------- HELPER OPERATIONS -------------------- */
 
-export async function setIfNotExistsWithExpiry(env = {}, key = "", value = "1", ttlSeconds = 60) {
+export async function setIfNotExistsWithExpiry(
+  env = {},
+  key = "",
+  value = "1",
+  ttlSeconds = 60
+) {
   const redis = requireRedis(env);
   const safeKey = safeString(key, 500);
   const safeValue = safeString(value, 5000);
-  const safeTtl = Math.max(1, Math.floor(Number(ttlSeconds) || 1));
+  const safeTtl = Math.max(1, safePositiveInt(ttlSeconds, 1));
 
   const result = await redis.set(safeKey, safeValue, {
     nx: true,
@@ -170,12 +185,26 @@ export async function setIfNotExistsWithExpiry(env = {}, key = "", value = "1", 
   return result === "OK";
 }
 
-export async function incrementWithExpiry(env = {}, key = "", ttlSeconds = 60) {
+export async function incrementWithExpiry(
+  env = {},
+  key = "",
+  ttlSeconds = 60,
+  amount = 1
+) {
   const redis = requireRedis(env);
   const safeKey = safeString(key, 500);
-  const safeTtl = Math.max(1, Math.floor(Number(ttlSeconds) || 1));
+  const safeTtl = Math.max(1, safePositiveInt(ttlSeconds, 1));
+  const safeAmount = Math.max(1, safePositiveInt(amount, 1, 1000));
 
-  const value = await redis.incr(safeKey);
+  let value = 0;
+
+  if (typeof redis.incrby === "function") {
+    value = await redis.incrby(safeKey, safeAmount);
+  } else {
+    for (let i = 0; i < safeAmount; i += 1) {
+      value = await redis.incr(safeKey);
+    }
+  }
 
   // Best-effort expiry set. Not perfectly atomic in REST clients,
   // but still much safer than read-modify-write.
@@ -193,8 +222,8 @@ export async function appendToRecentList(
 ) {
   const redis = requireRedis(env);
   const safeKey = safeString(key, 500);
-  const safeMaxItems = Math.max(1, Math.floor(Number(maxItems) || 1));
-  const safeTtl = Math.max(1, Math.floor(Number(ttlSeconds) || 1));
+  const safeMaxItems = Math.max(1, safePositiveInt(maxItems, 1));
+  const safeTtl = Math.max(1, safePositiveInt(ttlSeconds, 1));
 
   if (
     typeof redis.lpush !== "function" ||
@@ -217,7 +246,7 @@ export async function appendToRecentList(
 export async function getRecentList(env = {}, key = "", limit = 100) {
   const redis = requireRedis(env);
   const safeKey = safeString(key, 500);
-  const safeLimit = Math.max(1, Math.floor(Number(limit) || 1));
+  const safeLimit = Math.max(1, safePositiveInt(limit, 1));
 
   if (typeof redis.lrange !== "function") {
     throw new Error("Redis list operations are unavailable.");
