@@ -5,7 +5,9 @@ import {
   safeString,
   sanitizeBody,
   buildBlockedResponse,
-  buildMethodNotAllowedResponse
+  buildMethodNotAllowedResponse,
+  buildChallengeResponse,
+  buildDeniedResponse
 } from "./_api-security.js";
 
 const ROUTE = "/api/verify-turnstile";
@@ -134,7 +136,6 @@ function isValidTurnstileToken(token = "") {
     return false;
   }
 
-  // Conservative validation: allow common token chars only.
   return /^[A-Za-z0-9._\-]+$/.test(token);
 }
 
@@ -268,6 +269,7 @@ export async function onRequestPost(context) {
   });
 
   const securityAction = extractActionFromSecurity(security);
+  const degraded = security?.risk?.degraded === true;
 
   if (securityAction === "block") {
     await logTurnstileEvent({
@@ -279,13 +281,17 @@ export async function onRequestPost(context) {
       request,
       metadata: {
         riskScore: security?.risk?.riskScore || 0,
-        finalAction: securityAction
+        finalAction: securityAction,
+        degraded
       }
     });
 
     return jsonResponse(
       origin,
-      buildBlockedResponse("Suspicious request blocked.", { action: "block" }),
+      buildBlockedResponse("Suspicious request blocked.", {
+        action: "block",
+        degraded
+      }),
       403
     );
   }
@@ -300,17 +306,17 @@ export async function onRequestPost(context) {
       request,
       metadata: {
         riskScore: security?.risk?.riskScore || 0,
-        finalAction: securityAction
+        finalAction: securityAction,
+        degraded
       }
     });
 
     return jsonResponse(
       origin,
-      {
-        success: false,
+      buildChallengeResponse("Additional verification required.", {
         action: "challenge",
-        message: "Additional verification required."
-      },
+        degraded
+      }),
       429
     );
   }
@@ -465,13 +471,15 @@ export async function onRequestPost(context) {
     request,
     metadata: {
       responseHostname: responseHostname || null,
-      upstreamStatus
+      upstreamStatus,
+      degraded
     }
   });
 
   return jsonResponse(origin, {
     success: true,
-    action: "allow"
+    action: "allow",
+    degraded
   });
 }
 
