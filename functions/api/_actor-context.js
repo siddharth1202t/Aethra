@@ -241,6 +241,8 @@ function extractSessionId({
 } = {}) {
   return normalizeSessionId(
     context?.sessionId ||
+      req?.auth?.sessionId ||
+      req?.user?.sessionId ||
       body?.sessionId ||
       behavior?.sessionId ||
       getHeaderValue(req, "x-session-id") ||
@@ -257,6 +259,8 @@ function extractUserId({
   return normalizeUserId(
     context?.userId ||
       context?.uid ||
+      req?.decodedToken?.uid ||
+      req?.decodedToken?.user_id ||
       body?.userId ||
       req?.user?.uid ||
       req?.user?.id ||
@@ -265,7 +269,6 @@ function extractUserId({
       fallback
   );
 }
-
 function extractRequestId(req = null, context = {}) {
   return normalizeRequestId(
     context?.requestId ||
