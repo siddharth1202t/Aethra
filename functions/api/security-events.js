@@ -396,7 +396,8 @@ export async function onRequest(context) {
             : "Security events endpoint challenged by orchestrator.",
         metadata: {
           riskScore: security?.risk?.riskScore || 0,
-          finalAction
+          finalAction,
+          degraded: security?.risk?.degraded === true
         }
       });
 
@@ -449,7 +450,10 @@ export async function onRequest(context) {
         filterSeverity: filters.severity || "",
         filterAction: filters.action || "",
         filterType: filters.type || "",
-        limit: filters.limit
+        limit: filters.limit,
+        degraded:
+          adaptiveState?.degraded === true ||
+          containmentState?.degraded === true
       }
     });
 
@@ -468,6 +472,9 @@ export async function onRequest(context) {
         ok: true,
         timestamp: new Date().toISOString(),
         count: Array.isArray(events) ? events.length : 0,
+        degraded:
+          adaptiveState?.degraded === true ||
+          containmentState?.degraded === true,
         filters: {
           limit: filters.limit,
           severity: filters.severity || "",
