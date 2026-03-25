@@ -190,6 +190,7 @@ function normalizeRateLimitResult(rateLimitResult = null) {
     recommendedAction: normalizeAction(rateLimitResult.recommendedAction),
     containmentAction: safeString(rateLimitResult.containmentAction || "none", 40),
     penaltyActive: Boolean(rateLimitResult.penaltyActive),
+    degraded: rateLimitResult.degraded === true,
 
     overBy: safeInt(rateLimitResult.overBy, 0),
     violations: safeInt(rateLimitResult.violations, 0),
@@ -217,6 +218,7 @@ function normalizeFreshnessResult(freshnessResult = null) {
     ok: Boolean(freshnessResult.ok),
     code: safeString(freshnessResult.code || "", 100),
     ageMs: safeNumber(freshnessResult.ageMs, 0),
+    degraded: freshnessResult.degraded === true,
     events: {
       freshnessSignals: safeInt(freshnessResult?.events?.freshnessSignals, 0),
       replaySignals: safeInt(freshnessResult?.events?.replaySignals, 0)
@@ -308,6 +310,7 @@ export function evaluateRisk(inputs = {}) {
     reasons: [],
     hardBlockSignals: 0,
     criticalSignals: 0,
+    degradedSignals: 0,
     pressures: createPressureBreakdown(),
     events: createEventSignals()
   };
@@ -424,6 +427,11 @@ export function evaluateRisk(inputs = {}) {
 
   /* RATE LIMIT */
   if (rateLimitResult) {
+    if (rateLimitResult.degraded === true) {
+      state.degradedSignals += 1;
+      addWeightedScore(state, 5, "rate:degraded", "ratePressure");
+    }
+
     if (!rateLimitResult.allowed)
       addWeightedScore(state, 15, "rate:limit_exceeded", "ratePressure");
 
@@ -451,6 +459,13 @@ export function evaluateRisk(inputs = {}) {
   }
 
   /* REQUEST FRESHNESS */
+  if (freshnessResult) {
+    if (freshnessResult.degraded === true) {
+      state.degradedSignals += 1;
+      addWeightedScore(state, 5, "freshness:degraded", "freshnessPressure");
+    }
+  }
+
   if (freshnessResult && !freshnessResult.ok) {
     addWeightedScore(
       state,
@@ -634,6 +649,7 @@ export function evaluateRisk(inputs = {}) {
     hardBlockSignals: safeInt(state.hardBlockSignals, 0, 0, 100),
     criticalSignals: safeInt(state.criticalSignals, 0, 0, 100),
     criticalAttackLikely,
+    degraded: state.degradedSignals > 0,
     reasons: state.reasons,
     pressures: {
       routePressure: safeInt(state.pressures.routePressure, 0, 0, 100),
