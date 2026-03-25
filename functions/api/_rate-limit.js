@@ -15,6 +15,8 @@ const VIOLATION_DECAY_MS = 30 * 60 * 1000;
 const MAX_LIMIT = 10_000;
 const MAX_WINDOW_MS = 24 * 60 * 60 * 1000;
 
+/* -------------------- SAFETY -------------------- */
+
 function safeNumber(value, fallback = 0) {
   const num = Number(value);
   return Number.isFinite(num) ? num : fallback;
@@ -45,6 +47,8 @@ function safeJsonParse(raw, fallback = null) {
   }
 }
 
+/* -------------------- NORMALIZATION -------------------- */
+
 function normalizeKey(input) {
   const key = safeString(input || "", MAX_KEY_LENGTH).replace(/[^a-zA-Z0-9._:@/-]/g, "");
   return key || "unknown";
@@ -73,7 +77,10 @@ function buildStateKey(key) {
 
 function buildCounterKey(key, windowMs, now) {
   const normalizedKey = normalizeKey(key);
-  const safeWindowMs = Math.max(1_000, normalizePositiveInteger(windowMs, DEFAULT_WINDOW_MS));
+  const safeWindowMs = Math.max(
+    1_000,
+    normalizePositiveInteger(windowMs, DEFAULT_WINDOW_MS)
+  );
   const bucket = Math.floor(now / safeWindowMs);
   return `ratelimit:count:${normalizedKey}:${safeWindowMs}:${bucket}`;
 }
@@ -111,6 +118,8 @@ function normalizeRecord(raw, now) {
   };
 }
 
+/* -------------------- ROUTE WEIGHTING -------------------- */
+
 function getRouteSensitivity(route) {
   const normalized = normalizeRoute(route);
 
@@ -147,6 +156,8 @@ function getRouteWeight(route) {
   if (sensitivity === "high") return 2;
   return 1;
 }
+
+/* -------------------- DECISIONS -------------------- */
 
 function getRecommendedAction({
   allowed,
@@ -247,6 +258,8 @@ function updateBurstMemory(record, now) {
   return record.recentHits.length;
 }
 
+/* -------------------- STATE STORAGE -------------------- */
+
 async function getStoredRecord(redis, redisKey, now) {
   try {
     const raw = await redis.get(redisKey);
@@ -293,6 +306,8 @@ async function incrementWeightedCounter(env, counterKey, routeWeight, windowMs) 
   return normalizePositiveInteger(current, 0);
 }
 
+/* -------------------- MAIN -------------------- */
+
 export async function checkApiRateLimit(options = {}) {
   const now = Date.now();
 
@@ -322,7 +337,6 @@ export async function checkApiRateLimit(options = {}) {
   const routeWeight = getRouteWeight(route);
 
   if (!isRedisAvailable(env)) {
-    // Fail safer for critical routes.
     const recommendedAction = routeSensitivity === "critical" ? "block" : "challenge";
 
     return {
@@ -405,7 +419,7 @@ export async function checkApiRateLimit(options = {}) {
     }
   }
 
-  await storeRecord(redis, stateKey, record);
+  const stateStored = await storeRecord(redis, stateKey, record);
 
   const penaltyActive = safeTimestamp(record.penaltyUntil, 0) > now;
   allowed = count <= limit && !penaltyActive;
@@ -474,6 +488,8 @@ export async function checkApiRateLimit(options = {}) {
     routeSensitivity,
     burstCount,
     highestCountSeen: normalizePositiveInteger(record.highestCountSeen, 0),
-    events
+    events,
+    degraded: stateStored === false,
+    degradedReason: stateStored === false ? "state_store_failed" : ""
   };
 }
