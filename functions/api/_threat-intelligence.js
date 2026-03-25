@@ -324,6 +324,11 @@ export async function evaluateThreat({
   const historicalExploitFlags = safeInt(securityState?.exploitFlagCount, 0, 0, MAX_COUNTER);
   const historicalBreachFlags = safeInt(securityState?.breachFlagCount, 0, 0, MAX_COUNTER);
 
+  const degraded =
+    rateLimitResult?.degraded === true ||
+    freshnessResult?.degraded === true ||
+    securityState?.degraded === true;
+
   if (botRisk >= 70) {
     signals.botPressure += 18;
     reasons.push("bot_high_risk");
@@ -405,6 +410,10 @@ export async function evaluateThreat({
     reasons.push("breach_history_present");
   }
 
+  if (degraded) {
+    reasons.push("degraded_security_signal");
+  }
+
   const totalIncrement =
     signals.botPressure +
     signals.abusePressure +
@@ -437,6 +446,7 @@ export async function evaluateThreat({
     threatScore: record.threatScore,
     level,
     action,
+    degraded,
     reasons: normalizeReasonHistory(record.reasonHistory).slice(-10),
     signals,
     events: {
