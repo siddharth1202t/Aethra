@@ -27,6 +27,12 @@ function safeInt(value, fallback = 0, min = 0, max = 1_000_000_000) {
   return Math.min(max, Math.max(min, num));
 }
 
+function isPlainObject(value) {
+  if (Object.prototype.toString.call(value) !== "[object Object]") return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === null || proto === Object.prototype;
+}
+
 function normalizeRoute(route = "") {
   const raw = safeString(route || "unknown-route", 300);
   if (!raw) return "unknown-route";
@@ -77,9 +83,14 @@ function getHeaderValue(req, name) {
     return "";
   }
 
-  for (const [key, value] of Object.entries(headers || {})) {
-    if (String(key).toLowerCase() === target) {
-      return safeString(value, 5000);
+  if (isPlainObject(headers)) {
+    for (const [key, value] of Object.entries(headers || {})) {
+      if (String(key).toLowerCase() === target) {
+        if (Array.isArray(value)) {
+          return safeString(value[0] || "", 5000);
+        }
+        return safeString(value, 5000);
+      }
     }
   }
 
@@ -140,9 +151,11 @@ function getOrigin(req) {
 function getSessionId(req, decodedToken = {}) {
   return normalizeSessionId(
     getHeaderValue(req, "x-session-id") ||
-    decodedToken?.session_id ||
-    decodedToken?.sid ||
-    ""
+      decodedToken?.session_id ||
+      decodedToken?.sid ||
+      req?.auth?.sessionId ||
+      req?.user?.sessionId ||
+      ""
   );
 }
 
@@ -242,7 +255,10 @@ function parseJwt(token = "") {
 }
 
 function getCacheTtlMs(response) {
-  const cacheControl = safeString(response?.headers?.get?.("cache-control") || "", 500);
+  const cacheControl = safeString(
+    response?.headers?.get?.("cache-control") || "",
+    500
+  );
   const match = cacheControl.match(/max-age=(\d+)/i);
   if (!match) return DEFAULT_JWKS_CACHE_TTL_MS;
 
@@ -250,10 +266,17 @@ function getCacheTtlMs(response) {
   return seconds * 1000;
 }
 
-async function getFirebaseJwks() {
+function clearJwksCache() {
+  jwksCache = {
+    keys: null,
+    expiresAt: 0
+  };
+}
+
+async function getFirebaseJwks(forceRefresh = false) {
   const now = Date.now();
 
-  if (jwksCache.keys && jwksCache.expiresAt > now) {
+  if (!forceRefresh && jwksCache.keys && jwksCache.expiresAt > now) {
     return jwksCache.keys;
   }
 
@@ -294,12 +317,18 @@ async function importJwkForVerify(jwk) {
   );
 }
 
-async function verifyJwtSignature(token = "") {
+async function verifyJwtSignature(token = "", allowRefresh = true) {
   const parsed = parseJwt(token);
   const kid = safeString(parsed.header?.kid || "", 200);
 
-  const jwks = await getFirebaseJwks();
-  const jwk = jwks.find((key) => safeString(key?.kid || "", 200) === kid);
+  let jwks = await getFirebaseJwks(false);
+  let jwk = jwks.find((key) => safeString(key?.kid || "", 200) === kid);
+
+  if (!jwk && allowRefresh) {
+    clearJwksCache();
+    jwks = await getFirebaseJwks(true);
+    jwk = jwks.find((key) => safeString(key?.kid || "", 200) === kid);
+  }
 
   if (!jwk) {
     throw new Error("Matching JWT verification key not found.");
@@ -393,6 +422,35 @@ export function hasAdminRole(claims = {}) {
   return claims?.admin === true;
 }
 
+function getContainmentRank(containment = null) {
+  const modeRank = {
+    normal: 0,
+    elevated: 1,
+    defense: 2,
+    lockdown: 3
+  };
+
+  if (!containment || typeof containment !== "object") return -1;
+
+  const modeScore = modeRank[safeString(containment.mode || "normal", 20).toLowerCase()] || 0;
+  const enforcement = containment?.enforcement || {};
+
+  let enforcementScore = 0;
+  if (enforcement.mustBlock === true) enforcementScore += 100;
+  if (enforcement.mustLockAccount === true) enforcementScore += 80;
+  if (enforcement.mustBlockActor === true) enforcementScore += 80;
+  if (enforcement.mustKillSessions === true) enforcementScore += 60;
+  if (enforcement.requiresStepUp === true) enforcementScore += 20;
+
+  return enforcementScore + modeScore;
+}
+
+function pickStrongestContainment(containments = []) {
+  return containments
+    .filter(Boolean)
+    .sort((a, b) => getContainmentRank(b) - getContainmentRank(a))[0] || null;
+}
+
 function isSessionRevokedByContainment(decodedToken = {}, containment = null) {
   const killIssuedAtMs = safeInt(
     containment?.actorContainment?.killSessionsIssuedAt ||
@@ -423,46 +481,50 @@ async function evaluateAuthContainment({
 } = {}) {
   const ip = getClientIp(req);
   const sessionId = getSessionId(req, decodedToken);
+  const normalizedRoute = normalizeRoute(route);
 
-  const userContainment = uid
-    ? await evaluateContainment(env, {
-        route,
+  const containments = [];
+
+  if (uid) {
+    containments.push(
+      await evaluateContainment(env, {
+        route: normalizedRoute,
         isAdminRoute: false,
         isWriteAction: false,
         actionType: "auth_read",
         actorType: "user",
         actorId: uid
       })
-    : null;
+    );
+  }
 
-  const sessionContainment = sessionId
-    ? await evaluateContainment(env, {
-        route,
+  if (sessionId) {
+    containments.push(
+      await evaluateContainment(env, {
+        route: normalizedRoute,
         isAdminRoute: false,
         isWriteAction: false,
         actionType: "session_auth",
         actorType: "session",
         actorId: sessionId
       })
-    : null;
+    );
+  }
 
-  const ipContainment = ip && ip !== "unknown"
-    ? await evaluateContainment(env, {
-        route,
+  if (ip && ip !== "unknown") {
+    containments.push(
+      await evaluateContainment(env, {
+        route: normalizedRoute,
         isAdminRoute: false,
         isWriteAction: false,
         actionType: "ip_auth",
         actorType: "ip",
         actorId: ip
       })
-    : null;
+    );
+  }
 
-  const containment = [userContainment, sessionContainment, ipContainment]
-    .filter(Boolean)
-    .sort((a, b) => {
-      const rank = { normal: 0, elevated: 1, defense: 2, lockdown: 3 };
-      return (rank[b?.mode] || 0) - (rank[a?.mode] || 0);
-    })[0] || null;
+  const containment = pickStrongestContainment(containments);
 
   return {
     containment,
@@ -501,6 +563,7 @@ async function logDeniedAccess({
           tokenResult?.containment?.action ||
           tokenResult?.containment?.enforcement?.action ||
           "",
+        containmentMode: tokenResult?.containment?.mode || "",
         origin: getOrigin(req)
       }
     });
