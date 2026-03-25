@@ -13,6 +13,7 @@ const MAX_USER_AGENT_LENGTH = 500;
 const MAX_REASON_LENGTH = 80;
 const MAX_REASON_HISTORY = 30;
 const MAX_SIGNAL_HISTORY = 40;
+const MAX_RETURN_REASONS = 20;
 
 /* -------------------- SAFETY -------------------- */
 
@@ -331,7 +332,10 @@ function decayBotScore(record, now) {
   const decaySteps = Math.floor(elapsed / BOT_DECAY_MS);
   if (decaySteps <= 0) return;
 
-  record.suspicionScore = Math.max(0, toSafeInt(record.suspicionScore, 0) - decaySteps * 8);
+  record.suspicionScore = Math.max(
+    0,
+    toSafeInt(record.suspicionScore, 0) - decaySteps * 8
+  );
   record.lastDecayAt = now;
 }
 
@@ -389,7 +393,9 @@ function summarizeRecentSignals(record, route) {
   );
 
   const uniqueRecentRoutes = new Set(
-    (Array.isArray(record.recentRoutes) ? record.recentRoutes : []).map((item) => normalizeRoute(item))
+    (Array.isArray(record.recentRoutes) ? record.recentRoutes : []).map((item) =>
+      normalizeRoute(item)
+    )
   ).size;
 
   return {
@@ -616,12 +622,15 @@ export function analyzeBotBehavior(behavior = {}, req = null) {
     recommendedAction,
     telemetryQualityScore,
     hardBlockSignals,
-    reasons,
+    reasons: reasons.slice(0, MAX_RETURN_REASONS),
     telemetryWarnings,
     events: {
       botSignals: reasons.length > 0 ? 1 : 0,
       hardBlockSignals,
-      coordinatedSignals: 0
+      coordinatedSignals: 0,
+      exploitSignals: 0,
+      breachSignals: 0,
+      replaySignals: 0
     },
     signals: {
       route,
@@ -792,7 +801,8 @@ export async function trackBotBehavior(behavior = {}, req = null, context = {}) 
           highestRiskScore: toSafeInt(record.highestRiskScore, 0, 0, 100),
           hardBlockCount: toSafeInt(record.hardBlockCount, 0, 0, 1000),
           suspiciousCount: toSafeInt(record.suspiciousCount, 0, 0, 100000),
-          coordinatedSignals
+          coordinatedSignals,
+          clientKeyPreview: buildClientKeyPreview({ ip, sessionId })
         }
       });
     } catch (error) {
