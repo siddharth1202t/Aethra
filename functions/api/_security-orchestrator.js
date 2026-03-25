@@ -294,6 +294,31 @@ function inferRouteSensitivity(route = "", config = {}) {
   return "normal";
 }
 
+function collectDegradedState(results = {}) {
+  const degradedReasons = [];
+
+  if (results?.rateLimitResult?.degraded === true) {
+    degradedReasons.push(
+      safeString(results.rateLimitResult.degradedReason || "rate_limit_degraded", 80)
+    );
+  }
+
+  if (results?.freshnessResult?.degraded === true) {
+    degradedReasons.push(
+      safeString(results.freshnessResult.degradedReason || "freshness_degraded", 80)
+    );
+  }
+
+  if (results?.risk?.degraded === true) {
+    degradedReasons.push("risk_degraded");
+  }
+
+  return {
+    degraded: degradedReasons.length > 0,
+    degradedReasons
+  };
+}
+
 /* -------------------- FIRESTORE STATE READING -------------------- */
 
 function fromFirestoreValue(value) {
@@ -628,6 +653,9 @@ function buildInlineSecurityStatus({
   return {
     mode,
     threatPressure: Math.min(100, Math.max(0, threatPressure)),
+    degraded:
+      adaptiveModeResult?.degraded === true ||
+      containmentResult?.degraded === true,
     containment: {
       mode: safeString(containmentResult?.mode || "normal", 30).toLowerCase(),
       flags: containmentResult?.flags || {}
@@ -1003,6 +1031,7 @@ export async function runSecurityOrchestrator({
     hardBlockSignals: 0,
     criticalSignals: 0,
     criticalAttackLikely: false,
+    degraded: false,
     reasons: [],
     events: {
       exploitSignals: 0,
@@ -1098,6 +1127,9 @@ export async function runSecurityOrchestrator({
         safeBoolean(risk.criticalAttackLikely) ||
         safeInt(anomalyResult?.events?.breachSignals, 0, 0, 100) > 0 ||
         safeInt(anomalyResult?.events?.exploitSignals, 0, 0, 100) > 0,
+      degraded:
+        risk.degraded === true ||
+        anomalyResult?.degraded === true,
       reasons: [...new Set([...(risk.reasons || []), ...anomalyReasons])].slice(0, 50),
       events: {
         ...risk.events,
@@ -1173,13 +1205,22 @@ export async function runSecurityOrchestrator({
     enforcementFlags: enforcement
   });
 
+  const degradedState = collectDegradedState({
+    rateLimitResult,
+    freshnessResult,
+    risk
+  });
+
   const finalRisk = {
     ...risk,
     routeSensitivity,
     finalAction,
     finalContainmentAction,
     criticalAttackLikely:
-      safeBoolean(risk.criticalAttackLikely) || safeBoolean(enforcement.criticalAttack)
+      safeBoolean(risk.criticalAttackLikely) || safeBoolean(enforcement.criticalAttack),
+    degraded:
+      risk.degraded === true || degradedState.degraded === true,
+    degradedReasons: degradedState.degradedReasons
   };
 
   const persistentRiskState = await persistActorRiskStates({
@@ -1208,7 +1249,8 @@ export async function runSecurityOrchestrator({
       adaptiveState: adaptiveModeResult || {},
       containmentState: {
         mode: containmentResult?.mode || "normal",
-        flags: containmentResult?.flags || {}
+        flags: containmentResult?.flags || {},
+        degraded: containmentResult?.degraded === true
       },
       events: recentEvents
     });
@@ -1229,6 +1271,8 @@ export async function runSecurityOrchestrator({
 
   return {
     actor,
+    degraded: finalRisk.degraded === true,
+    degradedReasons: finalRisk.degradedReasons || [],
     risk: finalRisk,
     enforcement,
     signals: buildSafeSignalBundle({
