@@ -7,6 +7,9 @@ import {
   sanitizeMetadata,
   buildBlockedResponse,
   buildMethodNotAllowedResponse,
+  buildDeniedResponse,
+  buildChallengeResponse,
+  buildThrottleResponse,
   runRouteSecurity
 } from "./_api-security.js";
 import { validateFreshRequest } from "./_request-freshness.js";
@@ -188,11 +191,7 @@ export async function onRequest(context) {
   if (!contentType.toLowerCase().includes("application/json")) {
     return jsonResponse(
       origin,
-      {
-        success: false,
-        action: "deny",
-        message: "Unsupported content type."
-      },
+      buildDeniedResponse("Unsupported content type.", { action: "deny" }),
       415
     );
   }
@@ -201,11 +200,7 @@ export async function onRequest(context) {
   if (Number.isFinite(contentLength) && contentLength > MAX_CONTENT_LENGTH_BYTES) {
     return jsonResponse(
       origin,
-      {
-        success: false,
-        action: "deny",
-        message: "Request body too large."
-      },
+      buildDeniedResponse("Request body too large.", { action: "deny" }),
       413
     );
   }
@@ -304,17 +299,14 @@ export async function onRequest(context) {
         actor,
         request,
         metadata: {
-          action: security.rateLimitResult.recommendedAction || "throttle"
+          action: security.rateLimitResult.recommendedAction || "throttle",
+          degraded: security.rateLimitResult.degraded === true
         }
       });
 
       return jsonResponse(
         origin,
-        {
-          success: false,
-          action: "throttle",
-          message: "Too many requests."
-        },
+        buildThrottleResponse("Too many requests.", { action: "throttle" }),
         429
       );
     }
@@ -329,7 +321,10 @@ export async function onRequest(context) {
         request,
         metadata: {
           finalAction,
-          containmentAction: security?.containmentAction || security?.risk?.finalContainmentAction || "none",
+          containmentAction:
+            security?.containmentAction ||
+            security?.risk?.finalContainmentAction ||
+            "none",
           combinedRisk: safeNumber(
             security?.combinedRisk || security?.risk?.riskScore || 0,
             0
@@ -356,7 +351,10 @@ export async function onRequest(context) {
         request,
         metadata: {
           finalAction,
-          containmentAction: security?.containmentAction || security?.risk?.finalContainmentAction || "none",
+          containmentAction:
+            security?.containmentAction ||
+            security?.risk?.finalContainmentAction ||
+            "none",
           combinedRisk: safeNumber(
             security?.combinedRisk || security?.risk?.riskScore || 0,
             0
@@ -366,11 +364,9 @@ export async function onRequest(context) {
 
       return jsonResponse(
         origin,
-        {
-          success: false,
-          action: "challenge",
-          message: "Verification required."
-        },
+        buildChallengeResponse("Verification required.", {
+          action: "challenge"
+        }),
         403
       );
     }
@@ -399,17 +395,16 @@ export async function onRequest(context) {
         actor,
         request,
         metadata: {
-          freshnessCode: safeString(freshRequestResult.code, 100)
+          freshnessCode: safeString(freshRequestResult.code, 100),
+          degraded: freshRequestResult.degraded === true
         }
       });
 
       return jsonResponse(
         origin,
-        {
-          success: false,
-          action: "deny",
-          message: "Invalid telemetry request."
-        },
+        buildDeniedResponse("Invalid telemetry request.", {
+          action: "deny"
+        }),
         400
       );
     }
@@ -429,6 +424,7 @@ export async function onRequest(context) {
         eventAt: safeNumber(body.eventAt, 0),
         receivedAt: Date.now(),
         ageMs: safeNumber(freshRequestResult.ageMs, 0),
+        degraded: freshRequestResult.degraded === true,
         clientAssertedSessionId: safeString(body.sessionId || "", 120),
         actorKey: actor?.actorKey || null,
         routeKey: actor?.routeKey || null,
@@ -460,11 +456,9 @@ export async function onRequest(context) {
 
     return jsonResponse(
       origin,
-      {
-        success: false,
-        action: "deny",
-        message: "Internal server error."
-      },
+      buildDeniedResponse("Internal server error.", {
+        action: "deny"
+      }),
       500
     );
   }
