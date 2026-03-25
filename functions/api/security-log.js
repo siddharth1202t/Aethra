@@ -5,6 +5,8 @@ import {
   sanitizeBody,
   buildMethodNotAllowedResponse,
   buildBlockedResponse,
+  buildChallengeResponse,
+  buildDeniedResponse,
   runRouteSecurity
 } from "./_api-security.js";
 import { validateFreshRequest } from "./_request-freshness.js";
@@ -142,7 +144,7 @@ async function logRouteEvent({
   });
 }
 
-function buildSafeClientLogPayload(body, actor, request) {
+function buildSafeClientLogPayload(body, actor, request, degraded = false) {
   const clientEvent = normalizeClientEventType(body.event || body.type || "");
   const severity = normalizeSeverity(body.level || body.severity || "warning");
   const message = safeString(
@@ -165,6 +167,7 @@ function buildSafeClientLogPayload(body, actor, request) {
       routeKey: actor?.routeKey || null,
       clientEvent,
       source,
+      degraded: degraded === true,
       originalRoute: safeString(body.route || "", 200),
       userAgent: safeString(request.headers.get("user-agent") || "", 300),
       ...metadata
@@ -182,11 +185,9 @@ export async function onRequest(context) {
   const contentType = request.headers.get("content-type") || "";
   if (!contentType.toLowerCase().includes("application/json")) {
     return jsonResponse(
-      {
-        success: false,
-        action: "deny",
-        message: "Unsupported content type"
-      },
+      buildDeniedResponse("Unsupported content type", {
+        action: "deny"
+      }),
       415
     );
   }
@@ -194,11 +195,9 @@ export async function onRequest(context) {
   const contentLength = Number(request.headers.get("content-length") || 0);
   if (Number.isFinite(contentLength) && contentLength > MAX_CONTENT_LENGTH_BYTES) {
     return jsonResponse(
-      {
-        success: false,
-        action: "deny",
-        message: "Request body too large"
-      },
+      buildDeniedResponse("Request body too large", {
+        action: "deny"
+      }),
       413
     );
   }
@@ -210,11 +209,9 @@ export async function onRequest(context) {
       rawBody = await request.json();
     } catch {
       return jsonResponse(
-        {
-          success: false,
-          action: "deny",
-          message: "Invalid JSON body"
-        },
+        buildDeniedResponse("Invalid JSON body", {
+          action: "deny"
+        }),
         400
       );
     }
@@ -250,6 +247,8 @@ export async function onRequest(context) {
       50
     ).toLowerCase();
 
+    const degraded = security?.risk?.degraded === true;
+
     if (finalAction === "block") {
       await logRouteEvent({
         env,
@@ -259,12 +258,16 @@ export async function onRequest(context) {
         actor,
         request,
         metadata: {
-          riskScore: security?.risk?.riskScore || 0
+          riskScore: security?.risk?.riskScore || 0,
+          degraded
         }
       });
 
       return jsonResponse(
-        buildBlockedResponse("Request blocked", { action: "block" }),
+        buildBlockedResponse("Request blocked", {
+          action: "block",
+          degraded
+        }),
         403
       );
     }
@@ -278,16 +281,16 @@ export async function onRequest(context) {
         actor,
         request,
         metadata: {
-          riskScore: security?.risk?.riskScore || 0
+          riskScore: security?.risk?.riskScore || 0,
+          degraded
         }
       });
 
       return jsonResponse(
-        {
-          success: false,
+        buildChallengeResponse("Additional verification required", {
           action: "challenge",
-          message: "Additional verification required"
-        },
+          degraded
+        }),
         403
       );
     }
@@ -313,21 +316,26 @@ export async function onRequest(context) {
         actor,
         request,
         metadata: {
-          reason: safeString(freshness.reason || "invalid_freshness", 100)
+          code: safeString(freshness.code || "invalid_freshness", 100),
+          degraded: freshness.degraded === true
         }
       });
 
       return jsonResponse(
-        {
-          success: false,
+        buildDeniedResponse("Invalid telemetry request", {
           action: "deny",
-          message: "Invalid telemetry request"
-        },
+          degraded: freshness.degraded === true
+        }),
         400
       );
     }
 
-    const safePayload = buildSafeClientLogPayload(body, actor, request);
+    const safePayload = buildSafeClientLogPayload(
+      body,
+      actor,
+      request,
+      degraded || freshness.degraded === true
+    );
 
     const ok = await writeSecurityLog({
       env,
@@ -337,6 +345,7 @@ export async function onRequest(context) {
     return jsonResponse({
       success: true,
       action: "allow",
+      degraded: degraded || freshness.degraded === true,
       logged: ok === true
     });
   } catch (error) {
@@ -356,11 +365,9 @@ export async function onRequest(context) {
     } catch {}
 
     return jsonResponse(
-      {
-        success: false,
-        action: "deny",
-        message: "Internal server error"
-      },
+      buildDeniedResponse("Internal server error", {
+        action: "deny"
+      }),
       500
     );
   }
