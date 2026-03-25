@@ -85,7 +85,8 @@ function normalizeEvent(event = {}) {
     userId: normalizeId(event.userId || ""),
     emailHash: normalizeHash(event.emailHash || ""),
     ipHash: normalizeHash(event.ipHash || ""),
-    sessionId: normalizeId(event.sessionId || "")
+    sessionId: normalizeId(event.sessionId || ""),
+    degraded: event.degraded === true
   };
 }
 
@@ -616,11 +617,18 @@ function buildRiskPatch(existing = {}, event = {}) {
 }
 
 function buildStatePatch(existing = {}, event = {}) {
-  return {
+  const patch = {
     ...buildBasePatch(existing, event),
     ...buildCounterPatch(existing, event),
     ...buildRiskPatch(existing, event)
   };
+
+  if (event.degraded === true) {
+    patch.lastDegradedAtMs = Date.now();
+    patch.degradedEventCount = safeInt(existing.degradedEventCount, 0) + 1;
+  }
+
+  return patch;
 }
 
 /* -------------------- ENTITY UPDATE -------------------- */
@@ -672,14 +680,14 @@ export async function updateSecurityState(input = {}) {
   const rawEvent = input?.event || null;
 
   if (!env || !hasFirebaseAdminEnv(env) || !rawEvent || typeof rawEvent !== "object") {
-    return { ok: false, updated: 0 };
+    return { ok: false, updated: 0, degraded: true };
   }
 
   const event = normalizeEvent(rawEvent);
   const targets = getEntityTargets(rawEvent);
 
   if (!targets.length) {
-    return { ok: true, updated: 0 };
+    return { ok: true, updated: 0, degraded: false };
   }
 
   const results = await Promise.all(
@@ -692,6 +700,7 @@ export async function updateSecurityState(input = {}) {
 
   return {
     ok: updated > 0,
-    updated
+    updated,
+    degraded: updated !== targets.length
   };
 }
