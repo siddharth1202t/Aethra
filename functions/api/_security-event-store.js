@@ -1,4 +1,10 @@
-import { getRedis } from "./_redis.js";
+import {
+  getRedis,
+  getRedisCapabilities,
+  appendToRecentList,
+  getRecentList,
+  deleteRedisKey
+} from "./_redis.js";
 
 const SECURITY_EVENTS_KEY = "security:events:recent";
 const SECURITY_EVENTS_MAX_ITEMS = 100;
@@ -51,6 +57,12 @@ function safeJsonParse(raw, fallback = null) {
   } catch {
     return fallback;
   }
+}
+
+function isPlainObject(value) {
+  if (Object.prototype.toString.call(value) !== "[object Object]") return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === null || proto === Object.prototype;
 }
 
 /* -------------------- NORMALIZATION -------------------- */
@@ -189,18 +201,6 @@ function sortEventsNewestFirst(events = []) {
   );
 }
 
-/* -------------------- REDIS MODE DETECTION -------------------- */
-
-function supportsRedisListOps(redis) {
-  return Boolean(
-    redis &&
-      typeof redis.lpush === "function" &&
-      typeof redis.lrange === "function" &&
-      typeof redis.ltrim === "function" &&
-      typeof redis.expire === "function"
-  );
-}
-
 /* -------------------- LEGACY ARRAY STORAGE -------------------- */
 
 async function getStoredEventsFromJson(redis) {
@@ -248,14 +248,14 @@ async function storeEventsAsJson(redis, events = []) {
 /* -------------------- PRIMARY STORAGE -------------------- */
 
 async function getStoredEvents(env = {}) {
-  const redis = getRedis(env);
+  const capabilities = getRedisCapabilities(env);
 
-  if (supportsRedisListOps(redis)) {
+  if (capabilities.listOps) {
     try {
-      const rawItems = await redis.lrange(
+      const rawItems = await getRecentList(
+        env,
         SECURITY_EVENTS_KEY,
-        0,
-        SECURITY_EVENTS_MAX_ITEMS - 1
+        SECURITY_EVENTS_MAX_ITEMS
       );
 
       if (!Array.isArray(rawItems)) return [];
@@ -265,7 +265,7 @@ async function getStoredEvents(env = {}) {
           if (typeof item === "string") {
             return normalizeStoredEvent(safeJsonParse(item, {}));
           }
-          if (item && typeof item === "object") {
+          if (isPlainObject(item)) {
             return normalizeStoredEvent(item);
           }
           return null;
@@ -277,55 +277,65 @@ async function getStoredEvents(env = {}) {
     }
   }
 
+  const redis = getRedis(env);
   return getStoredEventsFromJson(redis);
 }
 
 async function appendStoredEvent(env = {}, event = {}) {
-  const redis = getRedis(env);
   const normalizedEvent = normalizeStoredEvent(event);
+  const capabilities = getRedisCapabilities(env);
 
-  if (supportsRedisListOps(redis)) {
+  if (capabilities.listOps) {
     try {
-      await redis.lpush(SECURITY_EVENTS_KEY, JSON.stringify(normalizedEvent));
-      await redis.ltrim(SECURITY_EVENTS_KEY, 0, SECURITY_EVENTS_MAX_ITEMS - 1);
-      await redis.expire(SECURITY_EVENTS_KEY, SECURITY_EVENTS_TTL_SECONDS);
+      await appendToRecentList(
+        env,
+        SECURITY_EVENTS_KEY,
+        JSON.stringify(normalizedEvent),
+        SECURITY_EVENTS_MAX_ITEMS,
+        SECURITY_EVENTS_TTL_SECONDS
+      );
 
       return {
         ok: true,
+        degraded: false,
         event: normalizedEvent
       };
     } catch (error) {
       console.error("Security events list append failed:", error);
       return {
         ok: false,
+        degraded: true,
         event: normalizedEvent
       };
     }
   }
 
+  const redis = getRedis(env);
   const currentEvents = await getStoredEventsFromJson(redis);
   const nextEvents = [normalizedEvent, ...currentEvents];
   const ok = await storeEventsAsJson(redis, nextEvents);
 
   return {
     ok,
+    degraded: !ok,
     event: normalizedEvent
   };
 }
 
 async function clearStoredEvents(env = {}) {
-  const redis = getRedis(env);
+  const capabilities = getRedisCapabilities(env);
 
-  if (supportsRedisListOps(redis)) {
+  if (capabilities.keyOps) {
     try {
-      await redis.del(SECURITY_EVENTS_KEY);
+      await deleteRedisKey(env, SECURITY_EVENTS_KEY);
       return true;
     } catch (error) {
-      console.error("Security events list clear failed:", error);
+      console.error("Security events clear failed:", error);
       return false;
     }
   }
 
+  const redis = getRedis(env);
   return storeEventsAsJson(redis, []);
 }
 
