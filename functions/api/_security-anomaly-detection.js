@@ -361,6 +361,7 @@ export async function evaluateAnomalyDetection({
       level: "low",
       action: "allow",
       reasons: [],
+      degraded: false,
       signals: {
         contextualPressure: 0,
         exploitPressure: 0,
@@ -391,6 +392,10 @@ export async function evaluateAnomalyDetection({
   const abuseEndpointSpread = safeInt(abuseResult?.events?.endpointSpread, 0, 0, 100);
   const replaySignals = safeInt(freshnessResult?.events?.replaySignals, 0, 0, 100);
   const rateHardBlockSignals = safeInt(rateLimitResult?.events?.hardBlockSignals, 0, 0, 100);
+
+  const degraded =
+    rateLimitResult?.degraded === true ||
+    freshnessResult?.degraded === true;
 
   const previousState = applyStateDecay(
     await getStoredState(env, safeActorType, safeActorId),
@@ -560,6 +565,11 @@ export async function evaluateAnomalyDetection({
     signals.coordinatedPressure +
     signals.historicalPressure;
 
+  if (degraded) {
+    score += 5;
+    pushReason(reasons, "anomaly:degraded_security_context");
+  }
+
   const anomalyScore = Math.min(100, Math.max(0, score));
 
   const result = {
@@ -567,6 +577,7 @@ export async function evaluateAnomalyDetection({
     level: getLevel(anomalyScore),
     action: getAction(anomalyScore, criticalSignals),
     reasons: reasons.slice(0, MAX_REASONS),
+    degraded,
     signals,
     events: {
       exploitSignals: payloadExploitSignals > 0 ? 1 : 0,
@@ -603,6 +614,7 @@ export async function evaluateAnomalyDetection({
           actorType: safeActorType,
           actorId: safeActorId,
           anomalyScore: result.anomalyScore,
+          degraded: result.degraded === true,
           contextualPressure: result.signals.contextualPressure,
           exploitPressure: result.signals.exploitPressure,
           breachPressure: result.signals.breachPressure,
