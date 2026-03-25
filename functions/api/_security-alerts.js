@@ -44,6 +44,12 @@ function safeJsonParse(raw, fallback = null) {
   }
 }
 
+function isPlainObject(value) {
+  if (Object.prototype.toString.call(value) !== "[object Object]") return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === null || proto === Object.prototype;
+}
+
 function normalizeKey(value = "") {
   return safeString(value, 160).replace(/[^a-zA-Z0-9:_-]/g, "_");
 }
@@ -156,7 +162,7 @@ async function storeAlertState(env, state) {
 /* -------------------- SUPPRESSION -------------------- */
 
 function buildAlertScopeKey(alert = {}) {
-  const metadata = alert?.metadata && typeof alert.metadata === "object"
+  const metadata = isPlainObject(alert?.metadata)
     ? alert.metadata
     : {};
 
@@ -169,7 +175,14 @@ function buildAlertScopeKey(alert = {}) {
   );
 }
 
-async function shouldEmitAlert(env, alertType, severity = "warning", reason = "", scopeKey = "", now = Date.now()) {
+async function shouldEmitAlert(
+  env,
+  alertType,
+  severity = "warning",
+  reason = "",
+  scopeKey = "",
+  now = Date.now()
+) {
   const state = await getStoredAlertState(env, alertType, scopeKey);
   const normalizedSeverity = normalizeSeverity(severity);
   const normalizedReason = safeString(reason || "", 120);
@@ -233,9 +246,7 @@ function buildAlert({
     category: safeString(category, 50).toLowerCase(),
     priority: safeString(priority, 30).toLowerCase(),
     escalationRequired: escalationRequired === true,
-    metadata: metadata && typeof metadata === "object"
-      ? metadata
-      : {}
+    metadata: isPlainObject(metadata) ? metadata : {}
   };
 }
 
@@ -276,7 +287,7 @@ async function emitAlertEvent(env, alert) {
         category: safeString(alert.category || "security", 50),
         priority: safeString(alert.priority || "medium", 30),
         escalationRequired: alert.escalationRequired === true,
-        ...(alert.metadata || {})
+        ...(isPlainObject(alert.metadata) ? alert.metadata : {})
       }
     });
   } catch (error) {
@@ -295,7 +306,8 @@ function normalizeRisk(risk = null) {
     finalAction: safeString(risk.finalAction || risk.action || "allow", 20).toLowerCase(),
     hardBlockSignals: safeInt(risk.hardBlockSignals, 0, 0, 100),
     criticalSignals: safeInt(risk.criticalSignals, 0, 0, 100),
-    criticalAttackLikely: risk.criticalAttackLikely === true
+    criticalAttackLikely: risk.criticalAttackLikely === true,
+    degraded: risk.degraded === true
   };
 }
 
@@ -326,22 +338,15 @@ export async function evaluateSecurityAlerts({
 } = {}) {
   const alerts = [];
 
-  const metrics = securityMetrics && typeof securityMetrics === "object"
-    ? securityMetrics
-    : {};
-
-  const status = securityStatus && typeof securityStatus === "object"
-    ? securityStatus
-    : {};
-
+  const metrics = isPlainObject(securityMetrics) ? securityMetrics : {};
+  const status = isPlainObject(securityStatus) ? securityStatus : {};
   const safeEvents = Array.isArray(events) ? events : [];
   const normalizedRisk = normalizeRisk(risk);
   const normalizedAnomaly = normalizeAnomalyResult(anomalyResult);
 
-  const containmentFlags =
-    containment?.flags && typeof containment.flags === "object"
-      ? containment.flags
-      : {};
+  const containmentFlags = isPlainObject(containment?.flags)
+    ? containment.flags
+    : {};
 
   const mode = safeString(
     containment?.mode ||
@@ -366,8 +371,6 @@ export async function evaluateSecurityAlerts({
   const recentCriticalEvents = safeEvents.filter(
     (event) => safeString(event?.severity || "", 20).toLowerCase() === "critical"
   ).length;
-
-  /* --- ALERT CONDITIONS --- */
 
   if (mode === "lockdown") {
     pushAlert(alerts, buildAlert({
@@ -394,6 +397,24 @@ export async function evaluateSecurityAlerts({
       priority: "critical",
       escalationRequired: true,
       metadata: { threatPressure, reasonKey: "threat_pressure_critical" }
+    }));
+  }
+
+  if (normalizedRisk.degraded === true) {
+    pushAlert(alerts, buildAlert({
+      type: "security_signal_degraded",
+      severity: "warning",
+      title: "Security signal degraded",
+      message: "One or more security inputs reported degraded operation.",
+      reason: "security_signal_degraded",
+      category: "operations",
+      priority: "high",
+      escalationRequired: false,
+      metadata: {
+        riskScore,
+        finalAction,
+        reasonKey: "security_signal_degraded"
+      }
     }));
   }
 
