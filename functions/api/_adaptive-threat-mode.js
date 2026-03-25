@@ -35,6 +35,7 @@ const ALLOWED_ROUTE_SENSITIVITY = new Set([
 
 const MAX_COUNTER_VALUE = 1_000_000;
 const MAX_TIMESTAMP_FUTURE_SKEW_MS = 60_000;
+const CONTAINMENT_REFRESH_THRESHOLD_MS = 5 * 60 * 1000;
 
 /* -------------------- SAFETY -------------------- */
 
@@ -167,25 +168,25 @@ function buildPressureSummary(counters = {}) {
     trafficPressure: Math.min(
       100,
       safeInt(counters.totalSignals, 0) +
-      safeInt(counters.burstSignals, 0) * 2
+        safeInt(counters.burstSignals, 0) * 2
     ),
     criticalPressure: Math.min(
       100,
       safeInt(counters.criticalSignals, 0) * 5 +
-      safeInt(counters.blockSignals, 0) * 4 +
-      safeInt(counters.lockdownTriggers, 0) * 8
+        safeInt(counters.blockSignals, 0) * 4 +
+        safeInt(counters.lockdownTriggers, 0) * 8
     ),
     coordinationPressure: Math.min(
       100,
       safeInt(counters.coordinatedAttackSignals, 0) * 8 +
-      safeInt(counters.routePressureSignals, 0) * 3 +
-      safeInt(counters.repeatedOffenderSignals, 0) * 4
+        safeInt(counters.routePressureSignals, 0) * 3 +
+        safeInt(counters.repeatedOffenderSignals, 0) * 4
     ),
     attackPressure: Math.min(
       100,
       safeInt(counters.breachAttemptSignals, 0) * 10 +
-      safeInt(counters.exploitAttemptSignals, 0) * 8 +
-      safeInt(counters.replayAttackSignals, 0) * 5
+        safeInt(counters.exploitAttemptSignals, 0) * 8 +
+        safeInt(counters.replayAttackSignals, 0) * 5
     ),
     persistencePressure: Math.min(
       100,
@@ -314,7 +315,10 @@ function normalizeSecurityState(securityState = null) {
 
   return {
     currentRiskScore: safeInt(securityState.currentRiskScore, 0, 0, 100),
-    currentRiskLevel: safeString(securityState.currentRiskLevel || "low", 20).toLowerCase(),
+    currentRiskLevel: safeString(
+      securityState.currentRiskLevel || "low",
+      20
+    ).toLowerCase(),
     failedLoginCount: safeInt(securityState.failedLoginCount, 0),
     failedSignupCount: safeInt(securityState.failedSignupCount, 0),
     failedPasswordResetCount: safeInt(securityState.failedPasswordResetCount, 0),
@@ -342,12 +346,36 @@ function shouldReturnToNormalContainment(currentContainment) {
   );
 }
 
+function shouldRefreshContainment(currentContainment, normalizedMode, normalizedReason) {
+  const currentMode = normalizeMode(currentContainment?.mode || "normal");
+  const currentReason = normalizeReason(currentContainment?.reason || "");
+  const expiresAt = safeInt(currentContainment?.expiresAt, 0, 0, Date.now() + 24 * 60 * 60 * 1000);
+  const remainingMs = Math.max(0, expiresAt - Date.now());
+
+  if (currentMode !== normalizedMode) {
+    return true;
+  }
+
+  if (currentReason !== normalizedReason) {
+    return true;
+  }
+
+  if (remainingMs <= CONTAINMENT_REFRESH_THRESHOLD_MS) {
+    return true;
+  }
+
+  return false;
+}
+
 async function syncContainmentToMode(env = {}, mode, reason) {
   const normalizedMode = normalizeMode(mode);
   const normalizedReason = normalizeReason(reason || "adaptive_sync");
   const currentContainment = await getContainmentState(env);
 
-  if (normalizeMode(currentContainment?.mode || "normal") === normalizedMode) {
+  if (
+    normalizedMode !== "normal" &&
+    !shouldRefreshContainment(currentContainment, normalizedMode, normalizedReason)
+  ) {
     return {
       ok: true,
       state: currentContainment
@@ -462,7 +490,10 @@ async function recordAdaptiveModeChange({
 }
 
 function isBurstAttack(now, state) {
-  const elapsed = Math.max(1, now - safeInt(state.windowStartedAt, now, 0, now));
+  const elapsed = Math.max(
+    1,
+    now - safeInt(state.windowStartedAt, now, 0, now)
+  );
   const perMinute = (safeInt(state.totalSignals, 0) * 60000) / elapsed;
   return perMinute >= 20;
 }
@@ -511,14 +542,18 @@ export async function evaluateAdaptiveThreatMode({
     safeInt(risk?.events?.breachSignals, 0);
 
   const replaySignals =
-    safeInt(risk?.events?.replaySignals, 0) +
-    safeInt(threatResult?.signals?.replayPressure, 0, 0, 100) > 0
+    (
+      safeInt(risk?.events?.replaySignals, 0) +
+      safeInt(threatResult?.signals?.replayPressure, 0, 0, 100)
+    ) > 0
       ? 1
       : 0;
 
   const coordinatedSignals =
-    safeInt(threatResult?.events?.endpointSpread, 0) >= 3 ||
-    safeInt(risk?.events?.coordinatedSignals, 0) > 0
+    (
+      safeInt(threatResult?.events?.endpointSpread, 0) >= 3 ||
+      safeInt(risk?.events?.coordinatedSignals, 0) > 0
+    )
       ? 1
       : 0;
 
