@@ -6,7 +6,9 @@ import { writeSecurityLog } from "./_security-log-writer.js";
 import {
   safeString,
   buildMethodNotAllowedResponse,
-  buildBlockedResponse
+  buildBlockedResponse,
+  buildChallengeResponse,
+  buildDeniedResponse
 } from "./_api-security.js";
 
 const ROUTE = "/api/public-security-state";
@@ -234,13 +236,17 @@ export async function onRequestGet(context) {
         actor,
         message: "Public security state request blocked by orchestrator.",
         metadata: {
-          riskScore: security?.risk?.riskScore || 0
+          riskScore: security?.risk?.riskScore || 0,
+          degraded: security?.risk?.degraded === true
         }
       });
 
       return jsonResponse(
         origin,
-        buildBlockedResponse("Request blocked.", { action: "block" }),
+        buildBlockedResponse("Request blocked.", {
+          action: "block",
+          degraded: security?.risk?.degraded === true
+        }),
         403
       );
     }
@@ -254,17 +260,17 @@ export async function onRequestGet(context) {
         actor,
         message: "Public security state request challenged by orchestrator.",
         metadata: {
-          riskScore: security?.risk?.riskScore || 0
+          riskScore: security?.risk?.riskScore || 0,
+          degraded: security?.risk?.degraded === true
         }
       });
 
       return jsonResponse(
         origin,
-        {
-          success: false,
+        buildChallengeResponse("Additional verification required.", {
           action: "challenge",
-          message: "Additional verification required."
-        },
+          degraded: security?.risk?.degraded === true
+        }),
         429
       );
     }
@@ -290,11 +296,9 @@ export async function onRequestGet(context) {
 
     return jsonResponse(
       origin,
-      {
-        success: false,
-        action: "deny",
-        message: "Internal server error."
-      },
+      buildDeniedResponse("Internal server error.", {
+        action: "deny"
+      }),
       500
     );
   }
