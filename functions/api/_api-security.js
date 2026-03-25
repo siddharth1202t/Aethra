@@ -328,6 +328,15 @@ export function buildChallengeResponse(message = "Verification required.", extra
   };
 }
 
+export function buildThrottleResponse(message = "Too many requests.", extra = {}) {
+  return {
+    success: false,
+    ...extra,
+    action: "throttle",
+    message: safeString(message, 300)
+  };
+}
+
 export function buildMethodNotAllowedResponse(message = "Method not allowed.") {
   return {
     success: false,
