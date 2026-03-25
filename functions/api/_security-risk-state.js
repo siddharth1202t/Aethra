@@ -98,6 +98,7 @@ function createDefaultRiskState(actorType = "session", actorId = "") {
     lastAction: "allow",
     lastEvaluatedAt: now,
     createdAt: now,
+    degraded: false,
 
     suspiciousEventCount: 0,
     challengeCount: 0,
@@ -136,6 +137,7 @@ function normalizeRiskState(raw, actorType = "session", actorId = "") {
     lastAction: normalizeAction(state.lastAction || base.lastAction),
     lastEvaluatedAt: safeInt(state.lastEvaluatedAt, base.lastEvaluatedAt, 0, nowMax),
     createdAt: safeInt(state.createdAt, base.createdAt, 0, nowMax),
+    degraded: state.degraded === true,
 
     suspiciousEventCount: safeInt(state.suspiciousEventCount, 0),
     challengeCount: safeInt(state.challengeCount, 0),
@@ -192,44 +194,42 @@ function normalizeRiskResult(riskResult = {}) {
   const signals = result.signals && typeof result.signals === "object" ? result.signals : {};
   const events = result.events && typeof result.events === "object" ? result.events : {};
 
+  const exploitSignalTotal =
+    safeInt(result.exploitSignals, 0) +
+    safeInt(events.exploitSignals, 0) +
+    (safeInt(signals.exploitPressure, 0, 0, 100) > 0 ? 1 : 0);
+
+  const breachSignalTotal =
+    safeInt(result.breachSignals, 0) +
+    safeInt(events.breachSignals, 0) +
+    (safeInt(signals.breachPressure, 0, 0, 100) > 0 ? 1 : 0);
+
+  const replaySignalTotal =
+    safeInt(result.replaySignals, 0) +
+    safeInt(events.replaySignals, 0) +
+    (safeInt(signals.replayPressure, 0, 0, 100) > 0 ? 1 : 0);
+
+  const coordinatedSignalTotal =
+    safeInt(result.coordinatedSignals, 0) +
+    safeInt(events.coordinatedSignals, 0) +
+    (safeInt(signals.routePressure, 0, 0, 100) >= 12 ? 1 : 0);
+
   return {
     riskScore: safeInt(result.riskScore, 0, 0, 100),
     level: normalizeLevel(result.level || getLevelFromScore(result.riskScore)),
     finalAction: normalizeAction(result.finalAction || result.action || "allow"),
     reasons: normalizeReasonList(Array.isArray(result.reasons) ? result.reasons : []),
     criticalAttackLikely: result.criticalAttackLikely === true,
+    degraded: result.degraded === true,
 
     hardBlockSignals:
       safeInt(result.hardBlockSignals, 0) +
       safeInt(events.hardBlockSignals, 0),
 
-    exploitSignals:
-      safeInt(result.exploitSignals, 0) +
-      safeInt(events.exploitSignals, 0) +
-      safeInt(signals.exploitPressure, 0, 0, 100) > 0
-        ? 1
-        : 0,
-
-    breachSignals:
-      safeInt(result.breachSignals, 0) +
-      safeInt(events.breachSignals, 0) +
-      safeInt(signals.breachPressure, 0, 0, 100) > 0
-        ? 1
-        : 0,
-
-    replaySignals:
-      safeInt(result.replaySignals, 0) +
-      safeInt(events.replaySignals, 0) +
-      safeInt(signals.replayPressure, 0, 0, 100) > 0
-        ? 1
-        : 0,
-
-    coordinatedSignals:
-      safeInt(result.coordinatedSignals, 0) +
-      safeInt(events.coordinatedSignals, 0) +
-      safeInt(signals.routePressure, 0, 0, 100) >= 12
-        ? 1
-        : 0
+    exploitSignals: exploitSignalTotal > 0 ? 1 : 0,
+    breachSignals: breachSignalTotal > 0 ? 1 : 0,
+    replaySignals: replaySignalTotal > 0 ? 1 : 0,
+    coordinatedSignals: coordinatedSignalTotal > 0 ? 1 : 0
   };
 }
 
@@ -351,6 +351,7 @@ function shouldRecordRiskChange(previousState, nextState) {
   return (
     previousState.currentRiskLevel !== nextState.currentRiskLevel ||
     previousState.lastAction !== nextState.lastAction ||
+    previousState.degraded !== nextState.degraded ||
     Math.abs(previousState.currentRiskScore - nextState.currentRiskScore) >= 15
   );
 }
@@ -393,6 +394,7 @@ async function recordRiskStateEvent(env, previousState, nextState, reason = "ris
         previousRiskLevel: previousState.currentRiskLevel,
         nextRiskLevel: nextState.currentRiskLevel,
         lastAction: nextState.lastAction,
+        degraded: nextState.degraded === true,
         suspiciousEventCount: nextState.suspiciousEventCount,
         challengeCount: nextState.challengeCount,
         throttleCount: nextState.throttleCount,
@@ -487,6 +489,7 @@ export async function updateRiskState({
       currentRiskLevel: nextRiskLevel,
       lastAction: nextAction,
       lastEvaluatedAt: now,
+      degraded: normalizedRiskResult.degraded === true,
 
       suspiciousEventCount:
         currentState.suspiciousEventCount +
