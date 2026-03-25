@@ -17,6 +17,7 @@ const MAX_SESSION_ID_LENGTH = 120;
 const MAX_USER_ID_LENGTH = 120;
 const MAX_ROUTE_LENGTH = 150;
 const MAX_REASON_LENGTH = 120;
+const MAX_RETURN_REASONS = 20;
 
 /* -------------------- SAFETY -------------------- */
 
@@ -551,7 +552,8 @@ export async function trackApiAbuse({
     breachSignals: 0,
     hardBlockSignals: 0,
     endpointSpread: 0,
-    coordinatedSignals: 0
+    coordinatedSignals: 0,
+    replaySignals: 0
   };
 
   if (weightedRequests >= 20) {
@@ -755,10 +757,12 @@ export async function trackApiAbuse({
     }
   }
 
+  const safeReasons = reasons.slice(0, MAX_RETURN_REASONS);
+
   return {
     abuseScore,
     level,
-    reasons,
+    reasons: safeReasons,
     recommendedAction,
     containmentAction,
     penaltyActive: finalPenaltyActive,
