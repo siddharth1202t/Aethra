@@ -723,7 +723,7 @@ export async function setContainmentState(
         nextState.mode === "lockdown"
           ? "critical"
           : nextState.mode === "defense"
-            ? "error"
+            ? "critical"
             : nextState.mode === "normal"
               ? "info"
               : "warning",
@@ -962,6 +962,7 @@ export async function evaluateContainment(
       mergedFlags.blockActor === true ||
       mergedFlags.lockAccount === true ||
       mergedFlags.killSessions === true,
+    degraded: false,
     enforcement,
     actorContainment: actorState
       ? {
