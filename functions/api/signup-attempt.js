@@ -207,6 +207,10 @@ function debugSignupAttempt(label, data = {}) {
 export async function onRequest(context) {
   const { request, env } = context;
 
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204 });
+  }
+
   if (request.method !== "POST") {
     return json(buildMethodNotAllowedResponse(), 405);
   }
@@ -282,6 +286,7 @@ export async function onRequest(context) {
 
     const rawEmail = normalizeEmail(body.email);
     const action = safeString(body.action, 50).toLowerCase();
+    const securityRoute = `${ROUTE}:${action || "unknown"}`;
 
     if (!ALLOWED_ACTIONS.has(action)) {
       return json(
@@ -307,7 +312,7 @@ export async function onRequest(context) {
     const actor = createActorContext({
       req: request,
       body,
-      route: `${ROUTE}:${action || "unknown"}`
+      route: securityRoute
     });
 
     const security = await runSecurityOrchestrator({
@@ -315,7 +320,7 @@ export async function onRequest(context) {
       req: request,
       body,
       behavior: body,
-      route: actor.route,
+      route: securityRoute,
       context: {
         ip: actor.ip,
         sessionId: actor.sessionId,
@@ -340,7 +345,7 @@ export async function onRequest(context) {
         "SIGNUP_ATTEMPT_SECURITY",
         JSON.stringify(
           {
-            route: actor.route,
+            route: securityRoute,
             actor: {
               ip: actor?.ip || null,
               sessionId: actor?.sessionId || null,
