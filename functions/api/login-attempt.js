@@ -847,3 +847,13 @@ export async function onRequest(context) {
           error: safeString(error?.message || "Unknown error", 500)
         }
       });
+    } catch {}
+
+    return json(
+      buildDeniedResponse("Internal server error.", {
+        action: "deny"
+      }),
+      500
+    );
+  }
+}
