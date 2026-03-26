@@ -205,6 +205,24 @@ async function logLoginAttempt({
   });
 }
 
+function debugLoginAttempt(label, data = {}) {
+  try {
+    console.log(
+      "LOGIN_ATTEMPT_DEBUG",
+      JSON.stringify(
+        {
+          label,
+          ...data
+        },
+        null,
+        2
+      )
+    );
+  } catch (error) {
+    console.error("LOGIN_ATTEMPT_DEBUG_ERROR", error);
+  }
+}
+
 /* ---------------- MAIN HANDLER ---------------- */
 
 export async function onRequest(context) {
@@ -398,6 +416,7 @@ export async function onRequest(context) {
     } catch (logError) {
       console.error("LOGIN_ATTEMPT_SECURITY_LOG_ERROR", logError);
     }
+
     const finalAction = safeString(
       security?.risk?.finalAction || "allow",
       50
@@ -472,8 +491,33 @@ export async function onRequest(context) {
       getStoredRecord(redis, userRedisKey)
     ]);
 
+    debugLoginAttempt("records_loaded", {
+      action,
+      email: rawEmail,
+      ip,
+      now,
+      userRedisKey,
+      ipRedisKey,
+      userRecord: record,
+      ipRecord
+    });
+
     if (ipRecord.lockUntil > now) {
       const remainingMs = ipRecord.lockUntil - now;
+
+      debugLoginAttempt("ip_lock_enforced", {
+        action,
+        email: rawEmail,
+        ip,
+        now,
+        userRedisKey,
+        ipRedisKey,
+        userRecord: record,
+        ipRecord,
+        computed: {
+          remainingMs
+        }
+      });
 
       await logLoginAttempt({
         env,
@@ -509,6 +553,20 @@ export async function onRequest(context) {
 
     if (record.lockUntil > now && action !== "success") {
       const remainingMs = record.lockUntil - now;
+
+      debugLoginAttempt("user_lock_enforced", {
+        action,
+        email: rawEmail,
+        ip,
+        now,
+        userRedisKey,
+        ipRedisKey,
+        userRecord: record,
+        ipRecord,
+        computed: {
+          remainingMs
+        }
+      });
 
       await logLoginAttempt({
         env,
@@ -546,6 +604,21 @@ export async function onRequest(context) {
       const isLocked = record.lockUntil > now;
       const remainingMs = isLocked ? record.lockUntil - now : 0;
 
+      debugLoginAttempt("check_evaluated", {
+        action,
+        email: rawEmail,
+        ip,
+        now,
+        userRedisKey,
+        ipRedisKey,
+        userRecord: record,
+        ipRecord,
+        computed: {
+          isLocked,
+          remainingMs
+        }
+      });
+
       await logLoginAttempt({
         env,
         type: "login_attempt_checked",
@@ -578,11 +651,34 @@ export async function onRequest(context) {
     }
 
     if (action === "success") {
+      debugLoginAttempt("success_before_reset", {
+        action,
+        email: rawEmail,
+        ip,
+        now,
+        userRedisKey,
+        ipRedisKey,
+        userRecord: record,
+        ipRecord
+      });
+
       record.count = 0;
       record.lockUntil = 0;
       record.lastAttempt = now;
 
       await saveStoredRecord(redis, userRedisKey, record);
+
+      const savedSuccessRecord = await getStoredRecord(redis, userRedisKey);
+
+      debugLoginAttempt("success_after_reset", {
+        action,
+        email: rawEmail,
+        ip,
+        now,
+        userRedisKey,
+        ipRedisKey,
+        savedUserRecord: savedSuccessRecord
+      });
 
       await logLoginAttempt({
         env,
@@ -631,10 +727,37 @@ export async function onRequest(context) {
           now + getEscalatedLockMs(IP_LOCK_WINDOW_MS, ipRecord.escalationCount);
       }
 
+      debugLoginAttempt("fail_before_save", {
+        action,
+        email: rawEmail,
+        ip,
+        now,
+        userRedisKey,
+        ipRedisKey,
+        userRecord: record,
+        ipRecord
+      });
+
       await Promise.all([
         saveStoredRecord(redis, userRedisKey, record),
         saveStoredRecord(redis, ipRedisKey, ipRecord)
       ]);
+
+      const [savedIpRecord, savedUserRecord] = await Promise.all([
+        getStoredRecord(redis, ipRedisKey),
+        getStoredRecord(redis, userRedisKey)
+      ]);
+
+      debugLoginAttempt("fail_after_save", {
+        action,
+        email: rawEmail,
+        ip,
+        now,
+        userRedisKey,
+        ipRedisKey,
+        savedUserRecord,
+        savedIpRecord
+      });
 
       const isUserLocked = record.lockUntil > now;
       const isIpLocked = ipRecord.lockUntil > now;
@@ -643,6 +766,23 @@ export async function onRequest(context) {
         isUserLocked ? record.lockUntil - now : 0,
         isIpLocked ? ipRecord.lockUntil - now : 0
       );
+
+      debugLoginAttempt("fail_evaluated", {
+        action,
+        email: rawEmail,
+        ip,
+        now,
+        userRedisKey,
+        ipRedisKey,
+        userRecord: record,
+        ipRecord,
+        computed: {
+          isUserLocked,
+          isIpLocked,
+          lockType,
+          remainingMs
+        }
+      });
 
       await logLoginAttempt({
         env,
@@ -707,13 +847,3 @@ export async function onRequest(context) {
           error: safeString(error?.message || "Unknown error", 500)
         }
       });
-    } catch {}
-
-    return json(
-      buildDeniedResponse("Internal server error.", {
-        action: "deny"
-      }),
-      500
-    );
-  }
-}
