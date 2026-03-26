@@ -333,10 +333,13 @@ export async function onRequest(context) {
       );
     }
 
+    const securityRoute = `${ROUTE}:${action || "unknown"}`;
+    const isSuccessAction = action === "success";
+
     const actor = createActorContext({
       req: request,
       body,
-      route: `${ROUTE}:${action || "unknown"}`
+      route: securityRoute
     });
 
     const ip = normalizeIp(actor.ip);
@@ -347,22 +350,22 @@ export async function onRequest(context) {
       req: request,
       body,
       behavior: body,
-      route: `${ROUTE}:${action || "unknown"}`,
+      route: securityRoute,
       context: {
         ip: actor.ip,
         sessionId: actor.sessionId,
         userId: actor.userId,
         email: rawEmail
       },
-      abuseSuccess: action !== "fail",
+      abuseSuccess: isSuccessAction ? true : action !== "fail",
       containmentConfig: {
-        isWriteAction: true,
-        actionType: "auth_attempt",
-        routeSensitivity: "critical"
+        isWriteAction: !isSuccessAction,
+        actionType: isSuccessAction ? "auth_recovery" : "auth_attempt",
+        routeSensitivity: isSuccessAction ? "high" : "critical"
       },
       rateLimitConfig: {
         key: `login-attempt:${actor.actorKey}`,
-        limit: 20,
+        limit: isSuccessAction ? 40 : 20,
         windowMs: 60 * 1000
       }
     });
@@ -372,7 +375,7 @@ export async function onRequest(context) {
         "LOGIN_ATTEMPT_SECURITY",
         JSON.stringify(
           {
-            route: `${ROUTE}:${action || "unknown"}`,
+            route: securityRoute,
             actor: {
               ip: actor?.ip || null,
               sessionId: actor?.sessionId || null,
