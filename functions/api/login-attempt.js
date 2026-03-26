@@ -113,12 +113,18 @@ function createDefaultRecord(now = Date.now()) {
   };
 }
 
+function safeTimestamp(value, fallback = 0) {
+  const num = Math.floor(Number(value));
+  if (!Number.isFinite(num) || num < 0) return fallback;
+  return Math.min(num, Date.now() + 7 * 24 * 60 * 60 * 1000);
+}
+
 function normalizeRecord(raw, now = Date.now()) {
   const record = raw && typeof raw === "object" ? raw : {};
   return {
     count: safePositiveInt(record.count, 0),
-    lockUntil: safePositiveInt(record.lockUntil, 0),
-    lastAttempt: safePositiveInt(record.lastAttempt, now),
+    lockUntil: safeTimestamp(record.lockUntil, 0),
+    lastAttempt: safeTimestamp(record.lastAttempt, now),
     escalationCount: safePositiveInt(record.escalationCount, 0)
   };
 }
